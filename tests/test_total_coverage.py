@@ -1,0 +1,347 @@
+# -*- coding: utf-8 -*-
+from исходники import исходник_файла
+import pytest
+
+pytestmark = pytest.mark.slow
+
+import io
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def source(*parts):
+    return исходник_файла("/".join(parts), ROOT)
+
+
+def pipeline():
+    from core.pipeline import ValidationPipeline
+
+    return ValidationPipeline(callbacks={
+        "on_log": lambda text, kind="info": None,
+        "on_result": lambda *args: None,
+        "on_complete": lambda: None,
+    })
+
+
+def test_enrich_all_filtered_addresses_are_not_left_bare():
+    from core.parser.name_extractor import NameExtractor
+    from core.parser.ml_predictor import MLPredictor
+
+    engine = pipeline()
+    engine.name_extractor = NameExtractor()
+    engine.ml_predictor = MLPredictor()
+
+    data = {"engagement_score": 0, "engagement_grade": "Dead",
+            "provider_name": "Disposable", "provider_type": "Disposable",
+            "domain_type": "Disposable"}
+    engine._enrich_offline("john.smith@tempmail.com", data, "Trap/Disposable", False)
+
+    assert data.get("name"), "имя не извлечено"
+    assert data.get("gender"), "пол не определён"
+    assert data.get("country"), "страна не определена"
+
+
+def test_enrich_all_verdict_fields_are_preserved():
+    from core.parser.name_extractor import NameExtractor
+
+    engine = pipeline()
+    engine.name_extractor = NameExtractor()
+
+    data = {"engagement_score": 0, "engagement_grade": "Dead",
+            "provider_name": "Disposable", "provider_type": "Disposable",
+            "domain_type": "Disposable"}
+    engine._enrich_offline("john.smith@tempmail.com", data, "Trap/Disposable", False)
+
+    assert data["engagement_score"] == 0
+    assert data["engagement_grade"] == "Dead"
+    assert data["provider_name"] == "Disposable"
+    assert data["domain_type"] == "Disposable"
+
+
+def test_enrich_all_is_wired_into_both_early_exits():
+    code = source("core", "pipeline.py")
+    assert code.count("_enrich_offline(") >= 3, \
+        "обогащение подключено не ко всем ранним выходам"
+    assert '_enrich_offline(email, data, "Trap/Disposable"' in code
+
+
+def test_enrich_cheap_costs_no_network():
+    import inspect
+
+    from core.pipeline import ValidationPipeline
+
+    body = inspect.getsource(ValidationPipeline._enrich_and_score)
+    for call in ("has_gravatar(email)", "_get_domain_age_days(domain)",
+                 "_check_http_alive(domain)"):
+        position = body.index(call)
+        guard = body.rfind('status_display in ("Valid", "Risky", "Role-based")',
+                           0, position)
+        assert guard != -1, "сетевой вызов %s не ограничен статусом" % call
+
+
+def test_enrich_cheap_never_breaks_the_verdict():
+    engine = pipeline()
+
+    class Exploding:
+        def extract_name(self, *args, **kwargs):
+            raise RuntimeError("подстава")
+
+    engine.name_extractor = Exploding()
+    data = {"engagement_score": 0}
+    engine._enrich_offline("a@tempmail.com", data, "Trap/Disposable", False)
+    assert data["engagement_score"] == 0
+
+
+@pytest.mark.parametrize("status", [
+    "Valid", "Invalid/Bounce", "Risky", "Unknown", "Role-based",
+    "Trap/Disposable", "Unverified",
+])
+def test_required_fields_present_for_every_status(status):
+    from ui.webapp import ValidatorApi
+
+    api = ValidatorApi()
+    api._on_result("ivan@example.com", status, "причина", "mx",
+                   {"engagement_score": 42, "validated_at": "2026-08-30 10:00",
+                    "provider_name": "Example"})
+    rows = api.page({"groups": ["valid", "invalid", "spam", "unknown"]})["rows"]
+    assert rows, "адрес со статусом %s пропал из выдачи" % status
+    row = rows[0]
+    for field in ("email", "status", "group", "reason", "score", "when"):
+        assert row.get(field) not in (None, ""), (status, field)
+
+
+def test_required_fields_validated_at_is_set_before_any_exit():
+    code = source("core", "pipeline.py")
+    stamp = code.index('data["validated_at"]')
+    first_exit = code.index('"Disposable Email Domain"')
+    assert stamp < first_exit, "дата ставится позже первого выхода"
+
+
+GIANTS = ["gmail.com", "yahoo.com", "aol.com", "outlook.com", "icloud.com"]
+
+
+@pytest.mark.parametrize("domain", GIANTS)
+def test_giants_have_local_part_rules(domain):
+    from core.local_rules import _RULES
+
+    assert domain in _RULES, "нет правил имени для %s" % domain
+
+
+def test_giants_every_known_domain_has_rules():
+    from core.local_rules import _RULES
+    from core.mail_constants import AOL_DOMAINS, MICROSOFT_DOMAINS, YAHOO_DOMAINS
+
+    have = set(_RULES)
+    for label, domains in (("AOL", AOL_DOMAINS), ("Yahoo", YAHOO_DOMAINS),
+                           ("Microsoft", MICROSOFT_DOMAINS)):
+        missing = sorted(set(domains) - have)
+        assert not missing, "%s: домены без правил имени — %s" % (label, missing)
+
+
+def test_giants_aol_rules_are_real_not_decorative():
+    from core.local_rules import IMPOSSIBLE, OK, UNLIKELY, check_local_part
+
+    assert check_local_part("a" * 40 + "@aol.com")[0] == UNLIKELY
+    assert check_local_part("john.smith@aol.com")[0] == OK
+    assert check_local_part("7john@aol.com")[0] not in (IMPOSSIBLE,)
+
+
+@pytest.mark.parametrize("domain", GIANTS)
+def test_giants_are_classified(domain):
+    from core.provider import classify_domain
+
+    name, kind = classify_domain("someone@" + domain)
+    assert name and kind, domain
+
+
+@pytest.mark.parametrize("domain", GIANTS)
+def test_giants_get_the_tarpit_control(domain):
+    from core.network import NetworkValidator
+
+    check = NetworkValidator(timeout=2, proxy_dns=False)
+    assert check._time_to_recheck(domain) is True, domain
+
+
+def test_giants_requirements_are_documented_where_they_apply():
+    code = source("core", "proxy_profile.py")
+    assert "PTR" in code
+    for label in ("Yahoo", "Outlook", "iCloud"):
+        assert label in code, label
+
+
+def test_giants_skip_list_is_explained_not_silent():
+    code = source("core", "network.py")
+    position = code.index("NEVER_CATCHALL = frozenset(")
+    block = code[position - 500:position + 900]
+    assert "catch-all" in block.lower()
+    assert "тарпит" in block.lower(), "не сказано, чем на самом деле является приём"
+    assert "skip_catchall = self._is_never_catchall(domain)" in code
+
+
+def test_survives_garbage_in_every_public_check():
+    from core.cleaner import normalize_for_dedup
+    from core.disposable import is_disposable
+    from core.email_syntax import validate_email_syntax
+    from core.heuristics import is_role_based
+    from core.local_rules import check_local_part
+    from core.provider import classify_domain
+    from core.smtp_codes import classify_smtp_response
+
+    junk = [None, 123, [], {}, b"\xff\xfe", "\x00" * 40, " " * 500, object(),
+            "a" * 5000, "@@@", "\n\r\t"]
+    checks = [validate_email_syntax, is_disposable, is_role_based,
+              normalize_for_dedup, check_local_part, classify_domain]
+    for value in junk:
+        for check in checks:
+            try:
+                check(value)
+            except (AttributeError, TypeError, ValueError, KeyError, IndexError) as exc:
+                pytest.fail("%s упал на %r: %s" % (check.__name__, value, exc))
+        classify_smtp_response(value, value)
+
+
+def test_survives_a_worker_crash_without_losing_the_address():
+    code = source("core", "pipeline.py")
+    assert 'self._emit(email, "Unknown", f"Processing error:' in code
+    assert "Without this the whole worker thread would die" in code
+
+
+def test_survives_counts_every_address():
+    code = source("core", "pipeline.py")
+    assert "ПОТЕРЯНО АДРЕСОВ" in code
+    assert code.count("self.callbacks['on_result'](") == 1, \
+        "результат уходит мимо счётчика"
+
+
+def test_safety_warns_before_running_without_proxies():
+    from core.proxy_profile import readiness_report
+
+    report = readiness_report({})
+    assert report["ready"] is False
+    assert "домашнего" in report["verdict"]
+
+
+def test_safety_limits_sessions_per_mail_host():
+    code = source("core", "proxy_pool.py")
+    assert "_get_mx_semaphore" in code
+    assert "Semaphore" in code
+
+
+def test_safety_drops_a_proxy_after_repeated_failures():
+    from core.mail_constants import PROXY_MAX_CONSECUTIVE_FAILS
+
+    assert 1 <= PROXY_MAX_CONSECUTIVE_FAILS <= 10
+
+
+def test_safety_rate_limit_answers_are_retried_not_hammered():
+    from core.pipeline import _is_transient_failure
+
+    assert _is_transient_failure("unknown", "rate limit") is True
+    assert _is_transient_failure("unknown", "421 Service Busy (Rate Limit)") is True
+
+
+def test_vps_builds_from_source_not_from_a_missing_package():
+    from tools.make_vps_proxy import build_script
+
+    script = build_script("u", "p")
+    assert "apt-get install -y -qq 3proxy" not in script
+    assert "make -f Makefile.Linux" in script
+    assert "github.com/3proxy/3proxy/archive" in script
+
+
+def test_vps_checks_root_and_distro():
+    from tools.make_vps_proxy import build_script
+
+    script = build_script("u", "p")
+    assert 'id -u' in script
+    assert "command -v apt-get" in script
+
+
+def test_vps_verifies_the_service_actually_started():
+    from tools.make_vps_proxy import build_script
+
+    assert "systemctl is-active --quiet 3proxy" in build_script("u", "p")
+
+
+def test_vps_checks_port_25_and_ptr():
+    from tools.make_vps_proxy import build_script
+
+    script = build_script("u", "p")
+    assert "gmail-smtp-in.l.google.com 25" in script
+    assert "587" in script and "465" in script
+    assert "dig +short -x" in script
+    assert "5.7.25" in script
+
+
+def test_vps_allows_enough_connections_for_the_validator():
+    from tools.make_vps_proxy import MAX_CONNECTIONS, build_script
+
+    assert MAX_CONNECTIONS >= 300
+    assert "maxconn %d" % MAX_CONNECTIONS in build_script("u", "p")
+
+
+def test_vpssafety_opens_ssh_before_enabling_the_firewall():
+    from tools.make_vps_proxy import build_script
+
+    script = build_script("u", "p", ssh_port=2222)
+    ssh_rule = script.index('ufw allow "$SSH_PORT"/tcp')
+    enable = script.index("ufw --force enable")
+    assert ssh_rule < enable, "ufw включается раньше, чем открыт SSH"
+    assert "SSH_PORT=2222" in script
+
+
+def test_vpssafety_password_file_is_not_world_readable():
+    from tools.make_vps_proxy import build_script
+
+    script = build_script("u", "p")
+    assert "chmod 600 /etc/3proxy/3proxy.cfg" in script
+
+
+def _рабочий_bash():
+    import shutil
+    import subprocess
+
+    кандидаты = [shutil.which("bash")]
+    if sys.platform == "win32":
+        for корень in (os.environ.get("ProgramFiles") or r"C:\Program Files",
+                       os.environ.get("ProgramFiles(x86)") or ""):
+            if корень:
+                кандидаты += [os.path.join(корень, "Git", "usr", "bin", "bash.exe"),
+                              os.path.join(корень, "Git", "bin", "bash.exe")]
+    for путь in кандидаты:
+        if not путь or not os.path.isfile(путь):
+            continue
+        try:
+            done = subprocess.run([путь, "-c", "exit 0"], capture_output=True, timeout=60)
+        except Exception:
+            continue
+        if done.returncode == 0:
+            return путь
+    return None
+
+
+def test_vpssafety_script_is_valid_bash():
+    import subprocess
+    import tempfile
+
+    from tools.make_vps_proxy import build_script
+
+    bash = _рабочий_bash()
+    if not bash:
+        pytest.skip("рабочего bash в этой системе нет")
+
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False,
+                                     encoding="utf-8", newline="\n") as handle:
+        handle.write(build_script("validator", "S3cret", 1080, 2222))
+        path = handle.name
+    try:
+        done = subprocess.run([bash, "-n", path], capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+    finally:
+        os.unlink(path)

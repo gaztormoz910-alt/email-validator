@@ -1,0 +1,627 @@
+name: build-installer
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SOURCE_DATE_EPOCH: "315532800"
+  TZ: UTC
+
+jobs:
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m spacy download en_core_web_sm
+
+      - name: Определить версию
+        id: ver
+        shell: pwsh
+        run: |
+          $v = if ('${{ github.ref_type }}' -eq 'tag') { '${{ github.ref_name }}' -replace '^v', '' } else { '0.0.0' }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Записать версию в единственный источник
+        run: python tools/set_version.py ${{ steps.ver.outputs.version }}
+
+      - name: Сверить иконку с мастером
+        shell: bash
+        run: |
+          set +e
+          OUT=$(python tools/check_icon.py 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Иконка::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
+          fi
+
+      - name: Собрать .exe
+        run: python -m PyInstaller --noconfirm --clean --log-level WARN MailFact.spec
+
+      - name: Санитизировать PE-таймстемпы бинарника
+        shell: pwsh
+        run: |
+          python tools/sanitize_pe.py dist/MailFact/MailFact.exe
+          if ($LASTEXITCODE -ne 0) { throw "sanitize_pe dist/MailFact failed" }
+          New-Item -ItemType Directory -Path installer -Force | Out-Null
+          Copy-Item dist/MailFact-standalone.exe installer/MailFact.exe
+          python tools/sanitize_pe.py installer/MailFact.exe
+          if ($LASTEXITCODE -ne 0) { throw "sanitize_pe installer/MailFact.exe failed" }
+
+      - name: Проверить зависимости внутри сборки
+        run: python tools/check_deps.py --dist dist/MailFact
+
+      - name: Настоящий прогон внутри собранной программы
+        shell: pwsh
+        env:
+          MAILFACT_DATA_DIR: ${{ runner.temp }}/mf_ci_data
+        run: |
+          foreach ($exe in @("dist\MailFact\MailFact.exe", "installer\MailFact.exe")) {
+            Remove-Item "selftest.log" -Force -ErrorAction SilentlyContinue
+            $p = Start-Process -FilePath $exe -ArgumentList "--selftest","selftest.log" -PassThru -Wait
+            if (Test-Path "selftest.log") { Get-Content "selftest.log" }
+            if ($p.ExitCode -ne 0) { throw "$exe selftest вернул $($p.ExitCode)" }
+          }
+
+      - name: Проверить диалог выбора файла
+        shell: pwsh
+        env:
+          MAILFACT_DATA_DIR: ${{ runner.temp }}/mf_ci_data
+        run: |
+          foreach ($exe in @("dist\MailFact\MailFact.exe", "installer\MailFact.exe")) {
+            Remove-Item "dialog.log" -Force -ErrorAction SilentlyContinue
+            $p = Start-Process -FilePath $exe -ArgumentList "--selftest-dialog","dialog.log" -PassThru -Wait
+            if (Test-Path "dialog.log") { Get-Content "dialog.log" }
+            if ($p.ExitCode -ne 0) {
+              $tail = if (Test-Path "dialog.log") { (Get-Content "dialog.log" -Tail 10) -join '~' } else { 'журнала нет' }
+              Write-Host "::error title=Диалог выбора файла::$tail"
+              throw "$exe проба диалога вернула $($p.ExitCode)"
+            }
+            $text = if (Test-Path "dialog.log") { Get-Content "dialog.log" -Raw -Encoding utf8 } else { "" }
+            foreach ($need in @('DIALOG_OK', 'исходные: __stdout__=True __stderr__=True', 'собран: True')) {
+              if (-not $text.Contains($need)) {
+                Write-Host "::error title=Диалог выбора файла::в журнале нет строки «$need»"
+                throw "$exe проба проверила не то: в журнале нет «$need»"
+              }
+            }
+          }
+
+      - name: Запустить окно
+        shell: pwsh
+        env:
+          MAILFACT_DATA_DIR: ${{ runner.temp }}/mf_ci_data
+        run: |
+          $p = Start-Process -FilePath "dist\MailFact\MailFact.exe" -PassThru
+          Start-Sleep -Seconds 30
+          $p.Refresh()
+          if ($p.HasExited) { throw "программа завершилась сама, код $($p.ExitCode)" }
+          $title = $p.MainWindowTitle
+          Stop-Process -Id $p.Id -Force
+          Write-Host "заголовок окна: '$title'"
+          if ($title -notlike 'MailFact*') { throw "неожиданный заголовок окна: '$title'" }
+
+      - name: Очистить следы прогона и нормализовать файловые времена сборки
+        shell: pwsh
+        run: |
+          if (Test-Path "dist\MailFact\data") { Remove-Item "dist\MailFact\data" -Recurse -Force }
+          python tools/sanitize_pe.py --dir-times dist/MailFact
+          if ($LASTEXITCODE -ne 0) { throw "sanitize_pe --dir-times failed" }
+          python tools/sanitize_pe.py --verify-times dist/MailFact
+          if ($LASTEXITCODE -ne 0) { throw "sanitize_pe --verify-times failed" }
+
+      - name: Собрать установщик
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Find-ISCC {
+            foreach ($c in @(
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+              "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+              "$env:RUNNER_TEMP\InnoSetup6\ISCC.exe")) {
+              if (Test-Path $c) { return $c }
+            }
+            return $null
+          }
+          $iscc = Find-ISCC
+          if (-not $iscc) {
+            $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
+            $sha = "9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732"
+            $exe = Join-Path $env:RUNNER_TEMP "innosetup-6.7.3.exe"
+            $dir = Join-Path $env:RUNNER_TEMP "InnoSetup6"
+            Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
+            $got = (Get-FileHash $exe -Algorithm SHA256).Hash
+            if ($got -ne $sha) { throw "Inno Setup SHA256 mismatch: $got" }
+            $p = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList `
+              "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-","/NOICONS","/CURRENTUSER","/DIR=$dir"
+            if ($p.ExitCode -ne 0) { throw "Inno Setup install exited with code $($p.ExitCode)" }
+            $iscc = Find-ISCC
+          }
+          if (-not $iscc) { throw "ISCC.exe не найден" }
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" MailFact.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+      - name: Санитизировать PE-таймстемпы установщика
+        run: python tools/sanitize_pe.py installer/MailFact-setup.exe
+
+      - name: Собрать чистый portable zip
+        run: python tools/make_clean_zip.py dist/MailFact installer/MailFact-windows-x86_64-portable.zip
+
+      - name: Проверить, что в сборке нет следов машины сборки
+        shell: bash
+        env:
+          MAILFACT_PRIVATE_MARKERS: ${{ secrets.MAILFACT_PRIVATE_MARKERS }}
+        run: |
+          set +e
+          mkdir -p dist_standalone
+          cp installer/MailFact.exe dist_standalone/MailFact.exe
+          OUT=$(python tools/check_privacy.py --dist dist/MailFact --installer installer/MailFact-setup.exe 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Следы машины сборки::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
+          fi
+          OUT2=$(python tools/check_privacy.py --dist dist_standalone 2>&1); RC2=$?
+          echo "$OUT2"
+          rm -rf dist_standalone
+          if [ $RC2 -ne 0 ]; then
+            echo "::error title=Следы машины сборки standalone::$(echo "$OUT2" | tail -12 | paste -sd '~' -)"
+            exit $RC2
+          fi
+
+      - name: Проверить установщик
+        shell: pwsh
+        run: |
+          $f = "installer\MailFact-setup.exe"
+          if (-not (Test-Path $f)) { throw "нет файла $f" }
+          $mb = [math]::Round((Get-Item $f).Length / 1MB, 1)
+          Write-Host "установщик: $mb MB"
+          if ($mb -lt 60) { throw "установщик подозрительно мал: $mb MB" }
+
+      - name: Проверить, что установщик умеет доставлять WebView2
+        shell: pwsh
+        run: |
+          $log = "$env:TEMP\wv2.log"
+          $p = Start-Process -FilePath "installer\MailFact-setup.exe" `
+               -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART",
+                             "/FORCEWEBVIEW2=1","/LOG=$log",
+                             "/DIR=$env:TEMP\wv2check" -PassThru -Wait
+          if (-not (Test-Path $log)) { throw "установщик не оставил журнала" }
+          $text = Get-Content $log -Raw
+          if ($text -notmatch 'Качаю загрузчик WebView2') { throw "ветка доставки WebView2 не выполнялась" }
+          if ($text -notmatch 'Загрузчик WebView2 вернул код') { throw "загрузчик WebView2 не запускался" }
+          Select-String -Path $log -Pattern 'WebView2' | ForEach-Object { $_.Line }
+          if ($p.ExitCode -ne 0) { throw "установка вернула $($p.ExitCode)" }
+
+      - name: Проверить установленную копию
+        run: python tools/check_installed.py --setup "installer\MailFact-setup.exe" --keep
+
+      - uses: actions/upload-artifact@v7
+        with:
+          if-no-files-found: error
+          name: windows
+          path: |
+            installer/MailFact-setup.exe
+            installer/MailFact.exe
+            installer/MailFact-windows-x86_64-portable.zip
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m spacy download en_core_web_sm
+
+      - name: Определить версию
+        id: ver
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            V="${{ github.ref_name }}"; V="${V#v}"
+          else
+            V="0.0.0"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Записать версию в единственный источник
+        run: python tools/set_version.py ${{ steps.ver.outputs.version }}
+
+      - name: Сверить иконку с мастером
+        shell: bash
+        run: |
+          set +e
+          OUT=$(python tools/check_icon.py 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Иконка::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
+          fi
+
+      - name: Собрать .app
+        run: python -m PyInstaller --noconfirm --clean --log-level WARN MailFact.spec
+
+      - name: Проверить, что в сборке нет следов машины сборки
+        env:
+          MAILFACT_PRIVATE_MARKERS: ${{ secrets.MAILFACT_PRIVATE_MARKERS }}
+        run: |
+          set +e
+          OUT=$(python tools/check_privacy.py --dist dist/MailFact.app 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Следы машины сборки macOS::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
+          fi
+
+      - name: Настоящий прогон внутри собранной программы
+        env:
+          MAILFACT_DATA_DIR: ${{ runner.temp }}/mf_ci_data
+        run: |
+          set +e
+          ./dist/MailFact.app/Contents/MacOS/MailFact --selftest selftest.log
+          RC=$?
+          echo "--- журнал прогона ---"
+          cat selftest.log 2>/dev/null || echo "журнал не создан"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Прогон macOS::$(tail -12 selftest.log 2>/dev/null | paste -sd '~' - || echo 'журнала нет')"
+          fi
+          exit $RC
+
+      - name: Поднять окно
+        env:
+          MAILFACT_DATA_DIR: ${{ runner.temp }}/mf_ci_data
+        run: |
+          ./dist/MailFact.app/Contents/MacOS/MailFact &
+          APPPID=$!
+          sleep 40
+          if ! kill -0 $APPPID 2>/dev/null; then
+            wait $APPPID; echo "программа завершилась сама, код $?"; exit 1
+          fi
+          kill $APPPID 2>/dev/null || true
+          echo "программа прожила 40 секунд с поднятым интерфейсом"
+
+      - name: Собрать .dmg
+        run: |
+          rm -rf dist/MailFact.app/Contents/MacOS/data
+          find dist/MailFact.app -name '.DS_Store' -delete
+          find dist/MailFact.app -exec touch -h -t 198001010000.00 {} +
+          hdiutil create -volname "MailFact" -srcfolder "dist/MailFact.app" \
+            -ov -format UDZO "MailFact-macos.dmg"
+          SIZE_MB=$(du -m MailFact-macos.dmg | cut -f1)
+          echo "dmg: ${SIZE_MB} MB"
+          if [ "$SIZE_MB" -lt 60 ]; then echo "dmg подозрительно мал"; exit 1; fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          if-no-files-found: error
+          name: macos
+          path: MailFact-macos.dmg
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Системные библиотеки для движка окна
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb xdotool
+          sudo apt-get install -y -qq libegl1 libgl1 libopengl0
+          sudo apt-get install -y -qq libxkbcommon-x11-0 libnss3 libdbus-1-3
+          sudo apt-get install -y -qq libxcb-cursor0 libxcb-icccm4 libxcb-image0
+          sudo apt-get install -y -qq libxcb-keysyms1 libxcb-randr0 libxcb-shape0
+          sudo apt-get install -y -qq libxcb-render-util0 libxcb-xinerama0
+          sudo apt-get install -y -qq libxcomposite1 libxdamage1 libxrandr2
+          sudo apt-get install -y -qq libxtst6 libxi6 libfontconfig1 libgbm1
+          sudo apt-get install -y -qq libasound2t64 || sudo apt-get install -y -qq libasound2
+
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m spacy download en_core_web_sm
+
+      - name: Проверить, что движок окна вообще встал
+        run: |
+          set +e
+          OUT=$(python -c "import PyQt6, qtpy; from PyQt6 import QtWebEngineWidgets as W; print('Qt есть:', PyQt6.__file__); print('WebEngine есть:', W.__name__)" 2>&1); RC=$?
+          echo "$OUT"
+          pip list 2>/dev/null | grep -i -E "pyqt|qtpy" || echo "в списке пакетов Qt не видно"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Движок окна Linux::$(echo "$OUT" | tail -8 | paste -sd '~' -)"
+            exit $RC
+          fi
+
+      - name: Определить версию
+        id: ver
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            V="${{ github.ref_name }}"; V="${V#v}"
+          else
+            V="0.0.0"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Записать версию в единственный источник
+        run: python tools/set_version.py ${{ steps.ver.outputs.version }}
+
+      - name: Сверить иконку с мастером
+        shell: bash
+        run: |
+          set +e
+          OUT=$(python tools/check_icon.py 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Иконка::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
+          fi
+
+      - name: Собрать программу
+        run: |
+          set +e
+          OUT=$(python -m PyInstaller --noconfirm --clean --log-level WARN MailFact.spec 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Сборка Linux::$(echo "$OUT" | tail -15 | paste -sd '~' -)"
+            exit $RC
+          fi
+
+      - name: Проверить зависимости внутри сборки
+        run: |
+          set +e
+          OUT=$(python tools/check_deps.py --dist dist/MailFact 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Зависимости Linux::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
+          fi
+
+      - name: Проверить, что в сборке нет следов машины сборки
+        env:
+          MAILFACT_PRIVATE_MARKERS: ${{ secrets.MAILFACT_PRIVATE_MARKERS }}
+        run: |
+          set +e
+          OUT=$(python tools/check_privacy.py --dist dist/MailFact 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Следы машины сборки Linux::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
+          fi
+
+      - name: Настоящий прогон внутри собранной программы
+        env:
+          MAILFACT_DATA_DIR: ${{ runner.temp }}/mf_ci_data
+        run: |
+          set +e
+          ./dist/MailFact/MailFact --selftest selftest.log
+          RC=$?
+          echo "--- журнал прогона ---"
+          cat selftest.log 2>/dev/null || echo "журнал не создан"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Прогон Linux::$(tail -12 selftest.log 2>/dev/null | paste -sd '~' - || echo 'журнала нет')"
+          fi
+          exit $RC
+
+      - name: Открыть окно под виртуальным экраном
+        env:
+          QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox --disable-gpu --disable-dev-shm-usage"
+          QT_QPA_PLATFORM: xcb
+          MAILFACT_DATA_DIR: ${{ runner.temp }}/mf_ci_data
+        run: |
+          xvfb-run -a --server-args="-screen 0 1440x900x24" bash -c '
+            ./dist/MailFact/MailFact > app.log 2>&1 &
+            APPPID=$!
+            sleep 50
+            if ! kill -0 $APPPID 2>/dev/null; then
+              echo "--- вывод программы ---"
+              cat app.log 2>/dev/null || echo "вывода нет"
+              echo "::error title=Окно Linux::умерла сама: $(tail -15 app.log 2>/dev/null | paste -sd '~' - || echo пусто)"
+              exit 1
+            fi
+            echo "--- все окна процесса ---"
+            for W in $(xdotool search --pid $APPPID 2>/dev/null); do
+              echo "  $W [$(xdotool getwindowname $W 2>/dev/null)]"
+            done
+            TITLE=$(xdotool search --pid $APPPID --onlyvisible --name "." getwindowname %@ 2>/dev/null | head -1)
+            kill $APPPID 2>/dev/null || true
+            echo "заголовок окна: [$TITLE]"
+            case "$TITLE" in
+              MailFact*) echo "окно открылось"; exit 0 ;;
+              "")        echo "::error title=Окно Linux::окна с заголовком не нашлось, движок $PYWEBVIEW_GUI"
+                         exit 1 ;;
+              *)         echo "::error title=Окно Linux::неожиданный заголовок [$TITLE]"
+                         exit 1 ;;
+            esac
+          '
+
+      - name: Собрать архив с ярлыком
+        run: |
+          cp assets/MailFact.png dist/MailFact/MailFact.png
+          cat > dist/MailFact/MailFact.desktop <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=MailFact
+          Comment=Проверка существования почтовых ящиков
+          Exec=MailFact
+          Icon=MailFact
+          Terminal=false
+          Categories=Network;Email;
+          DESKTOP
+          cat > dist/MailFact/УСТАНОВКА.txt <<'README'
+          MailFact для Linux
+          ==================
+
+          Ставить ничего не нужно: программа лежит целиком в этой папке.
+
+              ./MailFact
+
+          ЧЕГО МОЖЕТ НЕ ХВАТИТЬ. Окно рисуется движком Qt WebEngine, он
+          лежит внутри архива. Но опирается он на системные графические
+          библиотеки, которые внутрь класть нельзя: они обязаны
+          соответствовать драйверу видеокарты конкретной машины. На любом
+          Linux с рабочим столом они уже стоят. Если окно не открылось:
+
+              sudo apt install libegl1 libgl1 libxkbcommon-x11-0 libnss3
+              sudo apt install libxcb-cursor0 libdbus-1-3 libfontconfig1
+
+          (Debian и Ubuntu; в Fedora те же имена через dnf)
+
+          Чтобы появился ярлык в меню приложений:
+
+              mkdir -p ~/.local/share/applications ~/.local/share/icons
+              cp MailFact.png ~/.local/share/icons/
+              sed "s|Exec=MailFact|Exec=$PWD/MailFact|" MailFact.desktop \
+                  > ~/.local/share/applications/MailFact.desktop
+
+          Данные (кэш проверок, настройки, списки доменов) программа пишет
+          в папку data рядом с собой. Удалить программу — удалить эту папку.
+          README
+          rm -rf dist/MailFact/data
+          python tools/sanitize_pe.py --dir-times dist/MailFact
+          tar --sort=name --mtime=@315532800 --owner=0 --group=0 --numeric-owner \
+              -cf - -C dist MailFact | gzip -9n > MailFact-linux-x86_64.tar.gz
+          SIZE_MB=$(du -m MailFact-linux-x86_64.tar.gz | cut -f1)
+          echo "архив: ${SIZE_MB} MB"
+          if [ "$SIZE_MB" -lt 60 ]; then echo "архив подозрительно мал"; exit 1; fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          if-no-files-found: error
+          name: linux
+          path: MailFact-linux-x86_64.tar.gz
+
+  release:
+    needs: [windows, macos, linux]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: артефакты
+
+      - name: Что собралось
+        run: ls -lR артефакты
+
+      - name: Определить версию
+        id: ver
+        run: |
+          V="${{ github.ref_name }}"; V="${V#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          name: MailFact ${{ steps.ver.outputs.version }}
+          fail_on_unmatched_files: true
+          make_latest: true
+          files: |
+            артефакты/windows/MailFact.exe
+            артефакты/windows/MailFact-setup.exe
+            артефакты/windows/MailFact-windows-x86_64-portable.zip
+            артефакты/macos/MailFact-macos.dmg
+            артефакты/linux/MailFact-linux-x86_64.tar.gz
+          body: |
+            Проверка существования почтовых ящиков. Python и все библиотеки
+            внутри — ставить отдельно ничего не нужно.
+
+            | Система | Файл | Как ставить |
+            |---|---|---|
+            | Windows 10/11, 64-bit (Один exe) | `MailFact.exe` | скачать и запустить напрямую (без установки и архивов) |
+            | Windows 10/11, 64-bit (Установщик) | `MailFact-setup.exe` | запустить, установка идёт в профиль пользователя без прав администратора |
+            | Windows 10/11, 64-bit (Портативный) | `MailFact-windows-x86_64-portable.zip` | распаковать и запустить `MailFact.exe` (без установки) |
+            | macOS 13+ (Apple Silicon) | `MailFact-macos.dmg` | открыть, перетащить MailFact в «Программы» |
+            | Linux x86_64 | `MailFact-linux-x86_64.tar.gz` | распаковать, запустить `./MailFact`; внутри лежит `УСТАНОВКА.txt` |
+
+            **Про предупреждения системы.** Цифровой подписи у сборок нет —
+            она платная. Windows покажет синий экран «Windows защитила ваш
+            компьютер»: **Подробнее** -> **Выполнить в любом случае**. macOS
+            скажет «не удаётся проверить разработчика»: правая кнопка по
+            программе -> **Открыть**.
+
+            **Windows.** Установщик сам доставит компонент Microsoft WebView2,
+            если его нет в системе — на Windows 11 он есть всегда, на
+            Windows 10 не обязательно.
+
+            **Чего не будет вне Windows.** Два движка сбора адресов из вкладки
+            «Сбор адресов» — «AOL (Tor)» и «Yahoo (Tor)» — работают только на
+            Windows: Tor лежит в проекте бинарниками под неё. Остальные движки
+            и вся проверка почты работают везде одинаково.
+
+      - name: Delete previous releases
+        run: |
+          python3 - << 'PY'
+          import json, os, urllib.request
+          token = os.environ["GITHUB_TOKEN"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          keep_tag = os.environ["KEEP_TAG"]
+          headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+          page = 1
+          keep_id = None
+          while True:
+              req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases?per_page=100&page={page}", headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  rels = json.loads(resp.read().decode("utf-8"))
+              if not rels:
+                  break
+              for r in rels:
+                  if r.get("tag_name") == keep_tag:
+                      keep_id = r["id"]
+                  else:
+                      dreq = urllib.request.Request(
+                          f"https://api.github.com/repos/{repo}/releases/{r['id']}",
+                          headers=headers,
+                          method="DELETE",
+                      )
+                      with urllib.request.urlopen(dreq):
+                          print("Deleted old release", r.get("id"), r.get("tag_name"))
+              if len(rels) < 100:
+                  break
+              page += 1
+          if keep_id is not None:
+              preq = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/releases/{keep_id}",
+                  data=json.dumps({"make_latest": "true", "draft": False}).encode("utf-8"),
+                  headers={**headers, "Content-Type": "application/json"},
+                  method="PATCH",
+              )
+              with urllib.request.urlopen(preq):
+                  print("Ensured make_latest=true on release", keep_id, keep_tag)
+          PY
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          KEEP_TAG: ${{ github.ref_name }}
+
+      - name: Спрятать прежние релизы в черновики
+        run: python3 tools/hide_old_releases.py --keep "${{ github.ref_name }}" --apply
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}

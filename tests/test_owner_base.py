@@ -1,0 +1,119 @@
+# -*- coding: utf-8 -*-
+import os
+
+import pytest
+
+from core.cleaner import EmailCleaner, normalize_for_dedup, strip_wrapping_junk
+from core.email_syntax import validate_email_syntax
+from core.local_rules import IMPOSSIBLE, check_local_part
+
+DEFAULT_BASE = ""
+
+
+def _base_path():
+    return os.environ.get("VALIDATOR_OWNER_BASE") or DEFAULT_BASE
+
+
+needs_base = pytest.mark.skipif(
+    not os.path.exists(_base_path()),
+    reason="базы владельца нет на этой машине — задай VALIDATOR_OWNER_BASE")
+
+
+@pytest.fixture(scope="module")
+def rows():
+    with open(_base_path(), "r", encoding="utf-8-sig") as handle:
+        lines = [line.strip() for line in handle if line.strip()]
+    if lines and "@" not in lines[0]:
+        lines = lines[1:]
+    assert lines, "файл базы пуст"
+    return lines
+
+
+def _domain_of(address):
+    return address.rsplit("@", 1)[1] if "@" in address else ""
+
+
+@needs_base
+def test_cleaner_never_moves_address_to_another_domain(rows):
+    cleaner = EmailCleaner()
+    moved = []
+    for raw in rows:
+        unwrapped = strip_wrapping_junk(raw)
+        if "@" not in unwrapped:
+            continue
+        cleaned = cleaner.clean_email(raw)
+        if not cleaned:
+            continue
+        before, after = _domain_of(unwrapped), _domain_of(cleaned)
+        if before != after:
+            moved.append("%s: %s -> %s" % (raw, before, after))
+
+    assert not moved, (
+        "очистка увела %d адресов на другой домен — вердикт будет про чужой "
+        "ящик:\n  %s" % (len(moved), "\n  ".join(moved[:10])))
+
+
+@needs_base
+def test_no_address_is_lost_by_cleaning(rows):
+    cleaner = EmailCleaner()
+    dropped = [raw for raw in rows if not cleaner.clean_email(raw)]
+    assert not dropped, (
+        "очистка выбросила %d адресов, в таблицу они не попадут вовсе:\n  %s"
+        % (len(dropped), "\n  ".join(repr(d) for d in dropped[:10])))
+
+
+@needs_base
+def test_no_offline_verdict_without_proof(rows):
+    cleaner = EmailCleaner()
+    condemned = []
+    for raw in rows:
+        cleaned = cleaner.clean_email(raw)
+        if not cleaned:
+            continue
+        if not validate_email_syntax(cleaned):
+            condemned.append("%s: синтаксис" % cleaned)
+            continue
+        verdict, why = check_local_part(cleaned)
+        if verdict == IMPOSSIBLE:
+            condemned.append("%s: %s" % (cleaned, why))
+
+    ИЗВЕСТНЫЕ = {"+2@gmail.com", "+3@gmail.com"}
+    неожиданные = [c for c in condemned if c.split(":")[0] not in ИЗВЕСТНЫЕ]
+    assert not неожиданные, (
+        "%d адресов получили Invalid без единого запроса к серверу: %s"
+        % (len(неожиданные), неожиданные[:10]))
+    осуждённые = {c.split(":")[0] for c in condemned}
+    assert осуждённые == ИЗВЕСТНЫЕ, (
+        "набор осуждённых без сети изменился: ждали %s, получили %s"
+        % (sorted(ИЗВЕСТНЫЕ), sorted(осуждённые)))
+
+
+@needs_base
+def test_dedup_key_is_stable_between_runs(rows):
+    cleaner = EmailCleaner()
+    first = [normalize_for_dedup(cleaner.clean_email(raw) or raw) for raw in rows]
+    second = [normalize_for_dedup(EmailCleaner().clean_email(raw) or raw)
+              for raw in rows]
+    assert first == second, "ключ дедупа изменился между двумя проходами"
+
+
+@pytest.mark.parametrize("address, expected", [
+    ("demo.user@geometrixx.info", "demo.user@geometrixx.info"),
+    ("a@acme.company", "a@acme.company"),
+    ("a@x.institute", "a@x.institute"),
+    ("a@y.media", "a@y.media"),
+    ("a@z.careers", "a@z.careers"),
+])
+def test_known_zone_is_never_shortened(address, expected):
+    assert EmailCleaner().clean_email(address) == expected
+
+
+@pytest.mark.parametrize("address, expected", [
+    ("b@yandex.rublahblah", "b@yandex.ru"),
+    ("c@mail.ruXXX", "c@mail.ru"),
+    ("d@corp.deSpam", "d@corp.de"),
+    ("e@gmail.comtelefoon", "e@gmail.com"),
+    ("f@corp.com-jobs", "f@corp.com"),
+])
+def test_glued_junk_is_still_cut(address, expected):
+    assert EmailCleaner().clean_email(address) == expected

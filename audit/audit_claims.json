@@ -1,0 +1,93 @@
+{
+  "_comment": "Числовые и поведенческие утверждения из отчёта аудита. Скрипт verify_audit_claims.py измеряет реальность и сверяет с этим файлом. Расхождение = провал гейта, а не тихая правка отчёта.",
+  "inventory": {
+    "py_files_total": 272,
+    "py_lines_total": 65362,
+    "core_modules": 63,
+    "parser_modules": 11,
+    "tests_files": 138,
+    "entrypoints": [
+      "main.py",
+      "cli.py"
+    ],
+    "biggest_module": "tests/test_activity_fixes.py",
+    "biggest_module_lines": 1382,
+    "_note": "Ни один модуль не длиннее biggest_module_lines. Монолиты core/pipeline.py, ui/webapp.py, core/network.py записаны ОТКРЫТЫМ изъяном monoliths в audit/gap_ledger.json."
+  },
+  "smtp": {
+    "dnsbl_zones": 7,
+    "dnsbl_must_not_contain": [
+      "zen.spamhaus.org",
+      "cbl.abuseat.org",
+      "dnsbl.sorbs.net"
+    ],
+    "mail_from_pool": 6,
+    "helo_names": 6,
+    "security_gateway_vendors": 25,
+    "yahoo_domains": 25,
+    "needs_clean_ip_domains": 26,
+    "local_rule_domains": 62
+  },
+  "scoring": {
+    "valid_points": 55,
+    "full_inbox_points": 70,
+    "risky_points": 20,
+    "unknown_points": 10,
+    "disposable_penalty": -50,
+    "dnsbl_penalty": -40,
+    "parked_penalty": -30,
+    "machine_generated_penalty": -20,
+    "hot_threshold": 70,
+    "gmail_valid_min_score": 55
+  },
+  "cache": {
+    "cacheable_statuses": [
+      "Valid",
+      "Invalid/Bounce"
+    ],
+    "ttl_valid_days": 7,
+    "ttl_invalid_days": 90
+  },
+  "lists": {
+    "disposable_builtin": 484,
+    "spamfilter_domains_min": 8000,
+    "disposable_after_merge_min": 8500,
+    "free_domains": 286,
+    "global_verified_domains": 81,
+    "role_exact": 86,
+    "role_stems": 111,
+    "parking_hosts": 60,
+    "names_index_bytes_min": 500000,
+    "disposable_files_bytes_min": 170000
+  },
+  "proxy": {
+    "max_consecutive_fails": 3,
+    "min_distinct_hosts_for_ban": 2,
+    "probe_targets": 4,
+    "supported_schemes": [
+      "socks5",
+      "socks4",
+      "http",
+      "https"
+    ],
+    "supported_formats": 3,
+    "profile_fields": [
+      "exit_ip",
+      "latency_ms",
+      "has_ptr",
+      "rdns",
+      "rdns_dirty",
+      "in_dnsbl",
+      "outlook_ok"
+    ],
+    "worker_cap": 300,
+    "async_worker_cap": 500,
+    "refresh_interval_sec": 600,
+    "dirty_rdns_keywords": 17,
+    "_note": "Целей пробы стало 4: к Gmail и Outlook добавлены прямые пробы Yahoo и iCloud — их пригодность больше не выводится косвенно из PTR и списков."
+  },
+  "tests": {
+    "pytest_tests_min": 300,
+    "audit_scripts": 23
+  }
+}

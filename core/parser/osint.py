@@ -1,0 +1,78 @@
+import hashlib
+import json
+import urllib.request
+import urllib.error
+
+
+class OSINTOperator:
+
+    def __init__(self, proxy_provider=None, timeout=5.0):
+        self.proxy_provider = proxy_provider
+        self.timeout = timeout
+
+    def _fetch_profile(self, email):
+        if not email:
+            return None
+        email_hash = hashlib.md5(email.strip().lower().encode("utf-8")).hexdigest()
+        url = f"https://en.gravatar.com/{email_hash}.json"
+
+        proxies = None
+        try:
+            if self.proxy_provider:
+                proxies = self.proxy_provider()
+        except Exception:
+            proxies = None
+
+        try:
+            if proxies:
+                import requests
+                resp = requests.get(url, timeout=self.timeout, proxies=proxies,
+                                    headers={"User-Agent": "Mozilla/5.0"})
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+            else:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError:
+            return None
+        except Exception:
+            return None
+
+        entries = (data or {}).get("entry") or []
+        return entries[0] if entries else None
+
+    def get_profile(self, email):
+        profile = self._fetch_profile(email)
+        if not profile:
+            return {}
+
+        name = ""
+        name_block = profile.get("name")
+        if isinstance(name_block, dict):
+            name = name_block.get("formatted") or ""
+        elif isinstance(name_block, str):
+            name = name_block
+        if not name:
+            name = profile.get("displayName") or ""
+
+        accounts = []
+        for account in profile.get("accounts") or []:
+            if isinstance(account, dict):
+                label = account.get("shortname") or account.get("domain") or ""
+                if label:
+                    accounts.append(label)
+
+        return {
+            "name": name.strip(),
+            "location": (profile.get("currentLocation") or "").strip(),
+            "accounts": accounts,
+        }
+
+
+if __name__ == '__main__':
+    operator = OSINTOperator()
+    print("Testing OSINT Operator...")
+    test_email = "beau@automattic.com"
+    print(f"{test_email} -> {operator.get_profile(test_email)}")

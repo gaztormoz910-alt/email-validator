@@ -1,0 +1,418 @@
+# -*- coding: utf-8 -*-
+import os
+import sys
+import time
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from ui.result_store import ResultStore, normalize_filters
+
+
+COUNTRIES = ["США", "Индия", "Германия", ""]
+GENDERS = ["Мужской", "Женский", ""]
+DOMAINS = ["gmail.com", "yahoo.com", "aol.com", "mail.ru"]
+
+
+@pytest.fixture
+def store():
+    result = ResultStore()
+    yield result
+    result.close()
+
+
+@pytest.fixture
+def filled(store):
+    for i in range(120):
+        store.append(
+            "user%02d@%s" % (i, DOMAINS[i % 4]),
+            "Valid" if i % 3 else "Invalid/Bounce",
+            "250 OK", "mx",
+            {"engagement_score": (i % 10) * 10,
+             "country": COUNTRIES[i % 4],
+             "gender": GENDERS[i % 3],
+             "name": "Имя %d" % i})
+    return store
+
+
+def test_facets_filter_by_country(filled):
+    total = filled.matching_count(filters={"groups": ["valid", "invalid"]})
+    only_usa = filled.matching_count(
+        filters={"groups": ["valid", "invalid"], "country": ["США"]})
+    assert 0 < only_usa < total
+    rows = filled.page(filters={"groups": ["valid", "invalid"],
+                                "country": ["США"]}, size=1000)
+    assert rows and all(r["data"]["country"] == "США" for r in rows)
+    assert len(rows) == only_usa
+
+
+def test_facets_filter_by_gender(filled):
+    rows = filled.page(filters={"groups": ["valid", "invalid"],
+                                "gender": ["Женский"]}, size=1000)
+    assert rows and all(r["data"]["gender"] == "Женский" for r in rows)
+
+
+def test_facets_filter_by_provider(filled):
+    rows = filled.page(filters={"groups": ["valid", "invalid"],
+                                "provider": ["gmail.com"]}, size=1000)
+    assert rows and all(r["email"].endswith("@gmail.com") for r in rows)
+
+
+def test_facets_provider_is_matched_case_insensitively(store):
+    store.append("Ivan@GMAIL.com", "Valid", "250 OK", "mx", {})
+    rows = store.page(filters={"groups": ["valid"], "provider": ["gmail.com"]})
+    assert len(rows) == 1
+
+
+def test_facets_combine_with_each_other_and_with_score(filled):
+    picked = {"groups": ["valid", "invalid"], "country": ["США"],
+              "gender": ["Мужской"], "provider": ["gmail.com"], "minScore": 50}
+    rows = filled.page(filters=picked, size=1000)
+    for row in rows:
+        assert row["data"]["country"] == "США"
+        assert row["data"]["gender"] == "Мужской"
+        assert row["email"].endswith("@gmail.com")
+        assert row["data"]["engagement_score"] >= 50
+    assert filled.matching_count(filters=picked) == len(rows)
+
+
+def test_facets_verdict_still_rules(filled):
+    rows = filled.page(filters={"groups": ["valid"], "country": ["США"]},
+                       size=1000)
+    assert rows and all(r["status"] == "Valid" for r in rows)
+
+
+def test_facets_empty_value_is_selectable(filled):
+    rows = filled.page(filters={"groups": ["valid", "invalid"], "country": [""]},
+                       size=1000)
+    assert rows and all(not r["data"]["country"] for r in rows)
+
+
+def test_facets_unknown_value_finds_nothing(filled):
+    assert filled.matching_count(
+        filters={"groups": ["valid", "invalid"], "country": ["Марс"]}) == 0
+
+
+def test_facets_no_filters_behaves_as_before(filled):
+    assert filled.matching_count(("valid",)) == filled.counts()["valid"]
+    assert len(filled.page(("valid",), page=1, size=10)) == 10
+
+
+def test_facets_paging_stays_consistent(filled):
+    picked = {"groups": ["valid", "invalid"], "provider": ["gmail.com"]}
+    total = filled.matching_count(filters=picked)
+    first = filled.page(filters=picked, page=1, size=7)
+    second = filled.page(filters=picked, page=2, size=7)
+    assert len(first) == 7
+    assert not ({r["email"] for r in first} & {r["email"] for r in second})
+    collected = []
+    page = 1
+    while True:
+        rows = filled.page(filters=picked, page=page, size=7)
+        if not rows:
+            break
+        collected.extend(rows)
+        page += 1
+    assert len(collected) == total
+
+
+def test_facets_export_sees_the_same_selection(filled):
+    picked = {"groups": ["valid"], "country": ["Индия"], "minScore": 30}
+    on_screen = filled.matching_count(filters=picked)
+    exported = list(filled.iter_matching(filters=picked))
+    assert len(exported) == on_screen
+
+
+def test_search_finds_a_substring_of_the_address(filled):
+    rows = filled.page(filters={"groups": ["valid", "invalid"],
+                                "search": "user07"}, size=100)
+    assert len(rows) == 1
+    assert rows[0]["email"].startswith("user07@")
+
+
+def test_search_ignores_case_on_both_sides(store):
+    store.append("Ivan.Petrov@GMAIL.com", "Valid", "250 OK", "mx", {})
+    for needle in ("ivan", "IVAN", "PeTrOv", "GMAIL"):
+        rows = store.page(filters={"groups": ["valid"], "search": needle})
+        assert len(rows) == 1, needle
+
+
+def test_search_matches_the_domain_too(filled):
+    rows = filled.page(filters={"groups": ["valid", "invalid"],
+                                "search": "yahoo"}, size=1000)
+    assert rows and all("yahoo" in r["email"] for r in rows)
+
+
+def test_search_combines_with_the_other_filters(filled):
+    picked = {"groups": ["valid", "invalid"], "search": "user1",
+              "provider": ["gmail.com"]}
+    rows = filled.page(filters=picked, size=1000)
+    assert rows
+    for row in rows:
+        assert "user1" in row["email"] and row["email"].endswith("@gmail.com")
+    assert filled.matching_count(filters=picked) == len(rows)
+
+
+def test_search_treats_percent_and_underscore_literally(store):
+    store.append("a_b@gmail.com", "Valid", "250 OK", "mx", {})
+    store.append("axb@gmail.com", "Valid", "250 OK", "mx", {})
+    store.append("plain@gmail.com", "Valid", "250 OK", "mx", {})
+
+    rows = store.page(filters={"groups": ["valid"], "search": "a_b"})
+    assert [r["email"] for r in rows] == ["a_b@gmail.com"]
+
+    assert store.matching_count(filters={"groups": ["valid"], "search": "%"}) == 0
+
+
+def test_search_for_nothing_returns_everything(filled):
+    assert (filled.matching_count(filters={"groups": ["valid"], "search": ""})
+            == filled.counts()["valid"])
+
+
+def test_search_missing_address_finds_nothing(filled):
+    assert filled.matching_count(
+        filters={"groups": ["valid", "invalid"], "search": "нетутакого"}) == 0
+
+
+def test_facet_values_come_from_the_base_not_from_a_dictionary(filled):
+    values = filled.facet_values(filters={"groups": ["valid", "invalid"]})
+    countries = {item["value"] for item in values["country"]}
+    assert countries == set(COUNTRIES)
+    assert "Марс" not in countries
+
+    providers = {item["value"] for item in values["provider"]}
+    assert providers == set(DOMAINS)
+
+    genders = {item["value"] for item in values["gender"]}
+    assert genders == set(GENDERS)
+
+
+def test_facet_values_carry_honest_counts(filled):
+    values = filled.facet_values(filters={"groups": ["valid", "invalid"]})
+    for item in values["provider"]:
+        expected = filled.matching_count(
+            filters={"groups": ["valid", "invalid"], "provider": [item["value"]]})
+        assert item["count"] == expected, item
+
+
+def test_facet_values_do_not_collapse_when_one_is_chosen(filled):
+    chosen = {"groups": ["valid", "invalid"], "country": ["США"]}
+    values = filled.facet_values(filters=chosen)
+    countries = {item["value"] for item in values["country"]}
+    assert len(countries) > 1, countries
+    providers = values["provider"]
+    assert providers
+    for item in providers:
+        expected = filled.matching_count(
+            filters={"groups": ["valid", "invalid"], "country": ["США"],
+                     "provider": [item["value"]]})
+        assert item["count"] == expected, item
+
+
+def test_facet_values_respect_the_verdict(filled):
+    only_valid = filled.facet_values(filters={"groups": ["valid"]})
+    for item in only_valid["country"]:
+        expected = filled.matching_count(
+            filters={"groups": ["valid"], "country": [item["value"]]})
+        assert item["count"] == expected
+
+
+BIG = 200_000
+
+
+@pytest.fixture(scope="module")
+def big_store():
+    store = ResultStore()
+    for i in range(BIG):
+        store.append(
+            "user%06d@%s" % (i, DOMAINS[i % 4]), "Valid", "250 OK", "mx",
+            {"engagement_score": (i % 10) * 10,
+             "country": COUNTRIES[i % 4], "gender": GENDERS[i % 3]})
+    store.matching_count(("valid",))
+    yield store
+    store.close()
+
+
+def _timed(call):
+    start = time.perf_counter()
+    result = call()
+    return result, time.perf_counter() - start
+
+
+def test_speed_page_with_every_filter_is_fast(big_store):
+    picked = {"groups": ["valid"], "country": ["США"], "gender": ["Мужской"],
+              "provider": ["gmail.com"], "minScore": 50}
+    rows, spent = _timed(lambda: big_store.page(filters=picked, page=1, size=100))
+    assert rows, "фильтр не нашёл ничего — измерять нечего"
+    assert spent < 1.5, "страница с фильтрами заняла %.2f с" % spent
+
+
+def test_speed_count_with_every_filter_is_fast(big_store):
+    picked = {"groups": ["valid"], "country": ["Индия"], "minScore": 30}
+    total, spent = _timed(lambda: big_store.matching_count(filters=picked))
+    assert total > 0
+    assert spent < 1.5, "счёт совпадений занял %.2f с" % spent
+
+
+def test_speed_search_is_fast(big_store):
+    rows, spent = _timed(lambda: big_store.page(
+        filters={"groups": ["valid"], "search": "user000123"}, size=100))
+    assert len(rows) == 1
+    assert spent < 1.5, "поиск занял %.2f с" % spent
+
+
+def test_speed_facet_values_are_fast(big_store):
+    values, spent = _timed(lambda: big_store.facet_values(
+        filters={"groups": ["valid"]}))
+    assert values["provider"]
+    assert spent < 2.0, "сбор значений фильтров занял %.2f с" % spent
+
+
+def test_speed_positive_control_the_data_really_is_big(big_store):
+    assert big_store.counts()["total"] == BIG
+
+
+def test_normalize_accepts_both_spellings():
+    picked = normalize_filters({"groups": ["valid"], "minScore": "70",
+                                "country": "США", "provider": ["GMAIL.com"]})
+    assert picked["groups"] == ("valid",)
+    assert picked["min_score"] == 70
+    assert picked["country"] == ["США"]
+    assert picked["provider"] == ["gmail.com"]
+
+
+def test_normalize_survives_junk():
+    picked = normalize_filters({"minScore": "чепуха", "country": None,
+                                "search": None})
+    assert picked["min_score"] == 0
+    assert picked["country"] == []
+    assert picked["search"] == ""
+
+
+def test_order_rows_come_best_first(filled):
+    rows = filled.page(filters={"groups": ["valid", "invalid"]}, size=1000)
+    scores = [row["data"]["engagement_score"] for row in rows]
+    assert scores == sorted(scores, reverse=True), scores[:20]
+    assert scores[0] > scores[-1], "в выборке все оценки одинаковы — проверять нечего"
+
+
+def test_order_holds_without_any_filters(filled):
+    rows = filled.page(("valid",), size=1000)
+    scores = [row["data"]["engagement_score"] for row in rows]
+    assert scores == sorted(scores, reverse=True), scores[:20]
+
+
+def test_order_is_stable_for_equal_scores(filled):
+    first = [row["email"] for row in filled.page(("valid",), size=1000)]
+    second = [row["email"] for row in filled.page(("valid",), size=1000)]
+    assert first == second
+
+
+def test_order_sorts_the_whole_selection_not_just_the_page(filled):
+    top = filled.page(filters={"groups": ["valid", "invalid"]}, page=1, size=5)
+    best_on_page = min(row["data"]["engagement_score"] for row in top)
+
+    everything = filled.page(filters={"groups": ["valid", "invalid"]}, size=10_000)
+    best_overall = sorted((row["data"]["engagement_score"] for row in everything),
+                          reverse=True)[:5]
+    assert best_on_page == min(best_overall), (best_on_page, best_overall)
+
+
+def test_paging_order_pages_do_not_overlap_and_cover_everything(filled):
+    picked = {"groups": ["valid", "invalid"]}
+    total = filled.matching_count(filters=picked)
+
+    seen, page = [], 1
+    while True:
+        rows = filled.page(filters=picked, page=page, size=7)
+        if not rows:
+            break
+        seen.extend(row["email"] for row in rows)
+        page += 1
+
+    assert len(seen) == total
+    assert len(set(seen)) == total, "страницы пересеклись"
+
+
+def test_paging_order_stays_sorted_across_pages(filled):
+    picked = {"groups": ["valid", "invalid"]}
+    previous = None
+    page = 1
+    while True:
+        rows = filled.page(filters=picked, page=page, size=7)
+        if not rows:
+            break
+        scores = [row["data"]["engagement_score"] for row in rows]
+        assert scores == sorted(scores, reverse=True), (page, scores)
+        if previous is not None:
+            assert previous >= scores[0], (page, previous, scores[0])
+        previous = scores[-1]
+        page += 1
+
+
+def test_paging_order_works_with_filters_and_search(filled):
+    picked = {"groups": ["valid", "invalid"], "provider": ["gmail.com"],
+              "search": "user"}
+    rows = filled.page(filters=picked, size=1000)
+    assert rows
+    scores = [row["data"]["engagement_score"] for row in rows]
+    assert scores == sorted(scores, reverse=True), scores
+
+
+def test_repeats_are_kept_by_default():
+    store = ResultStore()
+    try:
+        for _ in range(6):
+            store.append("j@example.com", "Valid", "250 OK", "mx",
+                         {"engagement_score": 50})
+        assert store.counts()["valid"] == 6
+        assert len(store.page(("valid",), size=10)) == 6
+    finally:
+        store.close()
+
+
+def test_repeats_are_dropped_when_asked():
+    store = ResultStore(drop_repeats=True)
+    try:
+        for _ in range(6):
+            store.append("j@example.com", "Valid", "250 OK", "mx",
+                         {"engagement_score": 50})
+        assert store.counts()["valid"] == 1
+        rows = store.page(("valid",), size=10)
+        assert [row["email"] for row in rows] == ["j@example.com"]
+    finally:
+        store.close()
+
+
+def test_repeats_are_matched_case_insensitively():
+    store = ResultStore(drop_repeats=True)
+    try:
+        store.append("Ivan@Gmail.com", "Valid", "250 OK", "mx", {})
+        store.append("ivan@gmail.com", "Valid", "250 OK", "mx", {})
+        store.append("  IVAN@GMAIL.COM  ", "Valid", "250 OK", "mx", {})
+        assert store.counts()["valid"] == 1
+    finally:
+        store.close()
+
+
+def test_repeats_do_not_hide_different_addresses():
+    store = ResultStore(drop_repeats=True)
+    try:
+        for i in range(6):
+            store.append("user%d@gmail.com" % i, "Valid", "250 OK", "mx", {})
+        assert store.counts()["valid"] == 6
+    finally:
+        store.close()
+
+
+def test_repeats_survive_a_flush_to_disk():
+    store = ResultStore(drop_repeats=True)
+    try:
+        store.append("j@example.com", "Valid", "250 OK", "mx", {})
+        store.matching_count(("valid",))
+        store._flush_locked()
+        store.append("j@example.com", "Valid", "250 OK", "mx", {})
+        assert store.counts()["valid"] == 1
+    finally:
+        store.close()

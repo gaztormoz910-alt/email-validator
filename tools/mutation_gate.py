@@ -1,0 +1,1131 @@
+# -*- coding: utf-8 -*-
+import atexit
+import hashlib
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+SUCCESS_TOKEN = "MUTATION_GATE_OK"
+
+FAST_SUITE = ["-m", "not slow"]
+
+
+MUTATIONS = [
+    {
+        "id": "M1",
+        "title": "синтаксис: перестать проверять ГРАММАТИКУ не-ASCII имени ящика",
+        "path": "core/email_syntax.py",
+        "old": ("    if not local.isascii():\n"
+                "        if not _UTF8_LOCAL_RE.match(local):\n"
+                "            return False"),
+        "new": ("    if not local.isascii():\n"
+                "        if not _UTF8_LOCAL_RE.match(local):\n"
+                "            pass"),
+        "guards": ["tests/test_anyorder.py", "tests/test_syntax_bytes.py"],
+        "why": "целая строка файла уехала бы в проверку как один адрес",
+    },
+    {
+        "id": "M2",
+        "title": "SMTP: «сервер не понял команду» (500-504) считать приговором ящику",
+        "path": "core/smtp_codes.py",
+        "old": '    if isinstance(code, int) and 500 <= code <= 504:\n        return result("unknown",',
+        "new": '    if isinstance(code, int) and 500 <= code <= 504:\n        return result("invalid",',
+        "guards": ["tests/test_smtp_parsing.py", "tests/test_smtp_corpus.py",
+                   "tests/test_no_false_verdicts.py"],
+        "why": "ложный Invalid на живых ящиках — потерянные контакты",
+    },
+    {
+        "id": "M3",
+        "title": "SMTP: снять защиту «отказ по политике/репутации — не про ящик»",
+        "path": "core/smtp_codes.py",
+        "old": "    if policy and (reputation or not proof):",
+        "new": "    if False and (reputation or not proof):",
+        "guards": ["tests/test_smtp_parsing.py", "tests/test_smtp_corpus.py",
+                   "tests/test_no_false_verdicts.py", "tests/test_smtp_extras.py"],
+        "why": "отказ нашему IP превратился бы в «ящика нет»",
+    },
+    {
+        "id": "M4",
+        "title": "скоринг: перевернуть знак у подтверждённого 250 OK",
+        "path": "core/scoring.py",
+        "old": '    "smtp_valid": 55,',
+        "new": '    "smtp_valid": -55,',
+        "guards": ["tests/test_scoring_invariants.py", "tests/test_calibration.py",
+                   "tests/test_score_filter_paths.py"],
+        "why": "доказанный живой ящик оказался бы внизу выборки",
+    },
+    {
+        "id": "M5",
+        "title": "дедуп: перестать схлопывать точки в имени Gmail",
+        "path": "core/cleaner.py",
+        "old": '    if domain in _GMAIL_DOMAINS:\n        local = local.replace(".", "")',
+        "new": '    if domain in _GMAIL_DOMAINS:\n        local = local',
+        "guards": ["tests/test_normalization.py", "tests/test_suppression_key.py"],
+        "why": "отписавшийся получил бы письмо снова под другим написанием",
+    },
+    {
+        "id": "M6",
+        "title": "кэш: разрешить запоминать недоказанные вердикты",
+        "path": "core/cache.py",
+        "old": 'CACHEABLE_STATUSES = ("Valid", "Invalid/Bounce")',
+        "new": 'CACHEABLE_STATUSES = ("Valid", "Invalid/Bounce", "Unknown", "Risky")',
+        "guards": ["tests/test_result_cache.py", "tests/test_cache_regressions.py",
+                   "tests/test_accuracy.py"],
+        "why": "сбой нашей стороны законсервировался бы на месяцы",
+    },
+    {
+        "id": "M7",
+        "title": "прокси: разрешить прямое соединение, когда все прокси выбыли",
+        "path": "core/network.py",
+        "old": "        if proxy is None and self.has_proxies_configured():\n"
+               '            return {"status": "unknown", "reason": "All Proxies Dead'
+               ' (прямое соединение запрещено)"}',
+        "new": "        if False and self.has_proxies_configured():\n"
+               '            return {"status": "unknown", "reason": "All Proxies Dead'
+               ' (прямое соединение запрещено)"}',
+        "guards": ["tests/test_proxy_ban.py"],
+        "why": "домашний IP ушёл бы почтовикам, а вердикты стали бы про него",
+    },
+    {
+        "id": "M8",
+        "title": "DNS: сбой запроса MX считать доказательством мёртвого домена",
+        "path": "core/dns_checks.py",
+        "old": "        if dns_failed:\n            return None\n\n"
+               "        # Фоллбэк на A-запись",
+        "new": "        if dns_failed:\n            return []\n\n"
+               "        # Фоллбэк на A-запись",
+        "guards": ["tests/test_no_false_verdicts.py", "tests/test_verdict_precision.py",
+                   "tests/test_dns_via_proxy.py"],
+        "why": "домен целиком уехал бы в Invalid из-за одного таймаута",
+    },
+    {
+        "id": "M9",
+        "title": "очистка: вернуть подмену домена по префиксу (снять предохранитель «точка»)",
+        "path": "core/cleaner.py",
+        "old": "        if m and self._junk_tail(m.group(2)):",
+        "new": "        if m:",
+        "guards": ["tests/test_accuracy.py", "tests/test_cleaner_roles.py"],
+        "why": "вердикт выносился бы про ЧУЖОЙ ящик под именем моего",
+    },
+    {
+        "id": "M10",
+        "title": "postmaster: перевернуть проверку честности сервера",
+        "path": "core/network.py",
+        "old": "            if honored is False:\n"
+               '                result["status"] = "risky"',
+        "new": "            if honored is True:\n"
+               '                result["status"] = "risky"',
+        "guards": ["tests/test_second_opinion.py", "tests/test_verdict_precision.py",
+                   "tests/test_no_false_verdicts.py"],
+        "why": "сервер, отвечающий 550 всем подряд, снова хоронил бы адреса",
+    },
+    {
+        "id": "M11",
+        "title": "SMTP: переполненный ящик снова объявить «Годен» (аудит D1)",
+        "path": "core/smtp_codes.py",
+        "old": '            return result("full", f"{numeric} Ящик переполнен',
+        "new": '            return result("valid", f"{numeric} Ящик переполнен',
+        "guards": ["tests/test_audit6_fixes.py", "tests/test_smtp_parsing.py"],
+        "why": "письмо в переполненный ящик — отскок, а он стоял бы в «Годен»",
+    },
+    {
+        "id": "M12",
+        "title": "catch-all: считать исключённым без отказа выдуманному адресу (аудит D2)",
+        "path": "core/confirmation.py",
+        "old": '        excluded = result.get("control_rcpt") == "rejected"',
+        "new": '        excluded = True',
+        "guards": ["tests/test_audit6_fixes.py"],
+        "why": "catch-all за серым списком снова выдавал бы «Годен» на выдуманный адрес",
+    },
+    {
+        "id": "M13",
+        "title": "лестница после вердикта: не пускать канарейку (аудит D3)",
+        "path": "core/settle.py",
+        "old": ('        if raw_status == "valid":\n'
+                "            self._fly_canary(email, res)"),
+        "new": ("        if False:\n"
+                "            self._fly_canary(email, res)"),
+        "guards": ["tests/test_audit6_fixes.py", "tests/test_canary.py"],
+        "why": "тарпитинг посреди прогона снова оставлял бы «Годен» недоказанным",
+    },
+    {
+        "id": "M14",
+        "title": "роль снова прячет SMTP-вердикт (аудит D8)",
+        "path": "core/settle.py",
+        "old": '        if is_role and status_display == "Valid":',
+        "new": '        if is_role:',
+        "guards": ["tests/test_audit6_fixes.py"],
+        "why": "мёртвый info@ снова выглядел бы как живой ролевой",
+    },
+    {
+        "id": "M15",
+        "title": "«статус не трогать» снова уходит строкой «None» (прогон 27.09)",
+        "path": "core/verdict_revision.py",
+        "old": "        status = None if new_status is None else str(new_status)",
+        "new": "        status = str(new_status)",
+        "guards": ["tests/test_run7_fixes.py"],
+        "why": "доказанно живые адреса снова выходили бы со статусом «None»",
+    },
+    {
+        "id": "M16",
+        "title": "загрузчик снова не берёт список из-за одного спорного имени (прогон 27.09)",
+        "path": "core/github_parser.py",
+        "old": "                if bad and len(bad) > ДОЛЯ_ОХРАНЫ_ПРЕДЕЛ * len(new_domains):",
+        "new": "                if bad:",
+        "guards": ["tests/test_run7_fixes.py"],
+        "why": "обновления списков одноразовых снова не доходили бы до программы",
+    },
+    {
+        "id": "M17",
+        "title": "DNS снова ждёт мёртвый прокси шесть раз: нет второй дорожки (вариант В, 29.09)",
+        "path": "core/dns_resolver.py",
+        "old": "            if second is None and self._provider_excludes:",
+        "new": "            if False:",
+        "guards": ["tests/test_dns_proxy_switch.py"],
+        "why": "вопрос через мёртвый прокси снова стоил бы 6×таймаут (90 с при 15 с) при живых рядом",
+    },
+    {
+        "id": "M18",
+        "title": "DNS забывает, какой прокси только что молчал (вариант В, 29.09)",
+        "path": "core/dns_resolver.py",
+        "old": "        if self._provider_excludes and proxy in self._recently_silent():",
+        "new": "        if False:",
+        "guards": ["tests/test_dns_proxy_switch.py"],
+        "why": "каждый следующий вопрос домена снова платил бы таймаут за тот же мёртвый прокси",
+    },
+    {
+        "id": "M19",
+        "title": "прокси, отказавший и по DoH, и по обычному DNS, не меняется (вариант В, 29.09)",
+        "path": "core/dns_resolver.py",
+        "old": "    return silent or failed_kinds >= _BOTH_TRANSPORTS",
+        "new": "    return silent",
+        "guards": ["tests/test_dns_proxy_switch.py"],
+        "why": "вопрос тратил бы попытки на «живой», но бесполезный прокси и терял ответ (живой замер 29.09)",
+    },
+    {
+        "id": "M20",
+        "title": "DoH через нераспознанную строку прокси уходит напрямую (вариант В, 29.09)",
+        "path": "core/dns_resolver.py",
+        "old": "        if not build_proxy_dict(proxy):\n            return None",
+        "new": "        if False:\n            return None",
+        "guards": ["tests/test_dns_proxy_switch.py"],
+        "why": "вопрос с доменом базы ушёл бы в DoH с домашнего IP — утечка, ради которой DNS и заворачивали в прокси",
+    },
+    {
+        "id": "M21",
+        "title": "вторая DNS-дорожка принимает любой ответ, включая SERVFAIL и подменённое «нет» (29.09)",
+        "path": "core/dns_resolver.py",
+        "old": "    return kind == \"doh\" and response.rcode() in (dns.rcode.NXDOMAIN, dns.rcode.NOERROR)",
+        "new": "    return True",
+        "guards": ["tests/test_dns_proxy_switch.py"],
+        "why": "перехваченное прокси «домена нет» по MX стало бы ложным «Мёртв», ранний SERVFAIL — «не проверено»",
+    },
+    {
+        "id": "M22",
+        "title": "резолвер Spamhaus снова спрашивает публичные DoH (29.09)",
+        "path": "core/dns_checks.py",
+        "old": "            proxy_provider=self._dns_proxy, public_doh=False)",
+        "new": "            proxy_provider=self._dns_proxy)",
+        "guards": ["tests/test_dns_proxy_switch.py"],
+        "why": "отказ публичному резолверу (127.255.255.254) читался бы как «IP не в списке»",
+    },
+    {
+        "id": "M23",
+        "title": "DNS к частному адресу справочной уходит через чужой прокси (29.09)",
+        "path": "core/dns_resolver.py",
+        "old": "        if _is_local_address(nameserver):\n            return None",
+        "new": "        if False:\n            return None",
+        "guards": ["tests/test_dns_proxy_switch.py"],
+        "why": "поиск Spamhaus стучался бы через бесплатный прокси в локальную сеть его хозяина",
+    },
+    {
+        "id": "M24",
+        "title": "два одинаковых «нет» через разные прокси снова не принимаются (29.09)",
+        "path": "core/dns_resolver.py",
+        "old": "                if heard_no is not None and heard_no[0] == no and heard_no[1] != proxy:",
+        "new": "                if False:",
+        "guards": ["tests/test_dns_proxy_switch.py"],
+        "why": "настоящее «записи нет» терялось бы, когда DoH через прокси не работает (живой замер 29.09)",
+    },
+    {
+        "id": "M25",
+        "title": "память о молчании уводит первый выбор с лучшего прокси (рецензия F2, 30.09)",
+        "path": "core/dns_resolver.py",
+        "old": "        proxy = self._proxy_provider() if self._proxy_provider else None",
+        "new": "        proxy = (self._other_proxy(()) or self._proxy_provider()) if self._proxy_provider else None",
+        "guards": ["tests/test_dns_proxy_switch.py"],
+        "why": "после одной заминки лучшего прокси вопросы начинались бы с мёртвых и теряли ответ",
+    },
+    {
+        "id": "M26",
+        "title": "прежние релизы прячутся, даже когда нового не видно (30.09)",
+        "path": "tools/hide_old_releases.py",
+        "old": "    if not any(р.get(\"tag_name\") == оставить for р in опубликованные):",
+        "new": "    if False:",
+        "guards": ["tests/test_hide_old_releases.py"],
+        "why": "страница релизов осталась бы пустой — скачать программу было бы неоткуда",
+    },
+    {
+        "id": "M27",
+        "title": "итог скрытия релизов не сверяется (30.09)",
+        "path": "tools/hide_old_releases.py",
+        "old": "        if осталось == [оставить] and последний == оставить:",
+        "new": "        if True:",
+        "guards": ["tests/test_hide_old_releases.py"],
+        "why": "шаг выпуска рапортовал бы «спрятано», когда GitHub правку не принял",
+    },
+    {
+        "id": "M28",
+        "title": "повторная сборка старого тега прячет новую версию (30.09)",
+        "path": "tools/hide_old_releases.py",
+        "old": "    if новее:\n        raise Отказ(",
+        "new": "    if False:\n        raise Отказ(",
+        "guards": ["tests/test_hide_old_releases.py"],
+        "why": "на странице релизов осталась бы старая версия, а новая ушла бы в черновики",
+    },
+    {
+        "id": "M29",
+        "title": "SMTP: отказ отправителю со словами «user unknown» снова хоронит получателя (E6)",
+        "path": "core/smtp_codes.py",
+        "old": "    if sender_named or (not proof and _contains(msg, _EXPLICIT_SENDER_MARKERS)):",
+        "new": "    if not proof and _contains(msg, _EXPLICIT_SENDER_MARKERS):",
+        "guards": ["tests/test_stage1_false_verdicts.py"],
+        "why": "сверка отправителя у Postfix снова давала бы ложный Invalid живому ящику",
+    },
+    {
+        "id": "M30",
+        "title": "SMTP: «mailbox unavailable» при коде про систему/маршрут снова приговор (E7)",
+        "path": "core/smtp_codes.py",
+        "old": "    not_about_mailbox = subject in (3, 4, 6)",
+        "new": "    not_about_mailbox = False",
+        "guards": ["tests/test_stage1_false_verdicts.py"],
+        "why": "отказ про сеть или содержимое письма снова хоронил бы ящик",
+    },
+    {
+        "id": "M31",
+        "title": "SMTP: слово «quota» снова перебивает 5.1.1 (E8)",
+        "path": "core/smtp_codes.py",
+        "old": "        if full_code or (_contains(msg, _MAILBOX_FULL_MARKERS) and not no_mailbox):",
+        "new": "        if full_code or _contains(msg, _MAILBOX_FULL_MARKERS):",
+        "guards": ["tests/test_stage1_false_verdicts.py"],
+        "why": "несуществующий ящик снова назывался бы переполненным",
+    },
+    {
+        "id": "M32",
+        "title": "catch-all: месячная память «не catch-all» снова заменяет свежий контроль (E9)",
+        "path": "core/catchall.py",
+        "old": "                        self._remembered_not_catchall()[domain] = True",
+        "new": "                        self.catchall_cache[domain] = remembered",
+        "guards": ["tests/test_stage1_false_verdicts.py"],
+        "why": "домен, включивший приём любых адресов, снова давал бы «Годен» на выдуманные",
+    },
+    {
+        "id": "M33",
+        "title": "пересмотр: ролевые строки снова не пересматриваются (E10)",
+        "path": "ui/result_store.py",
+        "old": '    _REVISABLE = ("Valid", "Role-based")',
+        "new": '    _REVISABLE = ("Valid",)',
+        "guards": ["tests/test_stage1_false_verdicts.py"],
+        "why": "info@ на разоблачённом домене оставался бы «живым ролевым»",
+    },
+    {
+        "id": "M34",
+        "title": "пересмотр: строки, живущие только в ОЗУ, снова не трогаются (E10)",
+        "path": "ui/result_store.py",
+        "old": "        for position, row in self._memory_rows.items():\n"
+               "            if position in seen",
+        "new": "        for position, row in {}.items():\n"
+               "            if position in seen",
+        "guards": ["tests/test_stage1_false_verdicts.py"],
+        "why": "без файла базы разоблачённый домен оставался бы «Годен»",
+    },
+    {
+        "id": "M35",
+        "title": "bounces: без --hard-only снова пишет мягкие отскоки как Invalid (E11)",
+        "path": "cli.py",
+        "old": "            if найдено and not args.hard_only:",
+        "new": "            if False:",
+        "guards": ["tests/test_stage1_false_verdicts.py"],
+        "why": "переполненный или занятый ящик ложился бы в кэш мёртвым на 90 дней",
+    },
+    {
+        "id": "M36",
+        "title": "DNS: wildcard-домен без MX снова «Dead Domain» (E12)",
+        "path": "core/dns_checks.py",
+        "old": "                self.mx_cache[domain] = None\n            return None",
+        "new": "                self.mx_cache[domain] = []\n            return []",
+        "guards": ["tests/test_stage1_false_verdicts.py", "tests/test_audit5.py"],
+        "why": "все адреса домена с подстановочной записью снова уходили бы в Invalid",
+    },
+    {
+        "id": "M37",
+        "title": "DNS: «домена нет» по обычному DNS через прокси снова заверено (E13)",
+        "path": "core/dns_resolver.py",
+        "old": "                    return self._extract(response, rd, verified=(kind == \"doh\"))",
+        "new": "                    return self._extract(response, rd)",
+        "guards": ["tests/test_stage1_false_verdicts.py"],
+        "why": "подменённое прокси «домена нет» снова хоронило бы домен целиком",
+    },
+    {
+        "id": "M38",
+        "title": "DNS: два «нет» через разные прокси снова приговор домену (E13)",
+        "path": "core/dns_resolver.py",
+        "old": "                        race.offer(response, proxy, verified=False)",
+        "new": "                        race.offer(response, proxy, verified=True)",
+        "guards": ["tests/test_dns_proxy_switch.py"],
+        "why": "два прокси за одним подменяющим резолвером снова давали бы ложный «Мёртв»",
+    },
+    {
+        "id": "M39",
+        "title": "DNS: незаверенное «имени нет» у MX-хоста снова приговор (E13)",
+        "path": "core/dns_checks.py",
+        "old": "            except UnverifiedNXDOMAIN:\n"
+               "                # «Имени нет» по обычному DNS",
+        "new": "            except ZeroDivisionError:\n"
+               "                # «Имени нет» по обычному DNS",
+        "guards": ["tests/test_stage1_false_verdicts.py"],
+        "why": "домен с живым MX уходил бы в Invalid по подменённому ответу о хосте",
+    },
+    {
+        "id": "M40",
+        "title": "имена: буква снова уходит в first_name («J Smith» -> J)",
+        "path": "core/parser/name_extractor.py",
+        "old": "    if lead and len(words) == 1:\n        return \"\", words[0]",
+        "new": "    if False:\n        return \"\", words[0]",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "рассылка обращалась бы «Здравствуйте, J»",
+    },
+    {
+        "id": "M41",
+        "title": "имена: «m.martin» снова теряет букву (решение 14.11)",
+        "path": "core/parser/name_evidence.py",
+        "old": "        return last is not None and last <= INITIAL_DUAL_SURNAME_RANK",
+        "new": "        return False",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "запись «И. Фамилия» снова читалась бы как имя Martin",
+    },
+    {
+        "id": "M42",
+        "title": "имена: правило «буква + фамилия» снова действует на три куска",
+        "path": "core/parser/name_evidence.py",
+        "old": "or (separators and len(names) == 1\n",
+        "new": "or (separators\n",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "у «m.martin.jones» пропало бы имя Martin",
+    },
+    {
+        "id": "M43",
+        "title": "имена: слово перед буквой в конце снова уходит в фамилию",
+        "path": "core/parser/name_extractor.py",
+        "old": "    if initial(parts[-1]):\n        return parts[lead], \"\"",
+        "new": "    if False:\n        return parts[lead], \"\"",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "второе имя («Anna Maria K») стояло бы в колонке фамилии",
+    },
+    {
+        "id": "M44",
+        "title": "имена: догадка «Заполненности» снова без имени впереди (решение 14.11)",
+        "path": "core/parser/name_extractor.py",
+        "old": "        if not self._guess_head_ok(parts):\n            return \"\"",
+        "new": "        if False:\n            return \"\"",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "в колонку «Имя» снова шли фирмы и фразы вида «Zelo Terasports»",
+    },
+    {
+        "id": "M45",
+        "title": "имена: частое имя, которое разбор читает фамилией, теряется (Henry, Kelly)",
+        "path": "core/parser/name_extractor.py",
+        "old": "        return (rank is not None and rank <= STRONG_FIRST_RANK",
+        "new": "        return (False and rank <= STRONG_FIRST_RANK",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "«Henry Castellano» пропадал бы из «Заполненности»",
+    },
+    {
+        "id": "M46",
+        "title": "имена: отклонённую догадку снова подменяет другое прочтение букв",
+        "path": "core/parser/name_extractor.py",
+        "old": "            self._osint_local.guess_refused = True",
+        "new": "            self._osint_local.guess_refused = False",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "вместо пустого шло бы «Mal Har Singh»",
+    },
+    {
+        "id": "M47",
+        "title": "имена: разбор адреса в «Заполненности» снова отдаёт неподтверждённую догадку",
+        "path": "core/parser/name_extractor.py",
+        "old": "        if (not strict and source == \"разбор\" and not quality.confirmed_name(kept)\n"
+               "                and not self._guess_head_ok(kept)):",
+        "new": "        if (False and not quality.confirmed_name(kept)\n"
+               "                and not self._guess_head_ok(kept)):",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "правило действовало бы только на половину догадок",
+    },
+    {
+        "id": "M48",
+        "title": "имена: «Точность» снова берёт три куска, нарезанные из двух слов",
+        "path": "core/parser/name_extractor.py",
+        "old": "        if strict and fused and not self._three_pieces_ok(kept):",
+        "new": "        if False:",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "в «Точности» снова стояло бы «Sara Fer Olli»",
+    },
+    {
+        "id": "M49",
+        "title": "имена: восточноазиатское имя из слогов снова теряется в «Точности»",
+        "path": "core/parser/name_extractor.py",
+        "old": "               for word in words):\n            return True",
+        "new": "               for word in words) and False:\n            return True",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "«Lin Xuan Zhou» пропадал бы из «Точности»",
+    },
+    {
+        "id": "M50",
+        "title": "имена: «имя + второе имя + фамилия» снова отбрасывается целиком",
+        "path": "core/parser/name_extractor.py",
+        "old": "        return middle_given and surname_end",
+        "new": "        return False",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "«Daniel Cole Barrow» пропадал бы из «Точности»",
+    },
+    {
+        "id": "M51",
+        "title": "«Стоп» снова не закрывает открытые SMTP-сессии",
+        "path": "core/pipeline_control.py",
+        "old": "            if callable(close):\n                close()",
+        "new": "            if False:\n                close()",
+        "guards": ["tests/test_stage3_stop.py"],
+        "why": "поток досиживал бы таймаут сессии в ожидании ответа сервера",
+    },
+    {
+        "id": "M52",
+        "title": "сокет, открытый после «Стопа», снова ждёт баннер",
+        "path": "core/network_abort.py",
+        "old": "            if self.aborted():\n                _shut(sock)\n                raise OSError",
+        "new": "            if False:\n                _shut(sock)\n                raise OSError",
+        "guards": ["tests/test_stage3_stop.py"],
+        "why": "«Стоп» во время TCP-соединения стоил бы полного таймаута",
+    },
+    {
+        "id": "M53",
+        "title": "«Стоп» снова штрафует прокси за оборванную сессию",
+        "path": "core/proxy_pool.py",
+        "old": "        if not success and callable(aborted) and aborted():\n            return",
+        "new": "        if False:\n            return",
+        "guards": ["tests/test_stage3_stop.py"],
+        "why": "каждый «Стоп» отправлял бы живые выходы к бану",
+    },
+    {
+        "id": "M54",
+        "title": "сессия без «Стопа» закрывается без QUIT",
+        "path": "core/network_abort.py",
+        "old": "            if self.aborted():\n                server.close()",
+        "new": "            if True:\n                server.close()",
+        "guards": ["tests/test_stage3_stop.py"],
+        "why": "почтовик видел бы оборванные сессии от каждой проверки",
+    },
+    {
+        "id": "M55",
+        "title": "окно: заметка со словом-оператором снова делает строку базы запросом",
+        "path": "core/input_guard.py",
+        "old": "    if _DORK_OPERATOR_RE.search(line.lower()) and _base_line_with_quotes(line):\n        return KIND_EMAIL",
+        "new": "    if False:\n        return KIND_EMAIL",
+        "guards": ["tests/test_stage3_input.py"],
+        "why": "окно отвергало бы базу с колонкой «Link: …» целиком",
+    },
+    {
+        "id": "M56",
+        "title": "окно: поля в кавычках через «:» снова не узнаются",
+        "path": "core/input_guard.py",
+        "old": "    if \":\" in value and value.lstrip().startswith('\"'):",
+        "new": "    if False:",
+        "guards": ["tests/test_stage3_input.py"],
+        "why": "окно отвергало бы выгрузку вида \"Имя\":\"адрес\"",
+    },
+    {
+        "id": "M57",
+        "title": "окно: заголовок CSV снова считается строкой данных",
+        "path": "core/input_guard.py",
+        "old": "        if first and not query_field and _looks_like_header(line):",
+        "new": "        if False:",
+        "guards": ["tests/test_stage3_input.py"],
+        "why": "файл с заголовком и одним контактом отвергался бы",
+    },
+    {
+        "id": "M58",
+        "title": "загрузчик: заметка «ключ: значение» снова уходит в имя",
+        "path": "core/streamer.py",
+        "old": "    if re.match(r'^\"?[^\\W\\d_][\\w .-]{0,30}:\\s*\\S', v):\n        return 'junk'",
+        "new": "    if False:\n        return 'junk'",
+        "guards": ["tests/test_stage3_input.py"],
+        "why": "в колонке «Имя» стояло бы «Link: acme.com»",
+    },
+    {
+        "id": "M59",
+        "title": "загрузчик: кавычки-оформление CSV снова остаются в имени",
+        "path": "core/streamer.py",
+        "old": "        elif len(кусок) >= 2 and кусок[0] == '\"' == кусок[-1] and '\"' not in кусок[1:-1]:",
+        "new": "        elif False:",
+        "guards": ["tests/test_stage3_input.py"],
+        "why": "в колонке «Имя» стояло бы «\"Olav Brenner\"» с кавычками",
+    },
+    {
+        "id": "M60",
+        "title": "пересылка Sneakemail снова хоронится как одноразовая",
+        "path": "core/disposable.py",
+        "old": "    \"sneakemail.com\",               # Sneakemail",
+        "new": "    # снято мутацией",
+        "guards": ["tests/test_stage4.py"],
+        "why": "живой контакт за пересылкой получал бы Trap/Disposable",
+    },
+    {
+        "id": "M61",
+        "title": "домен-опечатка гиганта снова без отметки",
+        "path": "core/settle.py",
+        "old": "        if похоже and \"@\" in похоже:\n            data[\"typo_of\"]",
+        "new": "        if False:\n            data[\"typo_of\"]",
+        "guards": ["tests/test_stage4.py"],
+        "why": "адрес на gmai.com с живым MX нельзя было бы отделить от настоящих",
+    },
+    {
+        "id": "M62",
+        "title": "галочка «Без доменов-опечаток» снова ничего не скрывает (SQL)",
+        "path": "ui/result_store.py",
+        "old": "        if filters.get(\"hide_typo\"):\n            # COALESCE",
+        "new": "        if False:\n            # COALESCE",
+        "guards": ["tests/test_stage4.py"],
+        "why": "выбор владельца в окне не действовал бы",
+    },
+    {
+        "id": "M63",
+        "title": "галочка «Без доменов-опечаток» не действует без файла базы",
+        "path": "ui/result_store.py",
+        "old": "        if filters.get(\"hide_typo\") and _facet_of(payload, \"typo_of\"):",
+        "new": "        if False:",
+        "guards": ["tests/test_stage4.py"],
+        "why": "на машине без файла под строки выбор владельца не действовал бы",
+    },
+    {
+        "id": "M64",
+        "title": "сертификат MX без проверки цепочки",
+        "path": "core/mx_certificate.py",
+        "old": "    context.verify_mode = ssl.CERT_REQUIRED\n",
+        "new": "    context.verify_mode = ssl.CERT_NONE\n",
+        "guards": ["tests/test_mx_certificate.py"],
+        "why": "самоподписанный «mx.google.com» назвал бы чужой сервер Google",
+    },
+    {
+        "id": "M65",
+        "title": "провайдер по сертификату ищется подстрокой",
+        "path": "core/mx_certificate.py",
+        "old": "    return n > 0 and any(labels[i:i + n] == hint_labels for i in range(len(labels) - n + 1))",
+        "new": "    return n > 0 and \".\".join(hint_labels) in \".\".join(labels)",
+        "guards": ["tests/test_mx_certificate.py"],
+        "why": "mail.googleplex-fans.test стал бы Google Workspace",
+    },
+    {
+        "id": "M66",
+        "title": "шаблон со звёздочкой снова принимается за адрес",
+        "path": "core/input_guard.py",
+        "old": "    return \"*\" not in value.partition(\"@\")[0] and looks_like_email(value)",
+        "new": "    return looks_like_email(value)",
+        "guards": ["tests/test_stage5.py"],
+        "why": "поисковые шаблоны со звёздочкой вместо имени ящика уезжали бы на проверку как адреса",
+    },
+    {
+        "id": "M67",
+        "title": "«Фамилия, Имя» в кавычках снова режется по запятой",
+        "path": "core/streamer.py",
+        "old": "    с_запятой = _подпись_с_запятой(целая)\n",
+        "new": "    с_запятой = None\n",
+        "guards": ["tests/test_stage5.py"],
+        "why": "из подписи «Brenner, Olav» в колонку «Имя» уезжала бы одна фамилия",
+    },
+    {
+        "id": "M68",
+        "title": "значок окна снова только по токену",
+        "path": "ui/webapp.py",
+        "old": "        if path == \"/favicon.ico\":\n",
+        "new": "        if False:\n",
+        "guards": ["tests/test_stage5.py"],
+        "why": "на каждый запуск окна в журнал падал бы 403 на /favicon.ico",
+    },
+    {
+        "id": "M69",
+        "title": "окно снова отдаёт пустой генератор прокси вместо None",
+        "path": "ui/webapp.py",
+        "old": "                     if self.proxy_sources else None),",
+        "new": "                     if True else None),",
+        "guards": ["tests/test_stage6_runtime.py"],
+        "why": "без прокси прогон с согласием владельца стопорился бы на «0 из 0»",
+    },
+    {
+        "id": "M70",
+        "title": "предсказатель снова грузит свою копию базы имён",
+        "path": "core/parser/ml_predictor.py",
+        "old": "        self.nd = get_name_dataset()\n",
+        "new": "        from names_dataset import NameDataset; self.nd = NameDataset()\n",
+        "guards": ["tests/test_stage6_runtime.py"],
+        "why": "ещё 1,8 ГБ на процесс: на машине владельца кончалась память",
+    },
+    {
+        "id": "M71",
+        "title": "поток без кириллицы снова печатает «?» вместо букв",
+        "path": "core/nullstream.py",
+        "old": "        кодировка = \"utf-8\"\n",
+        "new": "        кодировка = None\n",
+        "guards": ["tests/test_stage6_runtime.py"],
+        "why": "каждое русское сообщение в выводе в файл было бы нечитаемым",
+    },
+    {
+        "id": "M72",
+        "title": "«Добавить» после «Отмены» снова молча ничего не добавляет",
+        "path": "ui/web/app.js",
+        "old": "  pasteModal.returnValue = \"\";\n",
+        "new": "",
+        "guards": ["tests/test_stage6_runtime.py"],
+        "why": "вставленный список терялся бы без единого сообщения",
+    },
+    {
+        "id": "M73",
+        "title": "E_ABORT при закрытии окна снова выдаётся ошибкой",
+        "path": "core/winnoise.py",
+        "old": "        if _закрывается and _ПРЕРВАНО in текст.lower():\n",
+        "new": "        if False:\n",
+        "guards": ["tests/test_startup_clean.py"],
+        "why": "закрытие окна в первую секунду показывалось бы поломкой движка",
+    },
+    {
+        "id": "M74",
+        "title": "замер запуска снова пишет TIMING_OK при любом исходе",
+        "path": "core/timing.py",
+        "old": "    строки.append(\"TIMING_FAILED: %s\" % провал if провал else \"TIMING_OK\")",
+        "new": "    строки.append(\"TIMING_OK\")",
+        "guards": ["tests/test_startup_clean.py"],
+        "why": "окно, которое не показалось, считалось бы удачным запуском",
+    },
+    {
+        "id": "M75",
+        "title": "непроверенный канарейкой выход считается честным",
+        "path": "core/canary.py",
+        "old": "            return ключ in self._probed and ключ not in self._врут\n",
+        "new": "            return ключ not in self._врут\n",
+        "guards": ["tests/test_revise_by_exit.py"],
+        "why": "«Годен» с выхода, который никто не проверял, пережил бы разоблачение домена",
+    },
+    {
+        "id": "M76",
+        "title": "выход, пойманный тарпитингом, сохраняет «Годен»",
+        "path": "core/verdict_revision.py",
+        "old": "            if (domain in wanted and known and (key, domain) not in liars\n",
+        "new": "            if (domain in wanted and known\n",
+        "guards": ["tests/test_revise_by_exit.py"],
+        "why": "ложные «Годен» с выхода, которому гигант отвечает «да» на всё",
+    },
+    {
+        "id": "M77",
+        "title": "выход неизвестен — а «Годен» сохраняется",
+        "path": "core/verdict_revision.py",
+        "old": "            if (domain in wanted and known and (key, domain) not in liars\n",
+        "new": "            if (domain in wanted and (key, domain) not in liars\n",
+        "guards": ["tests/test_revise_by_exit.py"],
+        "why": "непрофилированный прокси мог делить выход с уличённым",
+    },
+    {
+        "id": "M78",
+        "title": "окно снимает «Годен» и с уцелевших строк",
+        "path": "ui/result_store.py",
+        "old": "                if spare and email_lc in spare:\n",
+        "new": "                if False:\n",
+        "guards": ["tests/test_revise_by_exit.py"],
+        "why": "отзыв по выходу не действовал бы в окне — снова весь домен",
+    },
+    {
+        "id": "M79",
+        "title": "CLI снимает «Годен» и с уцелевших строк",
+        "path": "cli.py",
+        "old": "            if spare and row[\"email\"].strip().lower() in spare:\n",
+        "new": "            if False:\n",
+        "guards": ["tests/test_revise_by_exit.py"],
+        "why": "отзыв по выходу не действовал бы в выгрузке CLI",
+    },
+    {
+        "id": "M80",
+        "title": "выход «Годен» не запоминается",
+        "path": "core/settle.py",
+        "old": "            self._note_valid_exit(email, res)\n",
+        "new": "",
+        "guards": ["tests/test_revise_by_exit.py"],
+        "why": "без выхода ни одна строка не уцелела бы — отзыв по выходу мёртв",
+    },
+    {
+        "id": "M81",
+        "title": "тарпитинг не запоминает пойманный выход",
+        "path": "core/network.py",
+        "old": "                self._tarpit_pairs.add((",
+        "new": "                set().add((",
+        "guards": ["tests/test_revise_by_exit.py"],
+        "why": "выход, пойманный тарпитингом, сохранил бы свои ложные «Годен»",
+    },
+    {
+        "id": "M82",
+        "title": "канарейка снова одна на пару за прогон",
+        "path": "core/canary.py",
+        "old": "                пора = набрано - self._probed_at.get(ключ, 0) >= self.repeat\n",
+        "new": "                пора = False\n",
+        "guards": ["tests/test_canary_repeat.py"],
+        "why": "выход, начавший врать после первой пробы, не попался бы до конца прогона",
+    },
+    {
+        "id": "M83",
+        "title": "«Годен» после последней честной пробы сохраняется",
+        "path": "core/verdict_revision.py",
+        "old": "                    and watch.honest_upto(key, domain) >= номер):\n",
+        "new": "                    ):\n",
+        "guards": ["tests/test_canary_repeat.py"],
+        "why": "ложные «Годен» выхода, включившего тарпитинг после пробы, остались бы",
+    },
+    {
+        "id": "M84",
+        "title": "ответ чужого выхода записывается на этот",
+        "path": "core/verdict_revision.py",
+        "old": "        if self._exit_key(ответ.get(\"proxy\"))[0] != exit_ip:\n            watch.release(exit_ip, domain, covers)\n            return False\n",
+        "new": "",
+        "guards": ["tests/test_canary_repeat.py"],
+        "why": "честный подменный выход ручался бы за непроверенный, лжец уходил бы непойманным",
+    },
+    {
+        "id": "M85",
+        "title": "завершающая канарейка не пускается",
+        "path": "core/pipeline.py",
+        "old": "            self._final_canaries(trapped)\n",
+        "new": "",
+        "guards": ["tests/test_canary_repeat.py"],
+        "why": "хвост «Годен» после последней пробы уходил бы в «Неизвестно» без проверки",
+    },
+    {
+        "id": "M86",
+        "title": "таймаут канарейки снова ручается за честность выхода",
+        "path": "core/canary.py",
+        "old": "        честен = status in _ОТКАЗ_ВЫДУМАННОМУ\n",
+        "new": "        честен = True\n",
+        "guards": ["tests/test_canary_repeat.py", "tests/test_revise_by_exit.py"],
+        "why": "выход, до которого канарейка не дозвонилась, сохранял бы ложные «Годен»",
+    },
+    {
+        "id": "M87",
+        "title": "канарейка снова идёт с перебором выходов и сверкой второго MX",
+        "path": "core/verdict_revision.py",
+        "old": "            if callable(одна_сессия):\n",
+        "new": "            if False:\n",
+        "guards": ["tests/test_canary_repeat.py"],
+        "why": "честный выход на домене с врущим соседом не мог бы себя доказать",
+    },
+    {
+        "id": "M88",
+        "title": "честная канарейка ручается за номер на момент записи, а не запуска",
+        "path": "core/canary.py",
+        "old": "                    покрыто = int(covers)\n",
+        "new": "                    покрыто = self._probed_at.get(ключ, 0)\n",
+        "guards": ["tests/test_audit21_fixes.py"],
+        "why": "проба ручалась бы за «Годен», пришедшие, пока она летела",
+    },
+    {
+        "id": "M89",
+        "title": "летящая канарейка не занимает пару",
+        "path": "core/canary.py",
+        "old": "            if ключ in self._врут or ключ in self._в_полёте:\n",
+        "new": "            if ключ in self._врут:\n",
+        "guards": ["tests/test_audit21_fixes.py"],
+        "why": "каждый «Годен» того же выхода пускал бы ещё одну пробу к почтовику",
+    },
+    {
+        "id": "M90",
+        "title": "сорвавшаяся канарейка не снимает занятость",
+        "path": "core/verdict_revision.py",
+        "old": "            # иначе пара больше не получила бы ни одной пробы за прогон.\n            watch.release(exit_ip, domain, covers)\n",
+        "new": "            # иначе пара больше не получила бы ни одной пробы за прогон.\n",
+        "guards": ["tests/test_audit21_fixes.py"],
+        "why": "после одного обрыва выход не доказал бы честность до конца прогона",
+    },
+    {
+        "id": "M91",
+        "title": "release снимает чужую занятость",
+        "path": "core/canary.py",
+        "old": "            if self._в_полёте.get(ключ) == covers:\n                del self._в_полёте[ключ]\n",
+        "new": "            self._в_полёте.pop(ключ, None)\n",
+        "guards": ["tests/test_audit21_fixes.py"],
+        "why": "закончившая проба снимала бы метку следующей и пускала третью",
+    },
+    {
+        "id": "M92",
+        "title": "отсрочка «под вопросом» снова считается отказом выдуманному",
+        "path": "core/confirmation.py",
+        "old": "    if verdict.get(\"status\") == \"risky\" and (\n",
+        "new": "    if False and (\n",
+        "guards": ["tests/test_audit21_fixes.py"],
+        "why": "«try again later» доказывал бы, что домен не catch-all — ложный «Годен»",
+    },
+    {
+        "id": "M93",
+        "title": "канарейка засчитывает отсрочку как честный отказ",
+        "path": "core/verdict_revision.py",
+        "old": "        if статус in (\"invalid\", \"risky\", \"disabled\") and not rejects_fake(ответ):\n",
+        "new": "        if False:\n",
+        "guards": ["tests/test_audit21_fixes.py"],
+        "why": "выход, отложивший ответ, сохранял бы «Годен» при отзыве по выходу",
+    },
+    {
+        "id": "M94",
+        "title": "«Годен» снова подтверждается отметкой домена, полученной любым выходом",
+        "path": "core/confirmation.py",
+        "old": "            excluded = self._fake_rejected_via(domain, result.get(\"proxy\"))\n",
+        "new": "            excluded = self.catchall_cache.get(domain) is False\n",
+        "guards": ["tests/test_audit21_fixes.py"],
+        "why": "выход под защитой от перебора получал бы «Годен» за счёт честного соседа",
+    },
+    {
+        "id": "M95",
+        "title": "контроль отдельной сессией чужим выходом подтверждает «Годен»",
+        "path": "core/confirmation.py",
+        "old": "            if self._exit_of(proxy) != self._exit_of(result.get(\"proxy\")):\n",
+        "new": "            if False:\n",
+        "guards": ["tests/test_audit21_fixes.py"],
+        "why": "отказ, полученный другим выходом, ручался бы за выход «Годен»",
+    },
+    {
+        "id": "M96",
+        "title": "все выходы снова считаются одним",
+        "path": "core/confirmation.py",
+        "old": "        return str(ip or proxy).lower()\n",
+        "new": "        return \"любой выход\"\n",
+        "guards": ["tests/test_audit21_fixes.py"],
+        "why": "отметка «не catch-all» снова была бы общей для всех выходов",
+    },
+    {
+        "id": "M97",
+        "title": "номер «Годен» снова читается после полёта его канарейки",
+        "path": "core/verdict_revision.py",
+        "old": "        номер = self.__dict__.get(\"_valid_numbers\", {}).pop(адрес, None)\n",
+        "new": "        номер = None\n",
+        "guards": ["tests/test_audit21_fixes.py"],
+        "why": "адрес, пустивший честную пробу, не был бы ею покрыт и уходил в «Неизвестно»",
+    },
+    {
+        "id": "M98",
+        "title": "выбор прокси снова не обходит выход, пойманный на домене",
+        "path": "core/proxy_pool.py",
+        "old": "        пойманы = self.caught_exits_on(domain)\n",
+        "new": "        пойманы = set()\n",
+        "guards": ["tests/test_avoid_caught_exit.py"],
+        "why": "домен ходил бы через лжеца, и каждый его «Годен» уходил бы в отзыв",
+    },
+    {
+        "id": "M99",
+        "title": "канарейка не сообщает сети о пойманном выходе",
+        "path": "core/verdict_revision.py",
+        "old": "            отметить(exit_ip, domain)\n",
+        "new": "            pass\n",
+        "guards": ["tests/test_avoid_caught_exit.py"],
+        "why": "выход, пойманный канарейкой, продолжал бы проверять этот домен",
+    },
+]
+
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+from tools.mutations_late import LATE_MUTATIONS
+
+MUTATIONS += LATE_MUTATIONS
+
+
+_PENDING = {}
+
+
+def _restore_all():
+    for path, source in list(_PENDING.items()):
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(source)
+        except Exception:
+            print("!!! НЕ УДАЛОСЬ ВОССТАНОВИТЬ %s — проверь git diff" % path)
+        _PENDING.pop(path, None)
+
+
+atexit.register(_restore_all)
+
+
+def _read(path):
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def _write(path, text):
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+
+
+def _md5(path):
+    with open(path, "rb") as handle:
+        return hashlib.md5(handle.read()).hexdigest()
+
+
+def _newline_of(source):
+    crlf = source.count("\r\n")
+    return "\r\n" if crlf and crlf >= (source.count("\n") - crlf) else "\n"
+
+
+def _fit(fragment, source):
+    newline = _newline_of(source)
+    plain = fragment.replace("\r\n", "\n")
+    return plain if newline == "\n" else plain.replace("\n", newline)
+
+
+def _pytest(args):
+    command = [sys.executable, "-B", "-m", "pytest", "-q", "--no-header",
+               "-x", "-p", "no:cacheprovider"] + args
+    done = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    output = (done.stdout or "") + (done.stderr or "")
+    lines = [line for line in output.strip().splitlines() if line.strip()]
+    tail = lines[-1] if lines else "нет вывода"
+    return done.returncode != 0, tail
+
+
+def _guard_args(mutation):
+    return list(mutation["guards"])
+
+
+def check_anchors():
+    problems = []
+    for mutation in MUTATIONS:
+        path = os.path.join(ROOT, mutation["path"].replace("/", os.sep))
+        if not os.path.exists(path):
+            problems.append("%s: нет файла %s" % (mutation["id"], mutation["path"]))
+            continue
+        source = _read(path)
+        found = source.count(_fit(mutation["old"], source))
+        if found == 0:
+            problems.append("%s: якорь не найден в %s — код изменился, "
+                            "мутацию надо переписать" % (mutation["id"], mutation["path"]))
+        elif found > 1:
+            problems.append("%s: якорь найден %d раза в %s — он неоднозначен"
+                            % (mutation["id"], found, mutation["path"]))
+    for mutation in MUTATIONS:
+        for guard in mutation["guards"]:
+            if not os.path.exists(os.path.join(ROOT, guard.replace("/", os.sep))):
+                problems.append("%s: сторож %s не существует" % (mutation["id"], guard))
+    return problems
+
+
+def check_baseline(selected):
+    files = sorted({guard for m in selected for guard in m["guards"]})
+    failed, tail = _pytest(files)
+    return (not failed), tail, len(files)
+
+
+def run_mutation(mutation):
+    path = os.path.join(ROOT, mutation["path"].replace("/", os.sep))
+    source = _read(path)
+    before = _md5(path)
+    _PENDING[path] = source
+    try:
+        _write(path, source.replace(_fit(mutation["old"], source),
+                                    _fit(mutation["new"], source), 1))
+        if _md5(path) == before:
+            return "survived", "мутация не изменила файл — замена совпала с исходником"
+        caught, tail = _pytest(_guard_args(mutation))
+        if caught:
+            return "caught", tail
+        caught_wide, tail_wide = _pytest(FAST_SUITE)
+        if caught_wide:
+            return "caught_elsewhere", tail_wide
+        return "survived", tail_wide
+    finally:
+        _write(path, source)
+        _PENDING.pop(path, None)
+        if _md5(path) != before:
+            raise SystemExit("!!! %s не восстановлен побайтово — останавливаюсь"
+                             % mutation["path"])
+
+
+def main(argv):
+    wanted = [a for a in argv[1:] if not a.startswith("-")]
+    if "--list" in argv:
+        for mutation in MUTATIONS:
+            print("%-4s %s" % (mutation["id"], mutation["title"]))
+            print("       сторожа: %s" % ", ".join(mutation["guards"]))
+        return 0
+
+    selected = [m for m in MUTATIONS if not wanted or m["id"] in wanted]
+    if not selected:
+        print("не нашёл мутаций по имени: %s" % ", ".join(wanted))
+        return 2
+
+    print("=" * 78)
+    print("МУТАЦИОННЫЙ ГЕЙТ: %d мутаций" % len(selected))
+    print("=" * 78)
+
+    problems = check_anchors()
+    if problems:
+        print("ОШИБКА: гейт сломан, а не код. Устаревший якорь или несуществующий")
+        print("сторож означает, что мутация не применялась вовсе:")
+        for problem in problems:
+            print("   - %s" % problem)
+        return 1
+
+    ok, tail, count = check_baseline(selected)
+    print("Базовый прогон сторожей (%d файлов): %s" % (count, tail))
+    if not ok:
+        print("ОШИБКА: набор красный ДО мутаций. Сначала починить тесты — "
+              "на красном наборе мутационный гейт не значит ничего.")
+        return 1
+    print()
+
+    survived, elsewhere = [], []
+    for mutation in selected:
+        verdict, tail = run_mutation(mutation)
+        if verdict == "caught":
+            mark = "ПОЙМАНО"
+        elif verdict == "caught_elsewhere":
+            mark = "поймано, но не сторожем"
+            elsewhere.append(mutation)
+        else:
+            mark = "НЕ ЗАМЕЧЕНО"
+            survived.append(mutation)
+        print("[%-22s] %-4s %s" % (mark, mutation["id"], mutation["title"]))
+        print("%26s %s" % ("", tail))
+
+    print()
+    print("=" * 78)
+    print("поймано: %d из %d" % (len(selected) - len(survived), len(selected)))
+
+    if elsewhere:
+        print()
+        print("Сторож указан неверно (мутацию поймал другой тест) — поправь список:")
+        for mutation in elsewhere:
+            print("   - %s: %s" % (mutation["id"], ", ".join(mutation["guards"])))
+
+    if survived:
+        print()
+        print("ДЫРА В НАБОРЕ. Эти поломки не заметил НИ ОДИН тест быстрого круга:")
+        for mutation in survived:
+            print("   - %s %s" % (mutation["id"], mutation["title"]))
+            print("        цена ошибки: %s" % mutation["why"])
+            print("        где: %s" % mutation["path"])
+        print()
+        print("Это не повод отключить гейт. Это список тестов, которых не хватает.")
+        return 1
+
+    print(SUCCESS_TOKEN)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -1,0 +1,184 @@
+# -*- coding: utf-8 -*-
+import io
+import os
+import sys
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+import numpy as np
+from PIL import Image
+
+КОРЕНЬ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, КОРЕНЬ)
+
+from tools.make_icon import (ИМЯ, РАЗМЕРЫ, _srgb_to_linear,
+                             resize_linear)
+
+ПОРОГ_ОТКЛОНЕНИЯ = 12.0
+ПОРОГ_ЯРКОСТИ = 0.05
+
+
+def кадры_из_ico(путь):
+    ico = Image.open(путь)
+    из = {}
+    for (w, h) in sorted(ico.info.get("sizes", [])):
+        ico.size = (w, h)
+        из[w] = ico.copy().convert("RGBA")
+    return из
+
+
+def кадры_из_icns(путь):
+    сырое = open(путь, "rb").read()
+    if сырое[:4] != b"icns":
+        return {}
+    ПОДПИСЬ_PNG = bytes([137, 80, 78, 71, 13, 10, 26, 10])
+    из = {}
+    смещение = 8
+    while смещение + 8 <= len(сырое):
+        длина = int.from_bytes(сырое[смещение + 4:смещение + 8], "big")
+        if длина < 8 or смещение + длина > len(сырое):
+            break
+        данные = сырое[смещение + 8:смещение + длина]
+        смещение += длина
+        if данные[:8] != ПОДПИСЬ_PNG:
+            continue
+        try:
+            кадр = Image.open(io.BytesIO(данные)).convert("RGBA")
+        except Exception:
+            continue
+        из[кадр.width] = кадр
+    return из
+
+
+def отклонение(кадр, эталон):
+    a = np.asarray(кадр.convert("RGBA"), dtype=np.float64)
+    b = np.asarray(эталон.convert("RGBA"), dtype=np.float64)
+    видно = (a[..., 3] > 32) & (b[..., 3] > 32)
+    if видно.sum() == 0:
+        return 255.0
+    return float(np.abs(a[..., :3][видно] - b[..., :3][видно]).mean())
+
+
+def яркость(img):
+    arr = np.asarray(img.convert("RGBA"), dtype=np.float64) / 255.0
+    lin = _srgb_to_linear(arr[..., :3])
+    lum = 0.2126 * lin[..., 0] + 0.7152 * lin[..., 1] + 0.0722 * lin[..., 2]
+    w = arr[..., 3]
+    if w.sum() < 1e-9:
+        return 0.0
+    return float((lum * w).sum() / w.sum())
+
+
+def main():
+    активы = os.path.join(КОРЕНЬ, "assets")
+    путь_ico = os.path.join(активы, ИМЯ + ".ico")
+    путь_png = os.path.join(активы, ИМЯ + ".png")
+    for п in (путь_ico, путь_png):
+        if not os.path.exists(п):
+            print("нет файла:", п)
+            return 1
+
+    мастер = Image.open(путь_png).convert("RGBA")
+    кадры = кадры_из_ico(путь_ico)
+    плохо = 0
+
+    print("размеров в .ico: %d" % len(кадры))
+    if sorted(кадры) != sorted(РАЗМЕРЫ):
+        print("НЕТ  состав размеров: %s, ждали %s" % (sorted(кадры),
+                                                      sorted(РАЗМЕРЫ)))
+        плохо += 1
+
+    print()
+    print("1. ЕДИНЫЙ ИСТОЧНИК (порог %.1f уровня)" % ПОРОГ_ОТКЛОНЕНИЯ)
+    худшее = 0.0
+    for size in sorted(кадры):
+        эталон = мастер.resize((size, size), Image.LANCZOS)
+        d = отклонение(кадры[size], эталон)
+        худшее = max(худшее, d)
+        ок = d <= ПОРОГ_ОТКЛОНЕНИЯ
+        if not ок:
+            плохо += 1
+        print("  %s %3d px  отклонение %6.2f" % ("ok  " if ок else "НЕТ ",
+                                                 size, d))
+    print("  худшее отклонение: %.2f" % худшее)
+
+    чужая = Image.new("RGBA", (256, 256), (255, 0, 0, 255))
+    d_чужой = отклонение(чужая, мастер.resize((256, 256), Image.LANCZOS))
+    контроль_ок = d_чужой > ПОРОГ_ОТКЛОНЕНИЯ
+    if not контроль_ок:
+        плохо += 1
+    print("  %s обратный контроль: чужая картинка даёт %.2f (порог %.1f)"
+          % ("ok  " if контроль_ок else "НЕТ ", d_чужой, ПОРОГ_ОТКЛОНЕНИЯ))
+
+    print()
+    print("2. ЯРКОСТЬ (порог %.0f%%, эталон по мастеру попиксельно)"
+          % (ПОРОГ_ЯРКОСТИ * 100))
+    эталонная = яркость(мастер)
+    print("  яркость мастера: %.6f" % эталонная)
+    худшая = 0.0
+    for size in sorted(кадры):
+        я = яркость(кадры[size])
+        доля = abs(я - эталонная) / эталонная if эталонная else 1.0
+        худшая = max(худшая, доля)
+        ок = доля <= ПОРОГ_ЯРКОСТИ
+        if not ок:
+            плохо += 1
+        print("  %s %3d px  %.6f  отклонение %+6.2f%%"
+              % ("ok  " if ок else "НЕТ ", size, я,
+                 100.0 * (я - эталонная) / эталонная if эталонная else 0.0))
+    print("  худшее отклонение яркости: %.2f%%" % (худшая * 100))
+
+    наивно = мастер.resize((16, 16), Image.LANCZOS)
+    я_наив = яркость(наивно)
+    доля_наив = abs(я_наив - эталонная) / эталонная if эталонная else 0.0
+    контроль2 = доля_наив > ПОРОГ_ЯРКОСТИ
+    if not контроль2:
+        плохо += 1
+    print("  %s обратный контроль: наивный sRGB на 16 px даёт %+.2f%% "
+          "(порог %.0f%%)" % ("ok  " if контроль2 else "НЕТ ",
+                              100.0 * (я_наив - эталонная) / эталонная,
+                              ПОРОГ_ЯРКОСТИ * 100))
+    наш = яркость(resize_linear(мастер, 16))
+    print("       для сравнения наш конвейер на 16 px: %+.2f%%"
+          % (100.0 * (наш - эталонная) / эталонная))
+
+    путь_icns = os.path.join(активы, ИМЯ + ".icns")
+    print()
+    print("3. ИКОНКА macOS (.icns), тот же мастер и те же пороги")
+    if not os.path.exists(путь_icns):
+        print("  НЕТ  файла нет: %s" % путь_icns)
+        плохо += 1
+    else:
+        кадры_mac = кадры_из_icns(путь_icns)
+        print("  размеров в .icns: %d -> %s"
+              % (len(кадры_mac), sorted(кадры_mac)))
+        ok = len(кадры_mac) >= 4
+        if not ok:
+            плохо += 1
+        print("  %s кадров достаточно (нужно от 4)" % ("ok  " if ok else "НЕТ "))
+        for size in sorted(кадры_mac):
+            эталон = мастер.resize((size, size), Image.LANCZOS)
+            d = отклонение(кадры_mac[size], эталон)
+            я = яркость(кадры_mac[size])
+            доля = abs(я - эталонная) / эталонная if эталонная else 1.0
+            ок = d <= ПОРОГ_ОТКЛОНЕНИЯ and доля <= ПОРОГ_ЯРКОСТИ
+            if not ок:
+                плохо += 1
+            print("  %s %4d px  отклонение %6.2f  яркость %+6.2f%%"
+                  % ("ok  " if ок else "НЕТ ", size, d,
+                     100.0 * (я - эталонная) / эталонная if эталонная else 0.0))
+
+    print()
+    if плохо:
+        print("ПРОВАЛОВ: %d" % плохо)
+        return 1
+    print("ICON_OK")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
