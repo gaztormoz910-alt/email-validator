@@ -1,0 +1,15 @@
+# ui/colors.py
+# Centralized color definitions based on the UI/UX Specification
+
+BG_MAIN = "#0B0F19"
+BG_CARD_1 = "#111827"
+BG_CARD_2 = "#0D1117"
+BORDER = "#1E293B"
+
+TEXT_MAIN = "#E2E8F0"
+TEXT_MUTED = "#64748B"
+
+ACCENT_PRIMARY = "#3B82F6"
+ACCENT_SUCCESS = "#10B981"
+ACCENT_ERROR = "#EF4444"
+ACCENT_WARNING = "#F59E0B"
