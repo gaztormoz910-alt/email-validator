@@ -4,6 +4,7 @@ import smtplib
 import socket
 import random
 import socks
+import threading
 
 class SocksSMTP(smtplib.SMTP):
     """Custom SMTP class that routes traffic through a SOCKS5 proxy."""
@@ -72,18 +73,30 @@ class NetworkValidator:
         self.timeout = timeout
         self.proxies = proxies if proxies else []
         
-        # Настройка DNS резолвера
+        # Настройка DNS резолвера (используем публичные DNS для стабильности при 5000+ потоках)
         self.resolver = dns.resolver.Resolver()
+        self.resolver.nameservers = ['8.8.8.8', '1.1.1.1', '8.8.4.4', '1.0.0.1']
         self.resolver.timeout = self.timeout
         self.resolver.lifetime = self.timeout
+        
+        # Кэш MX-записей (чтобы не дудосить DNS сервер 50000 запросами для одного gmail.com)
+        self.mx_cache = {}
+        self.mx_lock = threading.Lock()
 
     def get_mx_records(self, domain: str) -> list:
-        """Ищет MX-записи для домена. Если их нет - почта физически не может существовать."""
+        """Ищет MX-записи для домена с использованием In-Memory кэша."""
+        with self.mx_lock:
+            if domain in self.mx_cache:
+                return self.mx_cache[domain]
+                
         try:
             answers = self.resolver.resolve(domain, 'MX')
-            # Сортируем серверы по приоритету (preference)
             records = sorted(answers, key=lambda x: x.preference)
-            return [str(record.exchange).rstrip('.') for record in records]
+            result = [str(record.exchange).rstrip('.') for record in records]
+            
+            with self.mx_lock:
+                self.mx_cache[domain] = result
+            return result
         except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers, dns.exception.Timeout):
             return []
         except Exception:
@@ -131,8 +144,10 @@ class NetworkValidator:
                     return {"status": "invalid", "reason": f"Disabled Account"}
                 elif code >= 500:
                     return {"status": "invalid", "reason": f"{code} {msg_str}"}
-                elif code == 451 or code == 452:
+                elif code in [450, 451, 452]:
                     return {"status": "risky", "reason": f"Greylisted {code}"}
+                elif code >= 400 and code < 500:
+                    return {"status": "risky", "reason": f"Temp Error {code} {msg_str}"}
                 else:
                     return {"status": "unknown", "reason": f"{code} {msg_str}"}
                     
@@ -157,7 +172,14 @@ class NetworkValidator:
         # Шаг 1: DNS / MX Check
         mx_records = self.get_mx_records(domain)
         if not mx_records:
-            return {"status": "invalid", "reason": "No MX records"}
+            return {"status": "invalid", "reason": "No MX records", "mx_record": "N/A"}
+            
+        # Защита от попадания в Blacklist (Опыт Validol)
+        av_vendors = ["proofpoint.com", "mimecast.com", "fireeye.com", "barracudanetworks.com", "phishline.com", "perimeterwatch.com"]
+        for mx in mx_records:
+            mx_lower = mx.lower()
+            if any(vendor in mx_lower for vendor in av_vendors):
+                return {"status": "trap", "reason": "AV Vendor (Dangerous)", "mx_record": mx}
             
         # Шаг 2: Stealth SMTP Ping (Берем самый приоритетный сервер)
         primary_mx = mx_records[0]
