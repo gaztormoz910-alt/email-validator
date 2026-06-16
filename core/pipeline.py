@@ -1,7 +1,7 @@
 # core/pipeline.py
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core.cleaner import EmailCleaner
 from core.filters import SpamFilter
@@ -34,6 +34,8 @@ class ValidationPipeline:
             # Теперь таймаут строго подчиняется твоему ползунку (никаких ограничений!)
             live_proxies = filter_live_proxies(proxies, timeout=timeout, threads=threads, progress_callback=self.callbacks['on_progress'])
             self.callbacks['on_log'](f"[INFO] Проверка завершена. Найдено рабочих прокси: {len(live_proxies)} из {len(proxies)}.", "info")
+            if 'on_proxies_tested' in self.callbacks:
+                self.callbacks['on_proxies_tested'](len(live_proxies), len(proxies))
             if not live_proxies:
                 self.callbacks['on_log']("[DEAD] Внимание: Ни один из загруженных прокси не работает. Валидация скорее всего завершится с ошибками.", "dead")
             proxies = live_proxies
@@ -74,10 +76,24 @@ class ValidationPipeline:
             while self.is_paused:
                 time.sleep(0.5)
                 
-            # Шаг 1.5: Проверка через ИИ
+            # Шаг 1.2: Проверка на опасные домены и ролевые ящики (Validol)
+            if "@" in email:
+                local_p, domain_p = email.split("@", 1)
+                bad_tlds = {".gov", ".mil", ".edu"}
+                roles = {"admin", "support", "staff", "info", "sales", "postmaster", "webmaster", "contact", "billing", "help", "hr", "office", "marketing", "hello", "noreply", "no-reply"}
+                
+                for tld in bad_tlds:
+                    if domain_p.endswith(tld):
+                        self.callbacks['on_result'](email, "Trap/Disposable", "Dangerous TLD", "N/A")
+                        return
+                if local_p in roles:
+                    self.callbacks['on_result'](email, "Trap/Disposable", "Role-based Account", "N/A")
+                    return
+
+            # Шаг 1.5: Проверка через ИИ (Машинное обучение)
             if enable_ai and self.ai:
                 if self.ai.predict(email):
-                    self.callbacks['on_result'](email, "Trap/Disposable", "AI Filter Blocked", "N/A")
+                    self.callbacks['on_result'](email, "Trap/Disposable", "AI: Bot/Spam Pattern", "N/A")
                     return
                 
             # Шаг 2: Фильтр Спам-ловушек (Blacklist)
@@ -103,7 +119,7 @@ class ValidationPipeline:
                     break
                 futures.append(executor.submit(process_single, email))
                 
-            for future in futures:
+            for future in as_completed(futures):
                 if not self.is_running:
                     break
                 future.result()
