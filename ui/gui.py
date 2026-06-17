@@ -39,6 +39,50 @@ class ProxyHunterInputSelector(ctk.CTkFrame):
         self.textbox.pack(fill="x")
         self.textbox.bind("<KeyRelease>", self._text_modified)
         
+        # Explicit paste bindings
+        self.textbox.bind("<Control-v>", self._paste)
+        self.textbox.bind("<Control-V>", self._paste)
+        
+        # Right click menu
+        self.textbox.bind("<Button-3>", self._show_menu)
+        
+    def _show_menu(self, event):
+        # We can't easily do a native popup menu in CTk without tkinter.Menu, but tkinter.Menu looks bad.
+        # Let's just use standard tkinter Menu for right click.
+        import tkinter as tk
+        m = tk.Menu(self.textbox, tearoff=0, bg=BG_CARD_2, fg=TEXT_MAIN, activebackground=ACCENT_PRIMARY)
+        m.add_command(label="Вставить", command=self._paste_from_menu)
+        m.add_command(label="Копировать", command=self._copy_from_menu)
+        m.add_command(label="Выбрать все", command=self._select_all_from_menu)
+        m.tk_popup(event.x_root, event.y_root)
+
+    def _paste_from_menu(self):
+        try:
+            self.textbox.insert("insert", self.clipboard_get())
+            self._text_modified(None)
+        except Exception:
+            pass
+
+    def _copy_from_menu(self):
+        try:
+            text = self.textbox.get("sel.first", "sel.last")
+            self.clipboard_clear()
+            self.clipboard_append(text)
+        except Exception:
+            pass
+
+    def _select_all_from_menu(self):
+        self.textbox.tag_add("sel", "1.0", "end")
+
+    def _paste(self, event):
+        try:
+            text = self.clipboard_get()
+            self.textbox.insert("insert", text)
+            self._text_modified(None)
+            return "break"
+        except Exception:
+            pass
+        
     def _switch_mode(self, mode):
         if mode == "Файл":
             self.text_frame.pack_forget()
@@ -150,10 +194,16 @@ class ValidatorApp(ctk.CTk):
         except Exception:
             pass
         
+        self.app_mode = "Валидатор"
         self.raw_emails = []
         self.proxies = []
         self.stats = {"valid": 0, "invalid": 0, "spam": 0, "unknown": 0}
         self.results_data = []
+        
+        self.parser_raw_dorks = []
+        self.parser_proxies = []
+        self.parser_results_data = []
+        self.parser_pipeline = None
         
         self.pipeline = ValidationPipeline(callbacks={
             'on_log': self.safe_log,
@@ -177,6 +227,10 @@ class ValidatorApp(ctk.CTk):
             if messagebox.askyesno("Внимание", "Проверка сейчас запущена!\nВы уверены, что хотите прервать работу и закрыть программу?"):
                 self.pipeline.is_running = False
                 self.destroy()
+        elif hasattr(self, 'parser_pipeline') and self.parser_pipeline and self.parser_pipeline.is_alive():
+            if messagebox.askyesno("Внимание", "Парсинг сейчас запущен!\nВы уверены, что хотите прервать работу и закрыть программу?"):
+                self.parser_pipeline.stop()
+                self.destroy()
         else:
             self.destroy()
 
@@ -188,43 +242,159 @@ class ValidatorApp(ctk.CTk):
         self.sidebar.pack(fill="both", expand=True)
 
         header_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        header_frame.pack(fill="x", pady=20, padx=20)
+        header_frame.pack(fill="x", pady=(20, 10), padx=20)
         
         self.logo_label = ctk.CTkLabel(header_frame, text="⚙ Конфигурация", font=ctk.CTkFont(size=16, weight="bold"), text_color=TEXT_MAIN)
-        self.logo_label.pack(anchor="w")
+        self.logo_label.pack(anchor="center", pady=(0, 10))
+
+        self.mode_switcher = ctk.CTkSegmentedButton(
+            header_frame, 
+            values=["Валидатор", "Парсер"], 
+            command=self._switch_app_mode,
+            fg_color=BG_CARD_2, 
+            selected_color=ACCENT_PRIMARY, 
+            selected_hover_color="#60A5FA", 
+            unselected_color=BG_CARD_2, 
+            unselected_hover_color=BORDER, 
+            text_color=TEXT_MAIN,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.mode_switcher.set("Валидатор")
+        self.mode_switcher.pack(fill="x")
         
         self.separator = ctk.CTkFrame(self.sidebar, height=1, fg_color=BORDER)
         self.separator.pack(fill="x", padx=20, pady=(0, 20))
 
-        self.db_selector = ProxyHunterInputSelector(self.sidebar, "База Email адресов:", "Выбрать", command=self.load_file, on_paste=self.on_emails_pasted)
+        # --- VALIDATOR SIDEBAR CONTENT ---
+        self.validator_sidebar_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.validator_sidebar_frame.pack(fill="both", expand=True)
+
+        self.db_selector = ProxyHunterInputSelector(self.validator_sidebar_frame, "База Email адресов:", "Выбрать", command=self.load_file, on_paste=self.on_emails_pasted)
         self.db_selector.pack(fill="x", padx=20, pady=(0, 5))
         
-        self.loaded_lbl = ctk.CTkLabel(self.sidebar, text="Загружено: 0", text_color=TEXT_MUTED, font=ctk.CTkFont(size=11))
+        self.loaded_lbl = ctk.CTkLabel(self.validator_sidebar_frame, text="Загружено: 0", text_color=TEXT_MUTED, font=ctk.CTkFont(size=11))
         self.loaded_lbl.pack(padx=20, anchor="w", pady=(0, 15))
         
-        self.proxy_selector = ProxyHunterInputSelector(self.sidebar, "SOCKS5 Прокси:", "Выбрать", command=self.load_proxies, on_paste=self.on_proxies_pasted)
+        self.proxy_selector = ProxyHunterInputSelector(self.validator_sidebar_frame, "SOCKS5 Прокси:", "Выбрать", command=self.load_proxies, on_paste=self.on_proxies_pasted)
         self.proxy_selector.pack(fill="x", padx=20, pady=(0, 5))
         
-        self.loaded_proxies_lbl = ctk.CTkLabel(self.sidebar, text="Прокси: 0", text_color=TEXT_MUTED, font=ctk.CTkFont(size=11))
+        self.loaded_proxies_lbl = ctk.CTkLabel(self.validator_sidebar_frame, text="Прокси: 0", text_color=TEXT_MUTED, font=ctk.CTkFont(size=11))
         self.loaded_proxies_lbl.pack(padx=20, anchor="w", pady=(0, 25))
 
         self.max_hw_threads, self.hw_rank, self.hw_color = self.get_hardware_limits()
 
-        self.threads_slider = ProxyHunterSlider(self.sidebar, "Потоки", 1, self.max_hw_threads, self.max_hw_threads)
+        self.threads_slider = ProxyHunterSlider(self.validator_sidebar_frame, "Потоки", 1, self.max_hw_threads, self.max_hw_threads)
         self.threads_slider.pack(fill="x", padx=20, pady=(0, 20))
         
-        self.timeout_slider = ProxyHunterSlider(self.sidebar, "Таймаут (сек)", 1, 300, 5)
+        self.timeout_slider = ProxyHunterSlider(self.validator_sidebar_frame, "Таймаут (сек)", 1, 300, 5)
         self.timeout_slider.pack(fill="x", padx=20, pady=(0, 25))
 
-        self.chk_ai = ctk.CTkSwitch(self.sidebar, text="Использовать AI фильтр (ML)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color="#FFFFFF", button_hover_color="#E2E8F0")
+        self.chk_ai = ctk.CTkSwitch(self.validator_sidebar_frame, text="Использовать AI фильтр (ML)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color="#FFFFFF", button_hover_color="#E2E8F0")
         self.chk_ai.select()
         self.chk_ai.pack(padx=20, anchor="w", pady=(0, 20))
+        
+        # --- PARSER SIDEBAR CONTENT ---
+        self.parser_sidebar_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        
+        self.dork_selector = ProxyHunterInputSelector(self.parser_sidebar_frame, "Dork-запросы:", "Выбрать", command=self.load_dorks, on_paste=self.on_dorks_pasted)
+        self.dork_selector.pack(fill="x", padx=20, pady=(0, 5))
+        
+        self.loaded_dorks_lbl = ctk.CTkLabel(self.parser_sidebar_frame, text="Загружено: 0", text_color=TEXT_MUTED, font=ctk.CTkFont(size=11))
+        self.loaded_dorks_lbl.pack(padx=20, anchor="w", pady=(0, 15))
+        
+        self.parser_proxy_selector = ProxyHunterInputSelector(self.parser_sidebar_frame, "SOCKS5 Прокси:", "Выбрать", command=self.load_parser_proxies, on_paste=self.on_parser_proxies_pasted)
+        self.parser_proxy_selector.pack(fill="x", padx=20, pady=(0, 5))
+        
+        self.loaded_parser_proxies_lbl = ctk.CTkLabel(self.parser_sidebar_frame, text="Прокси: 0", text_color=TEXT_MUTED, font=ctk.CTkFont(size=11))
+        self.loaded_parser_proxies_lbl.pack(padx=20, anchor="w", pady=(0, 25))
+
+        self.parser_threads_slider = ProxyHunterSlider(self.parser_sidebar_frame, "Потоки (Dorks)", 1, 100, 10)
+        self.parser_threads_slider.pack(fill="x", padx=20, pady=(0, 20))
+
+    def _switch_app_mode(self, mode):
+        self.app_mode = mode
+        if mode == "Валидатор":
+            self.parser_sidebar_frame.pack_forget()
+            self.validator_sidebar_frame.pack(fill="both", expand=True)
+            self.parser_workspace.pack_forget()
+            self.validator_workspace.pack(fill="both", expand=True)
+            self.main_title_lbl.configure(text="EMAIL VALIDATOR PRO")
+            self.sub_title_lbl.configure(text="v4.0 - Продвинутая фильтрация")
+        else:
+            self.validator_sidebar_frame.pack_forget()
+            self.parser_sidebar_frame.pack(fill="both", expand=True)
+            self.validator_workspace.pack_forget()
+            self.parser_workspace.pack(fill="both", expand=True)
+            self.main_title_lbl.configure(text="OSINT EMAIL PARSER")
+            self.sub_title_lbl.configure(text="DuckDuckGo Dork Engine")
+
+    # --- DUMMY HANDLERS FOR PARSER (to be fully implemented later) ---
+    def load_dorks(self):
+        filepath = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
+        if filepath:
+            with open(filepath, "r", encoding="utf-8") as f:
+                self.parser_raw_dorks = list(set([line.strip() for line in f if line.strip()]))
+            if not self.parser_raw_dorks:
+                messagebox.showerror("Ошибка загрузки", "Файл пуст или содержит только пустые строки!")
+                self.dork_selector.set_text("")
+                self.loaded_dorks_lbl.configure(text="Загружено: 0")
+                return
+            self.dork_selector.set_text(filepath)
+            self.loaded_dorks_lbl.configure(text=f"Загружено: {len(self.parser_raw_dorks)}")
+            self.safe_parser_log(f"[INFO] Успешно загружено {len(self.parser_raw_dorks)} уникальных Dork-запросов.", "info")
+
+    def on_dorks_pasted(self, text):
+        self.parser_raw_dorks = list(set([line.strip() for line in text.split("\n") if line.strip()]))
+        self.loaded_dorks_lbl.configure(text=f"Загружено: {len(self.parser_raw_dorks)}")
+
+    def load_parser_proxies(self):
+        filepath = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
+        if filepath:
+            file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+            if file_size_mb > 50:
+                if not messagebox.askyesno("Огромный файл", f"Размер файла прокси: {file_size_mb:.1f} МБ.\nПродолжить?"):
+                    return
+            with open(filepath, "r", encoding="utf-8") as f:
+                raw_proxies = list(set([line.strip() for line in f if line.strip()]))
+            
+            self.parser_proxies = []
+            for p in raw_proxies:
+                p_lower = p.lower()
+                if p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://"):
+                    continue
+                self.parser_proxies.append(p)
+                
+            ignored_count = len(raw_proxies) - len(self.parser_proxies)
+            if not self.parser_proxies:
+                if ignored_count > 0:
+                    messagebox.showerror("Ошибка прокси", "В файле не найдено SOCKS5 прокси!\nВсе адреса были отброшены.")
+                else:
+                    messagebox.showerror("Ошибка загрузки", "Файл с прокси абсолютно пуст!")
+                self.parser_proxy_selector.set_text("")
+                self.loaded_parser_proxies_lbl.configure(text="Прокси: 0")
+                return
+                
+            self.parser_proxy_selector.set_text(filepath)
+            self.loaded_parser_proxies_lbl.configure(text=f"Прокси: {len(self.parser_proxies)}")
+            self.safe_parser_log(f"[INFO] Успешно загружено {len(self.parser_proxies)} SOCKS5 прокси.", "info")
+            if ignored_count > 0:
+                self.safe_parser_log(f"[WARNING] Отброшено {ignored_count} прокси (HTTP/HTTPS/SOCKS4).", "trap")
+
+    def on_parser_proxies_pasted(self, text):
+        raw_proxies = list(set([line.strip() for line in text.split("\n") if line.strip()]))
+        self.parser_proxies = []
+        for p in raw_proxies:
+            p_lower = p.lower()
+            if p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://"):
+                continue
+            self.parser_proxies.append(p)
+        self.loaded_parser_proxies_lbl.configure(text=f"Прокси: {len(self.parser_proxies)}")
 
     def _build_main_workspace(self):
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.main_frame.grid(row=0, column=1, sticky="nsew", padx=20, pady=15)
 
-        # 1. Верхняя шапка
+        # 1. Верхняя шапка (общая для обоих режимов)
         self.header_main = ctk.CTkFrame(self.main_frame, fg_color="transparent", height=50)
         self.header_main.pack(fill="x", pady=(0, 20))
         
@@ -248,28 +418,32 @@ class ValidatorApp(ctk.CTk):
         self.controls_frame = ctk.CTkFrame(self.header_main, fg_color="transparent")
         self.controls_frame.pack(side="right")
         
-        self.start_btn = ctk.CTkButton(self.controls_frame, text="▶", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_PRIMARY, hover_color="#2563EB", text_color="#FFFFFF", command=self.start_validation)
+        self.start_btn = ctk.CTkButton(self.controls_frame, text="▶", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_PRIMARY, hover_color="#2563EB", text_color="#FFFFFF", command=self.start_process)
         self.start_btn.pack(side="left", padx=(0, 8))
         
-        self.pause_btn = ctk.CTkButton(self.controls_frame, text="⏸", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_WARNING, hover_color="#D97706", text_color="#000000", command=self.pause_validation)
+        self.pause_btn = ctk.CTkButton(self.controls_frame, text="⏸", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_WARNING, hover_color="#D97706", text_color="#000000", command=self.pause_process)
         self.pause_btn.pack(side="left", padx=(0, 8))
         
-        self.stop_btn = ctk.CTkButton(self.controls_frame, text="⏹", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_ERROR, hover_color="#DC2626", text_color="#FFFFFF", command=self.stop_validation)
+        self.stop_btn = ctk.CTkButton(self.controls_frame, text="⏹", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_ERROR, hover_color="#DC2626", text_color="#FFFFFF", command=self.stop_process)
         self.stop_btn.pack(side="left")
 
-        # 2. Карточки статистики (2 строки)
-        self.dashboard_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        # --- VALIDATOR WORKSPACE ---
+        self.validator_workspace = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.validator_workspace.pack(fill="both", expand=True)
+        
+        # Карточки статистики (Validator)
+        self.dashboard_frame = ctk.CTkFrame(self.validator_workspace, fg_color="transparent")
         self.dashboard_frame.pack(fill="x", pady=(0, 20))
         self.dashboard_frame.grid_columnconfigure((0, 1, 2), weight=1, uniform="card")
 
-        self._create_stat_card(self.dashboard_frame, 0, 0, "Всего собрано", "0", ACCENT_PRIMARY, "🌐")
-        self._create_stat_card(self.dashboard_frame, 0, 1, "Валидные", "0", ACCENT_SUCCESS, "⚡")
-        self._create_stat_card(self.dashboard_frame, 0, 2, "Невалидные", "0", ACCENT_ERROR, "🗑")
-        self._create_stat_card(self.dashboard_frame, 1, 0, "Спам / Ловушки", "0", ACCENT_WARNING, "⚠️")
-        self._create_stat_card(self.dashboard_frame, 1, 1, "Неизвестно", "0", TEXT_MUTED, "❓")
+        self._create_stat_card(self.dashboard_frame, 0, 0, "Всего собрано", "0", ACCENT_PRIMARY, "🌐", "stat_0")
+        self._create_stat_card(self.dashboard_frame, 0, 1, "Валидные", "0", ACCENT_SUCCESS, "⚡", "stat_1")
+        self._create_stat_card(self.dashboard_frame, 0, 2, "Невалидные", "0", ACCENT_ERROR, "🗑", "stat_2")
+        self._create_stat_card(self.dashboard_frame, 1, 0, "Спам / Ловушки", "0", ACCENT_WARNING, "⚠️", "stat_3")
+        self._create_stat_card(self.dashboard_frame, 1, 1, "Неизвестно", "0", TEXT_MUTED, "❓", "stat_4")
 
-        # 3. Прогресс-бар
-        self.progress_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        # Прогресс-бар (Validator)
+        self.progress_frame = ctk.CTkFrame(self.validator_workspace, fg_color="transparent")
         self.progress_frame.pack(fill="x", pady=(0, 20))
         
         self.progress_text_frame = ctk.CTkFrame(self.progress_frame, fg_color="transparent")
@@ -285,8 +459,8 @@ class ValidatorApp(ctk.CTk):
         self.progress_bar.set(0)
         self.progress_bar.pack(fill="x")
 
-        # 4. Основной контейнер (Терминал / Таблица)
-        self.bottom_container = ctk.CTkFrame(self.main_frame, fg_color="transparent", border_color=BORDER, border_width=1, corner_radius=12)
+        # Терминал / Таблица (Validator)
+        self.bottom_container = ctk.CTkFrame(self.validator_workspace, fg_color="transparent", border_color=BORDER, border_width=1, corner_radius=12)
         self.bottom_container.pack(fill="both", expand=True)
         
         self.tabs_frame = ctk.CTkFrame(self.bottom_container, fg_color="transparent")
@@ -366,6 +540,86 @@ class ValidatorApp(ctk.CTk):
         self.tree.configure(yscrollcommand=self.scrollbar.set)
         self.scrollbar.grid(row=0, column=1, sticky="ns")
 
+        # --- PARSER WORKSPACE ---
+        self.parser_workspace = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        
+        # Карточки статистики (Parser)
+        self.parser_dashboard_frame = ctk.CTkFrame(self.parser_workspace, fg_color="transparent")
+        self.parser_dashboard_frame.pack(fill="x", pady=(0, 20))
+        self.parser_dashboard_frame.grid_columnconfigure((0, 1), weight=1, uniform="card")
+
+        self._create_stat_card(self.parser_dashboard_frame, 0, 0, "Всего Подзапросов", "0", ACCENT_PRIMARY, "🔍", "parser_stat_dorks")
+        self._create_stat_card(self.parser_dashboard_frame, 0, 1, "Страниц (Пагинация)", "0", TEXT_MUTED, "📄", "parser_stat_pages")
+        self._create_stat_card(self.parser_dashboard_frame, 1, 0, "Проверено Сниппетов", "0", TEXT_MUTED, "👁", "parser_stat_snippets")
+        self._create_stat_card(self.parser_dashboard_frame, 1, 1, "Найдено Email-ов", "0", ACCENT_SUCCESS, "📬", "parser_stat_emails")
+
+        # Прогресс-бар (Parser)
+        self.parser_progress_frame = ctk.CTkFrame(self.parser_workspace, fg_color="transparent")
+        self.parser_progress_frame.pack(fill="x", pady=(0, 20))
+        
+        self.parser_progress_text_frame = ctk.CTkFrame(self.parser_progress_frame, fg_color="transparent")
+        self.parser_progress_text_frame.pack(fill="x", pady=(0, 5))
+        
+        self.parser_progress_lbl = ctk.CTkLabel(self.parser_progress_text_frame, text="Парсинг... (0/0)", text_color=TEXT_MUTED, font=ctk.CTkFont(size=12))
+        self.parser_progress_lbl.pack(side="left")
+        
+        self.parser_percent_lbl = ctk.CTkLabel(self.parser_progress_text_frame, text="0%", text_color=ACCENT_PRIMARY, font=ctk.CTkFont(size=12, weight="bold"))
+        self.parser_percent_lbl.pack(side="right")
+
+        self.parser_progress_bar = ctk.CTkProgressBar(self.parser_progress_frame, height=8, corner_radius=4, fg_color=BORDER, progress_color=ACCENT_PRIMARY)
+        self.parser_progress_bar.set(0)
+        self.parser_progress_bar.pack(fill="x")
+
+        # Терминал / Таблица (Parser)
+        self.parser_bottom_container = ctk.CTkFrame(self.parser_workspace, fg_color="transparent", border_color=BORDER, border_width=1, corner_radius=12)
+        self.parser_bottom_container.pack(fill="both", expand=True)
+        
+        self.parser_tabs_frame = ctk.CTkFrame(self.parser_bottom_container, fg_color="transparent")
+        self.parser_tabs_frame.pack(fill="x", pady=(15, 10))
+        
+        self.parser_tab_seg = ctk.CTkSegmentedButton(self.parser_tabs_frame, values=["Терминал", "Собранные Email"], command=self._switch_parser_tab, fg_color=BG_SIDEBAR, selected_color=ACCENT_PRIMARY, selected_hover_color="#60A5FA", unselected_color=BG_SIDEBAR, unselected_hover_color=BG_CARD_2, text_color=TEXT_MAIN)
+        self.parser_tab_seg.set("Терминал")
+        self.parser_tab_seg.pack(anchor="center")
+        
+        self.parser_terminal_view = ctk.CTkFrame(self.parser_bottom_container, fg_color="transparent")
+        self.parser_table_view = ctk.CTkFrame(self.parser_bottom_container, fg_color="transparent")
+        
+        self.parser_terminal_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        
+        self.parser_terminal_header = ctk.CTkFrame(self.parser_terminal_view, fg_color="transparent")
+        self.parser_terminal_header.pack(fill="x", pady=(0, 10))
+        
+        self.parser_copy_logs_btn = ctk.CTkButton(self.parser_terminal_header, text="📋 Копировать", width=120, height=28, corner_radius=6, font=ctk.CTkFont(size=12), command=self.copy_parser_logs, fg_color=ACCENT_PRIMARY, hover_color="#2563EB", text_color="#FFFFFF")
+        self.parser_copy_logs_btn.pack(side="right")
+        
+        self.parser_terminal_box = ctk.CTkTextbox(self.parser_terminal_view, fg_color=BG_CARD_2, text_color=TEXT_MAIN, font=ctk.CTkFont(family="Consolas", size=12), border_width=0, corner_radius=8)
+        self.parser_terminal_box.pack(fill="both", expand=True)
+        self.parser_terminal_box.configure(state="disabled")
+
+        self.parser_table_export_frame = ctk.CTkFrame(self.parser_table_view, fg_color="transparent")
+        self.parser_table_export_frame.pack(fill="x", pady=(0, 10))
+        
+        self.parser_export_btn = ctk.CTkButton(self.parser_table_export_frame, text="💾 Экспорт", command=self.export_parser_results, width=100, height=28, fg_color=ACCENT_SUCCESS, hover_color="#22C55E", corner_radius=6)
+        self.parser_export_btn.pack(side="left")
+
+        self.parser_table_frame = ctk.CTkFrame(self.parser_table_view, fg_color="transparent")
+        self.parser_table_frame.pack(fill="both", expand=True)
+        self.parser_table_frame.grid_rowconfigure(0, weight=1)
+        self.parser_table_frame.grid_columnconfigure(0, weight=1)
+
+        p_columns = ("email", "dork")
+        self.parser_tree = ttk.Treeview(self.parser_table_frame, columns=p_columns, show="headings")
+        self.parser_tree.heading("email", text="Email", anchor="w")
+        self.parser_tree.heading("dork", text="Dork Source", anchor="w")
+        
+        self.parser_tree.column("email", width=300, minwidth=200, stretch=True, anchor="w")
+        self.parser_tree.column("dork", width=400, minwidth=250, stretch=True, anchor="w")
+        self.parser_tree.grid(row=0, column=0, sticky="nsew")
+
+        self.parser_scrollbar = ctk.CTkScrollbar(self.parser_table_frame, orientation="vertical", command=self.parser_tree.yview, fg_color="transparent", button_color=ACCENT_PRIMARY, button_hover_color="#60A5FA")
+        self.parser_tree.configure(yscrollcommand=self.parser_scrollbar.set)
+        self.parser_scrollbar.grid(row=0, column=1, sticky="ns")
+
     def _switch_tab(self, value):
         if value == "Терминал":
             self.table_view.pack_forget()
@@ -374,7 +628,47 @@ class ValidatorApp(ctk.CTk):
             self.terminal_view.pack_forget()
             self.table_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
 
-    def _create_stat_card(self, parent, row, col, title, value, val_color, icon):
+    def _switch_parser_tab(self, value):
+        if value == "Терминал":
+            self.parser_table_view.pack_forget()
+            self.parser_terminal_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        else:
+            self.parser_terminal_view.pack_forget()
+            self.parser_table_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+
+    def copy_parser_logs(self):
+        text = self.parser_terminal_box.get("1.0", "end-1c")
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        messagebox.showinfo("Скопировано", "Логи терминала парсера скопированы в буфер обмена.")
+
+    def export_parser_results(self):
+        if not hasattr(self, 'parser_results_data') or not self.parser_results_data:
+            messagebox.showwarning("Пусто", "Нет собранных Email адресов для экспорта.")
+            return
+            
+        file_types = [("Text File (Только Email)", "*.txt"), ("CSV File (Email+Dork)", "*.csv")]
+        filepath = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=file_types, initialfile="parsed_emails.txt")
+        if filepath:
+            try:
+                import csv
+                if filepath.endswith(".csv"):
+                    with open(filepath, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["Email", "Dork Source"])
+                        for r in self.parser_results_data:
+                            writer.writerow([r["email"], r["dork"]])
+                else:
+                    # Txt mode: just distinct emails to save the user from deduplicating
+                    distinct_emails = list(set([r["email"] for r in self.parser_results_data]))
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        for e in distinct_emails:
+                            f.write(e + "\n")
+                messagebox.showinfo("Экспорт", f"Успешно сохранено!\n\nВсего адресов в файле: {len(self.parser_results_data) if filepath.endswith('.csv') else len(distinct_emails)}")
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
+
+    def _create_stat_card(self, parent, row, col, title, value, val_color, icon, attr_name):
         pad_x = (0, 10) if col < 2 else (0, 0)
         pad_y = (0, 10) if row == 0 else (0, 0)
         
@@ -396,8 +690,7 @@ class ValidatorApp(ctk.CTk):
         lbl_val = ctk.CTkLabel(inner, text=value, text_color=val_color, font=ctk.CTkFont(size=36, weight="bold"))
         lbl_val.pack(anchor="w", pady=(10, 0))
         
-        idx = row * 3 + col
-        setattr(self, f"stat_{idx}", lbl_val)
+        setattr(self, attr_name, lbl_val)
 
     def get_hardware_limits(self):
         cores = psutil.cpu_count(logical=True) or 2
@@ -472,6 +765,24 @@ class ValidatorApp(ctk.CTk):
             self.proxies.append(p)
         self.loaded_proxies_lbl.configure(text=f"Прокси: {len(self.proxies)}")
 
+    def start_process(self):
+        if self.app_mode == "Валидатор":
+            self.start_validation()
+        else:
+            self.start_parsing()
+
+    def pause_process(self):
+        if self.app_mode == "Валидатор":
+            self.pause_validation()
+        else:
+            self.pause_parsing()
+
+    def stop_process(self):
+        if self.app_mode == "Валидатор":
+            self.stop_validation()
+        else:
+            self.stop_parsing()
+
     def start_validation(self):
         if not self.raw_emails:
             self.safe_log("[DEAD] Ошибка: Загрузите базу перед стартом!", "dead")
@@ -486,8 +797,6 @@ class ValidatorApp(ctk.CTk):
             self.safe_log("[DEAD] Ошибка: Отсутствует подключение к интернету.", "dead")
             return
             
-        pass
-        
         self.stats = {"valid": 0, "invalid": 0, "spam": 0, "unknown": 0}
         self.results_data.clear()
         
@@ -597,6 +906,118 @@ class ValidatorApp(ctk.CTk):
             self.stats["invalid"] += 1
             self.stat_2.configure(text=str(self.stats["invalid"]))
             self.safe_log(f"[DEAD] {email} -> {reason}", "dead")
+
+    def start_parsing(self):
+        if hasattr(self, 'parser_pipeline') and self.parser_pipeline and self.parser_pipeline.is_alive():
+            return
+            
+        if not self.parser_raw_dorks:
+            self.safe_parser_log("[Ошибка] Загрузите дорки перед стартом!", "dead")
+            return
+            
+        self.parser_results_data.clear()
+        
+        self.parser_stat_dorks.configure(text="0")
+        self.parser_stat_pages.configure(text="0")
+        self.parser_stat_snippets.configure(text="0")
+        self.parser_stat_emails.configure(text="0")
+        
+        for item in self.parser_tree.get_children():
+            self.parser_tree.delete(item)
+            
+        self.dork_selector.btn.configure(state="disabled")
+        self.dork_selector.textbox.configure(state="disabled")
+        self.dork_selector.seg_btn.configure(state="disabled")
+        self.parser_proxy_selector.btn.configure(state="disabled")
+        self.parser_proxy_selector.textbox.configure(state="disabled")
+        self.parser_proxy_selector.seg_btn.configure(state="disabled")
+            
+        self.parser_terminal_box.configure(state="normal")
+        self.parser_terminal_box.delete("1.0", "end")
+        self.parser_terminal_box.configure(state="disabled")
+        self.safe_parser_log("[Система] Инициализация конвейера парсера...", "info")
+
+        threads = int(self.parser_threads_slider.get())
+        
+        from core.parser_pipeline import ParserPipeline
+        self.parser_pipeline = ParserPipeline(
+            dorks=self.parser_raw_dorks,
+            proxies=self.parser_proxies,
+            max_threads=threads,
+            on_log=self.safe_parser_log,
+            on_progress=self.safe_update_parser_progress,
+            on_stats_update=self.safe_update_parser_stats,
+            on_result_found=self.safe_add_parser_result,
+            on_complete=self.on_parser_complete
+        )
+        self.parser_pipeline.start()
+
+    def pause_parsing(self):
+        if hasattr(self, 'parser_pipeline') and self.parser_pipeline and self.parser_pipeline.is_alive():
+            if self.parser_pipeline._pause_event.is_set():
+                self.parser_pipeline.resume()
+                self.pause_btn.configure(text="⏸", fg_color=ACCENT_WARNING)
+                self.safe_parser_log("[Система] Парсинг возобновлен (RESUMED).", "info")
+            else:
+                self.parser_pipeline.pause()
+                self.pause_btn.configure(text="▶", fg_color=ACCENT_SUCCESS)
+                self.safe_parser_log("[Система] Парсинг приостановлен (PAUSE).", "info")
+
+    def stop_parsing(self):
+        if hasattr(self, 'parser_pipeline') and self.parser_pipeline and self.parser_pipeline.is_alive():
+            self.parser_pipeline.stop()
+            self.safe_parser_log("[Система] Остановка парсинга пользователем (STOP).", "info")
+
+    def safe_parser_log(self, message, tag="info"):
+        self.log_queue.put((message, tag))
+        
+    def _update_parser_log(self, message, tag):
+        self.parser_terminal_box.configure(state="normal")
+        self.parser_terminal_box.insert("end", message + "\n", tag)
+        self.parser_terminal_box.see("end")
+        self.parser_terminal_box.configure(state="disabled")
+
+    def safe_update_parser_stats(self, dorks_tot, dorks_done, pages, snippets, emails):
+        self.stats_queue.put((dorks_tot, dorks_done, pages, snippets, emails))
+
+    def _update_parser_stats_ui(self, dorks_tot, dorks_done, pages, snippets, emails):
+        self.parser_stat_dorks.configure(text=str(dorks_tot))
+        self.parser_stat_pages.configure(text=f"{pages:.0f}")
+        self.parser_stat_snippets.configure(text=str(int(snippets)))
+        self.parser_stat_emails.configure(text=str(emails))
+
+    def safe_update_parser_progress(self, current, total, pct):
+        self.progress_queue.put((current, total, pct))
+        
+    def _update_parser_progress_ui(self, current, total, pct):
+        status_text = "Завершено" if pct == 100 else "Парсинг..."
+        self.parser_progress_lbl.configure(text=f"{status_text} ({current}/{total})")
+        self.parser_percent_lbl.configure(text=f"{pct}%")
+        self.parser_progress_bar.set(pct / 100.0)
+        
+        if total > 0 and pct == 100:
+            self.parser_progress_bar.configure(progress_color=ACCENT_SUCCESS)
+        else:
+            self.parser_progress_bar.configure(progress_color=ACCENT_PRIMARY)
+
+    def safe_add_parser_result(self, email, dork):
+        self.result_queue.put((email, dork))
+        
+    def _add_parser_result_ui(self, email, dork):
+        self.parser_results_data.append({"email": email, "dork": dork})
+        self.parser_tree.insert("", "end", values=(email, dork))
+
+    def on_parser_complete(self, aborted=False):
+        self.after(0, self._reset_ui_after_parser_complete)
+        
+    def _reset_ui_after_parser_complete(self):
+        self.pause_btn.configure(text="⏸", fg_color=ACCENT_WARNING)
+        self.dork_selector.btn.configure(state="normal")
+        self.dork_selector.textbox.configure(state="normal")
+        self.dork_selector.seg_btn.configure(state="normal")
+        self.parser_proxy_selector.btn.configure(state="normal")
+        self.parser_proxy_selector.textbox.configure(state="normal")
+        self.parser_proxy_selector.seg_btn.configure(state="normal")
 
     def on_pipeline_complete(self):
         self.after(0, self._reset_ui_after_complete)
