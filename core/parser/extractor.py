@@ -7,7 +7,7 @@ class EmailExtractor:
         self.pattern = re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+')
         
         # Extensions that are commonly false positives (e.g., from images or files)
-        self.bad_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.css', '.js', '.mp4', '.mp3'}
+        self.bad_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.css', '.js', '.mp4', '.mp3', 'duckduckgo.com', 'duck.com'}
         
         # Common false positive prefixes
         self.bad_prefixes = {'sentry', '1.0.0', 'example', 'test', 'username', 'name', 'yourname', 'email'}
