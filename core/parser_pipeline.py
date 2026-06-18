@@ -5,12 +5,14 @@ from .parser.engine import ProxyManager, DuckDuckGoEngine
 from .parser.extractor import EmailExtractor
 
 class ParserPipeline(threading.Thread):
-    def __init__(self, dorks, proxies, max_threads,
-                 on_log=None, on_progress=None, on_stats_update=None, on_result_found=None, on_complete=None):
+    def __init__(self, dorks, proxies, max_threads, timeout=5.0,
+                 on_log=None, on_progress=None, on_stats_update=None, on_result_found=None, on_complete=None, engine_name="DuckDuckGo Lite"):
         super().__init__()
         self.dorks = dorks
         self.proxies = proxies
         self.max_threads = max_threads
+        self.timeout = timeout
+        self.engine_name = engine_name
         
         self.on_log = on_log
         self.on_progress = on_progress
@@ -21,13 +23,11 @@ class ParserPipeline(threading.Thread):
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         
-        self.proxy_manager = ProxyManager(self.proxies)
+        self.proxy_manager = ProxyManager(self.proxies, timeout=self.timeout)
         self.extractor = EmailExtractor()
         self.dork_queue = queue.Queue()
         
-        deep_suffixes = [""] + list("abcdefghijklmnopqrstuvwxyz") + ["1", "2", "3", "info", "contact"]
-        
-        self.total_dorks = len(self.dorks) * len(deep_suffixes)
+        self.total_dorks = len(self.dorks)
         self.processed_dorks = 0
         self.processed_pages = 0
         self.processed_snippets = 0
@@ -36,9 +36,8 @@ class ParserPipeline(threading.Thread):
         self.stats_lock = threading.Lock()
         
         for i, d in enumerate(self.dorks, 1):
-            for s in deep_suffixes:
-                sub_query = f"{d} {s}".strip()
-                self.dork_queue.put((i, sub_query, d))
+            # Передаем оригинальный dork без добавления мусорных символов
+            self.dork_queue.put((i, d.strip(), d))
             
 
 
@@ -50,17 +49,24 @@ class ParserPipeline(threading.Thread):
             self.processed_snippets += snippet
             self.total_emails += emails
             
-            if self.on_stats_update:
-                self.on_stats_update(
-                    self.total_dorks,
-                    self.processed_dorks,
-                    self.processed_pages,
-                    self.processed_snippets,
-                    self.total_emails
-                )
-            if self.on_progress:
-                pct = int((self.processed_dorks / max(1, self.total_dorks)) * 100)
-                self.on_progress(self.processed_dorks, self.total_dorks, pct)
+            # Snapshots for callbacks to avoid holding lock during I/O
+            snap_tot = self.total_dorks
+            snap_done = self.processed_dorks
+            snap_pages = self.processed_pages
+            snap_snip = self.processed_snippets
+            snap_em = self.total_emails
+
+        if self.on_stats_update:
+            self.on_stats_update(
+                snap_tot,
+                snap_done,
+                snap_pages,
+                snap_snip,
+                snap_em
+            )
+        if self.on_progress:
+            pct = int((snap_done / max(1, snap_tot)) * 100)
+            self.on_progress(snap_done, snap_tot, pct)
 
     def log(self, msg):
         if self.on_log:
@@ -76,37 +82,57 @@ class ParserPipeline(threading.Thread):
         self._pause_event.clear()
 
     def run(self):
-        self.log(f"[Система] Инициализация парсера. Загружено дорков: {self.total_dorks}, прокси: {len(self.proxies)}")
+        self.log(f"[Система] Инициализация парсера. Поисковик: {self.engine_name}. Загружено дорков: {self.total_dorks}")
         
-        # 1. Ping proxies
-        if self.proxies:
-            self.log("[Система] Проверка работоспособности SOCKS5 прокси...")
-            
-            def _proxy_progress(checked, total, live):
-                if self.on_progress:
-                    pct = int((checked / total) * 100) if total > 0 else 0
-                    self.on_progress(checked, total, pct)
-                if checked % max(1, (total // 10)) == 0 or checked == total:
-                    self.log(f"[Система] Проверка прокси: {checked}/{total} (Живых: {live})")
-                    
-            self.proxy_manager.check_all_proxies(progress_callback=_proxy_progress)
-            
-            live = self.proxy_manager.get_live_count()
-            self.log(f"[Система] Рабочих прокси: {live} из {len(self.proxies)}")
-            if live == 0:
-                self.log("[Ошибка] Нет ни одного рабочего прокси! Парсинг невозможен.")
+        tor_engines = ["SearXNG (Tor)", "AOL"]
+        use_tor = self.engine_name in tor_engines
+        
+        if use_tor:
+            from core.tor_manager import TorManager
+            self.tor_manager = TorManager(log_callback=self.log)
+            if not self.tor_manager.start():
+                self.log("[Ошибка] Не удалось запустить Tor. Парсинг невозможен.")
                 if self.on_complete:
                     self.on_complete(aborted=True)
                 return
         else:
-            self.log("[Предупреждение] Прокси не загружены. Парсинг пойдет через прямой IP!")
+            # 1. Ping proxies
+            if self.proxies:
+                self.log(f"[Система] Проверка работоспособности SOCKS5 прокси ({len(self.proxies)} шт.)...")
+                
+                def _proxy_progress(checked, total, live):
+                    if self.on_progress:
+                        pct = int((checked / total) * 100) if total > 0 else 0
+                        self.on_progress(checked, total, pct, label="Проверка прокси")
+                    if checked % max(1, (total // 10)) == 0 or checked == total:
+                        self.log(f"[Система] Проверка прокси: {checked}/{total} (Живых: {live})")
+                        
+                self.proxy_manager.check_all_proxies(max_workers=self.max_threads, progress_callback=_proxy_progress)
+                
+                live = self.proxy_manager.get_live_count()
+                self.log(f"[Система] Рабочих прокси: {live} из {len(self.proxies)}")
+                if live == 0:
+                    self.log("[Ошибка] Нет ни одного рабочего прокси! Парсинг невозможен.")
+                    if self.on_complete:
+                        self.on_complete(aborted=True)
+                    return
+            else:
+                self.log("[Предупреждение] Прокси не загружены. Парсинг пойдет через прямой IP!")
 
         # Initialize UI stats to 0
         self._update_stats()
 
         # 2. Worker thread logic
         def worker():
-            engine = DuckDuckGoEngine(self.proxy_manager, on_log=self.log)
+            if self.engine_name == "SearXNG (Tor)":
+                from core.parser.searxng import SearXNGEngine
+                engine = SearXNGEngine(self.proxy_manager, on_log=self.log, use_tor=True)
+            elif self.engine_name == "AOL":
+                from core.parser.searxng import SearXNGEngine # Fallback for now until AOL is implemented
+                engine = SearXNGEngine(self.proxy_manager, on_log=self.log, use_tor=True)
+            else:
+                engine = DuckDuckGoEngine(self.proxy_manager, on_log=self.log)
+                
             while not self._stop_event.is_set():
                 while self._pause_event.is_set() and not self._stop_event.is_set():
                     time.sleep(0.5)
@@ -158,10 +184,15 @@ class ParserPipeline(threading.Thread):
 
         # 3. Spawn workers
         threads = []
-        num_threads = min(self.max_threads, self.total_dorks)
+        # Ограничиваем количество физических потоков до 500, чтобы не убить Windows (RuntimeError: can't start new thread)
+        safe_max_threads = min(self.max_threads, 500)
+        num_threads = min(safe_max_threads, self.total_dorks)
         if num_threads <= 0: num_threads = 1
         
-        self.log(f"[Система] Запуск {num_threads} потоков...")
+        if num_threads < self.max_threads:
+            self.log(f"[Система] Запуск {num_threads} потоков (ограничено {'системой безопасности' if safe_max_threads < self.max_threads else 'количеством текущих задач'})...")
+        else:
+            self.log(f"[Система] Запуск {num_threads} потоков...")
         for i in range(num_threads):
             t = threading.Thread(target=worker, daemon=True)
             t.start()
@@ -175,6 +206,10 @@ class ParserPipeline(threading.Thread):
             self.log("[Система] Парсинг был принудительно остановлен.")
         else:
             self.log(f"[Система] Парсинг успешно завершен! Всего найдено: {self.total_emails}")
+        
+        if hasattr(self, 'tor_manager') and self.tor_manager:
+            self.tor_manager.stop()
             
+        self.log(f"[Система] Парсинг завершен. Всего почт: {self.total_emails}")
         if self.on_complete:
             self.on_complete(aborted=self._stop_event.is_set())
