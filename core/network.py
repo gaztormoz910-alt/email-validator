@@ -47,24 +47,17 @@ def check_single_proxy(proxy, timeout):
 
 def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None):
     """Тестирует список прокси и возвращает только рабочие (у которых открыт 25 порт)."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    live_proxies = []
+    from core.async_proxy import run_async_checker
     
-    total = len(proxies)
-    completed = 0
+    # We use mode="smtp" to ensure port 25 is open and responds with 220 greeting.
+    live_proxies = run_async_checker(
+        proxies=proxies,
+        workers=threads,
+        timeout=timeout,
+        mode="smtp",
+        progress_callback=lambda c, t, l: progress_callback(c, t) if progress_callback else None
+    )
     
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        # submit tasks instead of map to track progress as they complete
-        futures = {executor.submit(check_single_proxy, p, timeout): p for p in proxies}
-        
-        for future in as_completed(futures):
-            res = future.result()
-            completed += 1
-            if progress_callback:
-                progress_callback(completed, total)
-            if res:
-                live_proxies.append(res)
-            
     return live_proxies
 
 class NetworkValidator:
