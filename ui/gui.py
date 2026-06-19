@@ -308,7 +308,7 @@ class ValidatorApp(ctk.CTk):
         })
 
         self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=0, minsize=300)
+        self.grid_columnconfigure(0, weight=0, minsize=550)
         self.grid_columnconfigure(1, weight=1)
 
         self._build_sidebar()
@@ -415,7 +415,7 @@ class ValidatorApp(ctk.CTk):
         self.engine_lbl.pack(padx=20, anchor="w", pady=(0, 5))
         
         self.engine_var = ctk.StringVar(value="DuckDuckGo Lite")
-        self.engine_selector = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["DuckDuckGo Lite", "SearXNG (Tor)", "AOL", "Yahoo", "Bing"], fg_color=BG_CARD_2, button_color=BORDER, button_hover_color=ACCENT_PRIMARY, command=self._on_engine_change)
+        self.engine_selector = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["DuckDuckGo Lite", "AOL (Tor)", "Yahoo", "Bing"], fg_color=BG_CARD_2, button_color=BORDER, button_hover_color=ACCENT_PRIMARY, command=self._on_engine_change)
         self.engine_selector.pack(fill="x", padx=20, pady=(0, 20))
 
         parser_max_threads = min(self.max_hw_threads, 500)
@@ -446,7 +446,7 @@ class ValidatorApp(ctk.CTk):
             self.sub_title_lbl.configure(text=f"{engine} Dork Engine")
 
     def _on_engine_change(self, value):
-        tor_engines = ["SearXNG (Tor)", "AOL"]
+        tor_engines = ["AOL (Tor)"]
         if value in tor_engines:
             self.parser_proxy_frame.pack_forget()
             self.parser_proxy_selector.clear_btn.invoke() # Also clear the loaded proxies for safety
