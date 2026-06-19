@@ -20,6 +20,16 @@ class EmailExtractor:
         if not text:
             return set()
             
+        import html
+        text = html.unescape(text)
+        # Strip inline tags that might break emails apart in search snippets (like <b>email@...</b>)
+        text = re.sub(r'</?(b|i|em|strong|span|u|a)[^>]*>', '', text, flags=re.IGNORECASE)
+        # DuckDuckGo often highlights search terms including quotes, e.g. tom.hovey"@gmail.com"
+        # We must remove quotes so they don't split the email prefix from the domain
+        text = text.replace('"', '').replace("'", '')
+        # Replace other formatting/layout tags with spaces to prevent merging unrelated words
+        text = re.sub(r'<[^>]+>', ' ', text)
+            
         found_emails = set()
         raw_matches = self.pattern.findall(text)
         

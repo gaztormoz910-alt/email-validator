@@ -46,7 +46,7 @@ class ProxyManager:
         for p in self.proxies:
             if self._normalize_url(p["url"]) == proxy_url:
                 p["fails"] += 1
-                if p["fails"] >= 3:
+                if p["fails"] >= 10:  # Убиваем прокси только после 10 фейлов (было 3)
                     p["dead"] = True
                 break
                 
@@ -91,14 +91,29 @@ import re
 import time
 import random
 import logging
-from typing import Iterator, Optional, Dict, Any
+import urllib3
+from typing import Iterator, Optional, Dict, Any, List
+
+# Disable SSL warnings for target page scraping
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Rotating User-Agents to avoid fingerprinting
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+]
 
 class DuckDuckGoEngine:
     """
     Robust DuckDuckGo Scraper Engine.
-    Implements infinite pagination, heavy error handling, and proxy rotation.
+    Implements infinite pagination, heavy error handling, proxy rotation,
+    and target URL scraping for deep email extraction.
     """
-    def __init__(self, proxy_manager: Any, max_retries: int = 15, max_results_per_dork: int = 250, on_log: Optional[Any] = None) -> None:
+    def __init__(self, proxy_manager: Any, max_retries: int = 50, max_results_per_dork: int = 500, on_log: Optional[Any] = None) -> None:
         self.proxy_manager = proxy_manager
         self.max_retries = max_retries
         self.max_results = max_results_per_dork
@@ -108,7 +123,7 @@ class DuckDuckGoEngine:
         self._safe_log = on_log if callable(on_log) else (lambda x: logging.info(x))
         
         self.headers: Dict[str, str] = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": random.choice(USER_AGENTS),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
             "Origin": "https://lite.duckduckgo.com",
@@ -123,10 +138,95 @@ class DuckDuckGoEngine:
         except Exception:
             pass # Тотальная защита: падение логгера не должно ронять парсер
 
+    def _extract_result_urls(self, html: str) -> List[str]:
+        """
+        Извлекает URL-ы целевых сайтов из HTML-страницы результатов DuckDuckGo Lite.
+        DDG Lite оборачивает ссылки через redirect: //duckduckgo.com/l/?uddg=ENCODED_URL
+        или показывает прямые ссылки.
+        """
+        urls = []
+        
+        # Pattern 1: DDG redirect links (uddg=URL)
+        uddg_matches = re.findall(r'uddg=(https?[^&"]+)', html)
+        for match in uddg_matches:
+            try:
+                from urllib.parse import unquote
+                decoded = unquote(match)
+                if decoded and 'duckduckgo.com' not in decoded.lower():
+                    urls.append(decoded)
+            except Exception:
+                pass
+        
+        # Pattern 2: Direct links in result snippets
+        direct_matches = re.findall(r'<a[^>]+rel="nofollow"[^>]+href="(https?://[^"]+)"', html)
+        for match in direct_matches:
+            if 'duckduckgo.com' not in match.lower():
+                urls.append(match)
+        
+        # Pattern 3: Snippet URLs shown as text (class="result-snippet")
+        snippet_urls = re.findall(r'<span class="link-text">(https?://[^<]+)</span>', html)
+        urls.extend(snippet_urls)
+        
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for u in urls:
+            if u not in seen:
+                seen.add(u)
+                unique.append(u)
+        return unique
+
+    def _scrape_target_url(self, session: requests.Session, target_url: str, proxies: Optional[Dict]) -> Optional[str]:
+        """
+        Заходит на целевой URL и возвращает текст страницы для извлечения email-ов.
+        """
+        # Пропускаем заведомо бесполезные домены (соц.сети, медиа и т.д.)
+        skip_domains = [
+            'youtube.com', 'twitter.com', 'x.com', 'facebook.com', 'instagram.com',
+            'tiktok.com', 'reddit.com', 'wikipedia.org', 'amazon.com', 'ebay.com',
+            'google.com', 'bing.com', 'yahoo.com', 'duckduckgo.com', 'pinterest.com',
+            'apple.com', 'microsoft.com', 'github.com', 'stackoverflow.com',
+        ]
+        url_lower = target_url.lower()
+        for skip in skip_domains:
+            if skip in url_lower:
+                return None
+        
+        # Пропускаем не-HTML ресурсы
+        skip_ext = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip', '.rar', '.mp4', '.mp3', '.png', '.jpg', '.gif']
+        for ext in skip_ext:
+            if url_lower.endswith(ext):
+                return None
+        
+        try:
+            scrape_headers = {
+                "User-Agent": random.choice(USER_AGENTS),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            }
+            res = session.get(
+                target_url, 
+                proxies=proxies, 
+                timeout=12, 
+                headers=scrape_headers,
+                allow_redirects=True, 
+                verify=False
+            )
+            
+            content_type = res.headers.get('Content-Type', '')
+            if 'text' not in content_type and 'html' not in content_type:
+                return None
+            
+            if res.status_code == 200:
+                return res.text[:80000]  # Лимит 80KB чтобы не забить RAM
+            return None
+        except Exception:
+            return None  # Тихо пропускаем ошибки скрапинга — не засоряем лог
+
     def search_generator(self, query: str) -> Iterator[str]:
         """
         Генератор, который безопасно скачивает сырой HTML со всех доступных страниц поиска DuckDuckGo.
-        Работает до тех пор, пока сервер сам не перестанет выдавать новые страницы.
+        Для каждой страницы также скрапит целевые URL-ы и отдаёт их контент для глубокого извлечения email-ов.
         """
         if not query or not isinstance(query, str):
             self._log("[Система] Ошибка: Пустой или некорректный запрос.")
@@ -142,6 +242,7 @@ class DuckDuckGoEngine:
             
             while True: # Бесконечная пагинация (пока сервер отдает кнопку Next)
                 retries: int = 0
+                captcha_rotations: int = 0  # Ротации из-за капчи не считаются жёсткими ретраями
                 success: bool = False
                 
                 while retries < self.max_retries:
@@ -155,32 +256,60 @@ class DuckDuckGoEngine:
                     proxies: Optional[Dict[str, str]] = {"http": proxy_url, "https": proxy_url} if proxy_url else None
                     timeout: float = float(getattr(self.proxy_manager, 'timeout', 15.0))
                     
+                    # Ротация User-Agent каждые 5 попыток
+                    if retries % 5 == 0:
+                        session.headers["User-Agent"] = random.choice(USER_AGENTS)
+                    
                     try:
                         res = session.post(url, data=data, proxies=proxies, timeout=timeout)
+                        
+                        # Проверка на статус 202 (DuckDuckGo отдает его при капче)
+                        if res.status_code == 202:
+                            captcha_rotations += 1
+                            # Не считаем как жёсткий retry, просто берём другой прокси
+                            if captcha_rotations % 10 == 0:
+                                self._log(f"[DDG] Капча: {captcha_rotations} ротаций, продолжаю...")
+                            time.sleep(random.uniform(0.3, 1.0))
+                            continue  # НЕ увеличиваем retries!
+                        
                         res.raise_for_status() # Бросает исключение на 4xx и 5xx статусы
                         
                         html: str = res.text
                         if not html or not isinstance(html, str):
                             raise ValueError("Получен пустой ответ от сервера.")
                             
-                        # Проверка на статус 202 (DuckDuckGo отдает его при капче)
-                        if res.status_code == 202:
-                            raise ValueError("DuckDuckGo выдал капчу (HTTP 202).")
-                            
                         # Проверка на заглушки, блокировки и капчи от DuckDuckGo
                         html_lower = html.lower()
                         if "connected over tor" in html_lower or "tor exit node" in html_lower:
-                            raise ValueError("DuckDuckGo заблокировал этот IP (Tor Exit Node).")
+                            # Просто ротируем, не убиваем прокси
+                            captcha_rotations += 1
+                            time.sleep(random.uniform(0.3, 1.0))
+                            continue
                         if "bots use duckduckgo too" in html_lower or "challenge-form" in html_lower:
-                            raise ValueError("DuckDuckGo требует пройти капчу (Bot Detection).")
+                            captcha_rotations += 1
+                            time.sleep(random.uniform(0.3, 1.0))
+                            continue
                         if "duckduckgo" not in html_lower and "results" not in html_lower:
                             raise ValueError("Заглушка или нетипичный ответ от сервера.")
                         
-                        # Отдаем фулл HTML-код в главный цикл
+                        # === ЭТАП 1: Отдаём HTML сниппетов (быстрый проход) ===
                         yield html
                         
                         if proxy_url:
                             self.proxy_manager.mark_success(proxy_url)
+                        
+                        # === ЭТАП 2: Скрапинг целевых URL-ов (глубокий проход) ===
+                        target_urls = self._extract_result_urls(html)
+                        if target_urls:
+                            self._log(f"[DDG] Стр.{pages_fetched + 1}: {len(target_urls)} ссылок → скрапинг целевых сайтов...")
+                            scraped_count = 0
+                            for target in target_urls:
+                                page_content = self._scrape_target_url(session, target, proxies)
+                                if page_content:
+                                    scraped_count += 1
+                                    yield page_content
+                            if scraped_count > 0:
+                                self._log(f"[DDG] Стр.{pages_fetched + 1}: успешно скрапнуто {scraped_count}/{len(target_urls)} сайтов")
                         
                         success = True
                         pages_fetched += 1
@@ -203,23 +332,23 @@ class DuckDuckGoEngine:
                             return # Кнопки "Next" нет, данные по Dork-у закончились
                             
                     except requests.exceptions.ProxyError:
-                        self._log(f"[Прокси] {proxy_url} - Ошибка SOCKS/HTTP, пробую другой...")
                         if proxy_url: self.proxy_manager.mark_fail(proxy_url)
                     except requests.exceptions.Timeout:
-                        self._log(f"[Прокси] {proxy_url} - Таймаут соединения, пробую другой...")
                         if proxy_url: self.proxy_manager.mark_fail(proxy_url)
                     except Exception as e:
                         error_msg = str(e)
                         short_proxy = proxy_url.split("//")[-1] if proxy_url else "direct"
-                        self._log(f"[Прокси] {short_proxy} - Сбой: {error_msg[:80]}")
+                        # Логируем только каждую 5-ю ошибку чтобы не засорять терминал
+                        if retries % 5 == 0:
+                            self._log(f"[Прокси] {short_proxy} - Сбой: {error_msg[:80]}")
                         if proxy_url: self.proxy_manager.mark_fail(proxy_url)
                     finally:
                         retries += 1
-                        time.sleep(random.uniform(0.5, 1.5))
+                        time.sleep(random.uniform(0.3, 1.0))
                 
                 # Если после N попыток мы так и не скачали страницу - прерываем этот Dork
                 if not success:
-                    self._log(f"[Система] Не удалось загрузить страницу {pages_fetched + 1} после {self.max_retries} попыток.")
+                    self._log(f"[Система] Не удалось загрузить страницу {pages_fetched + 1} после {self.max_retries} попыток (+ {captcha_rotations} ротаций капчи).")
                     break
 
 if __name__ == "__main__":
