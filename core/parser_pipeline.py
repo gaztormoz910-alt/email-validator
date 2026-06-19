@@ -84,7 +84,7 @@ class ParserPipeline(threading.Thread):
     def run(self):
         self.log(f"[Система] Инициализация парсера. Поисковик: {self.engine_name}. Загружено дорков: {self.total_dorks}")
         
-        tor_engines = ["SearXNG (Tor)", "AOL"]
+        tor_engines = ["AOL (Tor)"]
         use_tor = self.engine_name in tor_engines
         
         if use_tor:
@@ -124,12 +124,17 @@ class ParserPipeline(threading.Thread):
 
         # 2. Worker thread logic
         def worker():
-            if self.engine_name == "SearXNG (Tor)":
-                from core.parser.searxng import SearXNGEngine
-                engine = SearXNGEngine(self.proxy_manager, on_log=self.log, use_tor=True)
-            elif self.engine_name == "AOL":
-                from core.parser.searxng import SearXNGEngine # Fallback for now until AOL is implemented
-                engine = SearXNGEngine(self.proxy_manager, on_log=self.log, use_tor=True)
+            if self.engine_name == "AOL (Tor)":
+                class TorProxyManagerWrapper:
+                    def __init__(self, tm):
+                        self.tm = tm
+                        self.timeout = 45.0
+                    def get_total_count(self): return 1
+                    def get_proxy(self): return self.tm.get_proxy_url()
+                    def mark_fail(self, url): self.tm.renew_ip()
+                    def mark_success(self, url): pass
+                
+                engine = DuckDuckGoEngine(TorProxyManagerWrapper(self.tor_manager), on_log=self.log)
             else:
                 engine = DuckDuckGoEngine(self.proxy_manager, on_log=self.log)
                 
@@ -143,6 +148,13 @@ class ParserPipeline(threading.Thread):
                     break # queue is empty, worker can exit
                 
                 self.log(f"[DORK {dork_idx}/{len(self.dorks)}] Sub-query: {sub_query}")
+                
+                # Extract domain filter from dork (e.g. "@gmail.com" -> "gmail.com")
+                import re as _re
+                domain_filter = None
+                domain_match = _re.search(r'["\']?@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})["\']?', sub_query)
+                if domain_match:
+                    domain_filter = domain_match.group(1).lower()
                 
                 pages_found = 0
                 emails_from_dork = 0
@@ -164,6 +176,11 @@ class ParserPipeline(threading.Thread):
                         self._update_stats(snippet=1)
                         
                         emails = self.extractor.extract(snippet)
+                        
+                        # Filter emails by domain from dork query
+                        if emails and domain_filter:
+                            emails = {e for e in emails if e.endswith('@' + domain_filter)}
+                        
                         if emails:
                             new_emails_count = len(emails)
                             emails_from_dork += new_emails_count
