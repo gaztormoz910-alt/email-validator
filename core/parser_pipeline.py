@@ -127,15 +127,14 @@ class ParserPipeline(threading.Thread):
         def worker():
             if self.engine_name == "AOL (Tor)":
                 class TorProxyManagerWrapper:
-                    def __init__(self, tm):
+                    def __init__(self, tm, configured_timeout):
                         self.tm = tm
-                        self.timeout = 45.0
+                        self.timeout = float(configured_timeout)
                     def get_total_count(self): return 1
                     def get_proxy(self): return self.tm.get_proxy_url()
                     def mark_fail(self, url): self.tm.renew_ip()
                     def mark_success(self, url): pass
-                
-                engine = AOLEngine(TorProxyManagerWrapper(self.tor_manager), on_log=self.log)
+                engine = AOLEngine(TorProxyManagerWrapper(self.tor_manager, self.timeout), on_log=self.log)
             else:
                 engine = DuckDuckGoEngine(self.proxy_manager, on_log=self.log)
                 
