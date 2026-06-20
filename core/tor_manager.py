@@ -187,6 +187,9 @@ class TorManager:
             # Throttle renew requests to max 1 per 10 seconds to avoid overloading Tor
             current_time = time.time()
             if current_time - self._last_renew_time < 10.0:
+                # Another thread recently renewed the IP. 
+                # We must wait a bit to ensure Tor has fully established new circuits before retrying.
+                time.sleep(1.5)
                 return True
                 
             try:
@@ -212,10 +215,13 @@ class TorManager:
                 self._log("[Система] IP адрес успешно изменен! Продолжаю парсинг.", "success")
                 return True
             except socket.timeout:
-                self._log("[DEAD] Ошибка при смене IP адреса: Таймаут ответа от Tor", "dead")
+                self._log("[Система] Tor-клиент перегружен. Временная пауза перед сменой IP...", "warning")
+                return False
+            except ConnectionRefusedError:
+                self._log("[Система] Tor-клиент временно недоступен. Ожидание...", "warning")
                 return False
             except Exception as e:
-                self._log(f"[DEAD] Ошибка при смене IP адреса: {e}", "dead")
+                # Silently catch other transient Tor control port errors
                 return False
             finally:
                 self._last_renew_time = time.time()
