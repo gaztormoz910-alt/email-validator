@@ -1,4 +1,4 @@
-# Tor state file last generated on 2026-06-20 09:34:23 local time
+# Tor state file last generated on 2026-06-20 09:34:30 local time
 # Other times below are in UTC
 # You *do not* need to edit this file.
 
@@ -243,6 +243,7 @@ CircuitBuildTimeBin 17165 1
 CircuitBuildTimeBin 17525 1
 CircuitBuildTimeBin 17535 1
 CircuitBuildTimeBin 17665 1
+CircuitBuildTimeBin 17805 1
 CircuitBuildTimeBin 17995 1
 CircuitBuildTimeBin 18175 1
 CircuitBuildTimeBin 18225 1
@@ -256,6 +257,7 @@ CircuitBuildTimeBin 19995 1
 CircuitBuildTimeBin 20265 1
 CircuitBuildTimeBin 20315 1
 CircuitBuildTimeBin 20525 1
+CircuitBuildTimeBin 20635 1
 CircuitBuildTimeBin 21315 1
 CircuitBuildTimeBin 21325 1
 CircuitBuildTimeBin 21355 1
@@ -386,6 +388,6 @@ Guard in=default rsa_id=B9E3F5B9031D5E1708D1415C9284CA58AFC61849 nickname=Planet
 Guard in=default rsa_id=083C52051140DB8AF770BD40C7C8883EFFF4CAF3 nickname=FightAntisemitism sampled_on=2026-06-12T21:21:49 sampled_idx=19 sampled_by=0.4.9.9 listed=1
 Guard in=bridges rsa_id=2B280B23E1107BB62ABFC40DDCC8824814F80A72 bridge_addr=192.0.2.3:80 sampled_on=2026-06-09T00:54:08 sampled_idx=0 sampled_by=0.4.9.9 listed=1 confirmed_on=2026-06-14T08:22:16 confirmed_idx=1 pb_use_attempts=56.000000 pb_use_successes=56.000000 pb_circ_attempts=177.000000 pb_circ_successes=165.000000 pb_successful_circuits_closed=164.000000 pb_collapsed_circuits=1.000000 pb_timeouts=11.000000
 Guard in=bridges rsa_id=8838024498816A039FCBBAB14E6F40A0843051FA bridge_addr=192.0.2.4:80 sampled_on=2026-06-16T02:32:18 sampled_idx=1 sampled_by=0.4.9.9 listed=1 confirmed_on=2026-06-11T23:54:42 confirmed_idx=0 pb_use_attempts=59.000000 pb_use_successes=57.000000 pb_circ_attempts=185.000000 pb_circ_successes=177.000000 pb_successful_circuits_closed=175.000000 pb_unusable_circuits=2.000000 pb_timeouts=6.000000
-LastWritten 2026-06-20 03:34:23
+LastWritten 2026-06-20 03:34:30
 TorVersion Tor 0.4.9.9 (git-74b53bd1992da4ec)
-TotalBuildTimes 438
+TotalBuildTimes 440
