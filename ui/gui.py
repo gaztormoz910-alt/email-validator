@@ -447,6 +447,15 @@ class ValidatorApp(ctk.CTk):
 
     def _on_engine_change(self, value):
         tor_engines = ["AOL (Tor)"]
+        
+        # Limit threads slider for Tor to max 50
+        max_t = 50 if value in tor_engines else min(self.max_hw_threads, 500)
+        self.parser_threads_slider.to = max_t
+        self.parser_threads_slider.slider.configure(to=max_t)
+        if self.parser_threads_slider.val > max_t:
+            self.parser_threads_slider.val = max_t
+        self.parser_threads_slider._update_all()
+        
         if value in tor_engines:
             self.parser_proxy_frame.pack_forget()
             self.parser_proxy_selector.clear_btn.invoke() # Also clear the loaded proxies for safety

@@ -1,6 +1,6 @@
 SocksPort 9050
 ControlPort 9051
-HashedControlPassword 16:21B3EB15BB696A62DB5DC05060A56EEDBEA79AD576403D3BB232AE0020
+HashedControlPassword 16:0276BB60159E2A43607648F746CFC086CE78F225E20C1E526107CDD6E0
 DataDirectory "C:/Users/user/OneDrive/Desktop/email validator/tor_bin/Data/Tor"
 Log notice stdout
 UseBridges 1
