@@ -25,6 +25,8 @@ class TorManager:
             return
             
         self.log_callback = log_callback or print
+        self._renew_lock = threading.Lock()
+        self._last_renew_time = 0
         
         # Determine paths
         if getattr(sys, 'frozen', False):
@@ -40,7 +42,7 @@ class TorManager:
         self.tor_port = 9050
         self.control_port = 9051
         self.password = "parser_secret" # Simple password for local control port
-        self.hashed_password = "16:21B3EB15BB696A62DB5DC05060A56EEDBEA79AD576403D3BB232AE0020" # Hash for "parser_secret" generated via tor --hash-password
+        self.hashed_password = "16:0276BB60159E2A43607648F746CFC086CE78F225E20C1E526107CDD6E0" # Hash for "parser_secret" generated via tor --hash-password
         
         self._initialized = True
 
@@ -180,17 +182,43 @@ class TorManager:
         if not self.process or self.process.poll() is not None:
             return False
             
-        try:
-            self._log("[Система] Запрашиваю смену IP адреса у Tor...", "warning")
-            with Controller.from_port(port=self.control_port) as controller:
-                controller.authenticate(password=self.password)
-                controller.signal(Signal.NEWNYM)
-            time.sleep(2.5) # Ждем пока построится новая цепочка
-            self._log("[Система] IP адрес успешно изменен! Продолжаю парсинг.", "success")
-            return True
-        except Exception as e:
-            self._log(f"[DEAD] Ошибка при смене IP адреса: {e}", "dead")
-            return False
+        # Prevent threads from hammering the control port simultaneously
+        with self._renew_lock:
+            # Throttle renew requests to max 1 per 10 seconds to avoid overloading Tor
+            current_time = time.time()
+            if current_time - self._last_renew_time < 10.0:
+                return True
+                
+            try:
+                self._log("[Система] Запрашиваю смену IP адреса у Tor...", "warning")
+                
+                # Использование сырых сокетов с таймаутом для предотвращения зависания (заменяем stem)
+                import socket
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(5.0)
+                    s.connect(('127.0.0.1', self.control_port))
+                    s.sendall(f'AUTHENTICATE "{self.password}"\r\n'.encode('utf-8'))
+                    resp = s.recv(1024).decode('utf-8')
+                    if not resp.startswith('250'):
+                        raise Exception("Ошибка аутентификации Tor Control")
+                    
+                    s.sendall(b'SIGNAL NEWNYM\r\n')
+                    resp = s.recv(1024).decode('utf-8')
+                    if not resp.startswith('250'):
+                        raise Exception("Ошибка отправки NEWNYM")
+                
+                time.sleep(2.5) # Ждем пока построится новая цепочка
+                self._last_renew_time = time.time()
+                self._log("[Система] IP адрес успешно изменен! Продолжаю парсинг.", "success")
+                return True
+            except socket.timeout:
+                self._log("[DEAD] Ошибка при смене IP адреса: Таймаут ответа от Tor", "dead")
+                return False
+            except Exception as e:
+                self._log(f"[DEAD] Ошибка при смене IP адреса: {e}", "dead")
+                return False
+            finally:
+                self._last_renew_time = time.time()
 
     def stop(self):
         if self.process:

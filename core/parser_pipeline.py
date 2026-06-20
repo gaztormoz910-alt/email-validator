@@ -1,7 +1,9 @@
 import threading
 import queue
 import time
-from .parser.engine import ProxyManager, DuckDuckGoEngine
+import logging
+from typing import Callable
+from .parser.engine import ProxyManager, DuckDuckGoEngine, AOLEngine
 from .parser.extractor import EmailExtractor
 
 class ParserPipeline(threading.Thread):
@@ -34,13 +36,12 @@ class ParserPipeline(threading.Thread):
         self.total_emails = 0
         
         self.stats_lock = threading.Lock()
+        self.seen_lock = threading.Lock()
+        self.global_seen_emails = set()
         
         for i, d in enumerate(self.dorks, 1):
             # Передаем оригинальный dork без добавления мусорных символов
             self.dork_queue.put((i, d.strip(), d))
-            
-
-
     def _update_stats(self, dork_done=False, page=0, snippet=0, emails=0):
         with self.stats_lock:
             if dork_done:
@@ -134,7 +135,7 @@ class ParserPipeline(threading.Thread):
                     def mark_fail(self, url): self.tm.renew_ip()
                     def mark_success(self, url): pass
                 
-                engine = DuckDuckGoEngine(TorProxyManagerWrapper(self.tor_manager), on_log=self.log)
+                engine = AOLEngine(TorProxyManagerWrapper(self.tor_manager), on_log=self.log)
             else:
                 engine = DuckDuckGoEngine(self.proxy_manager, on_log=self.log)
                 
@@ -182,15 +183,23 @@ class ParserPipeline(threading.Thread):
                             emails = {e for e in emails if e.endswith('@' + domain_filter)}
                         
                         if emails:
-                            new_emails_count = len(emails)
-                            emails_from_dork += new_emails_count
-                            self._update_stats(emails=new_emails_count)
-                            
-                            self.log(f"[DORK {dork_idx}/{len(self.dorks)}] Страница: {max(1, int(pages_found*10))}, Найдено почт: {new_emails_count}")
-                            
-                            if self.on_result_found:
+                            new_unique_emails = []
+                            with self.seen_lock:
                                 for e in emails:
-                                    self.on_result_found(e, base_dork)
+                                    if e not in self.global_seen_emails:
+                                        self.global_seen_emails.add(e)
+                                        new_unique_emails.append(e)
+                                        
+                            new_emails_count = len(new_unique_emails)
+                            if new_emails_count > 0:
+                                emails_from_dork += new_emails_count
+                                self._update_stats(emails=new_emails_count)
+                                
+                                self.log(f"[DORK {dork_idx}/{len(self.dorks)}] Страница: {max(1, int(pages_found*10))}, Найдено уникальных почт: {new_emails_count}")
+                                
+                                if self.on_result_found:
+                                    for e in new_unique_emails:
+                                        self.on_result_found(e, base_dork)
                                     
                 except Exception as e:
                     self.log(f"[Ошибка DORK {dork_idx}] {str(e)}")
@@ -203,6 +212,9 @@ class ParserPipeline(threading.Thread):
         threads = []
         # Ограничиваем количество физических потоков до 500, чтобы не убить Windows (RuntimeError: can't start new thread)
         safe_max_threads = min(self.max_threads, 500)
+        if use_tor:
+            safe_max_threads = min(safe_max_threads, 50) # Tor daemon bottleneck 
+            
         num_threads = min(safe_max_threads, self.total_dorks)
         if num_threads <= 0: num_threads = 1
         

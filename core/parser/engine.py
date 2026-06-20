@@ -232,6 +232,9 @@ class DuckDuckGoEngine:
             self._log("[Система] Ошибка: Пустой или некорректный запрос.")
             return
 
+        max_pages = self.max_results // 10
+        if max_pages < 1: max_pages = 1
+
         url: str = "https://lite.duckduckgo.com/lite/"
         data: Dict[str, str] = {"q": query, "kl": "wt-wt"}
         pages_fetched: int = 0
@@ -366,3 +369,165 @@ if __name__ == "__main__":
         print(f"[{count}] {snippet[:120]}")
         if count >= 5:
             break
+
+class AOLEngine:
+    """
+    Scraper Engine for AOL/Yahoo Search via Tor.
+    """
+    def __init__(self, proxy_manager: Any, max_retries: int = 50, max_results_per_dork: int = 500, on_log: Optional[Any] = None) -> None:
+        self.proxy_manager = proxy_manager
+        self.max_retries = max_retries
+        self.max_results = max_results_per_dork
+        self.on_log = on_log
+        self._safe_log = on_log if callable(on_log) else (lambda x: logging.info(x))
+        
+        self.headers: Dict[str, str] = {
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1"
+        }
+
+    def _log(self, msg: str) -> None:
+        try:
+            self._safe_log(msg)
+        except Exception:
+            pass
+
+    def _extract_result_urls(self, html: str) -> List[str]:
+        urls = []
+        import re
+        direct_matches = re.findall(r'<a[^>]+href="(https?://[^"]+)"', html)
+        for match in direct_matches:
+            if 'yahoo.com' not in match.lower() and 'aol.com' not in match.lower():
+                urls.append(match)
+        
+        seen = set()
+        unique = []
+        for u in urls:
+            if u not in seen:
+                seen.add(u)
+                unique.append(u)
+        return unique
+
+    def _scrape_target_url(self, session: requests.Session, target_url: str, proxies: Optional[Dict]) -> Optional[str]:
+        skip_domains = [
+            'youtube.com', 'twitter.com', 'x.com', 'facebook.com', 'instagram.com',
+            'tiktok.com', 'reddit.com', 'wikipedia.org', 'amazon.com', 'ebay.com',
+            'google.com', 'bing.com', 'yahoo.com', 'duckduckgo.com', 'pinterest.com',
+            'apple.com', 'microsoft.com', 'github.com', 'stackoverflow.com', 'aol.com'
+        ]
+        url_lower = target_url.lower()
+        for skip in skip_domains:
+            if skip in url_lower: return None
+            
+        skip_ext = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip', '.rar', '.mp4', '.mp3', '.png', '.jpg', '.gif']
+        for ext in skip_ext:
+            if url_lower.endswith(ext): return None
+            
+        try:
+            scrape_headers = {
+                "User-Agent": random.choice(USER_AGENTS),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            }
+            res = session.get(target_url, proxies=proxies, timeout=12, headers=scrape_headers, allow_redirects=True, verify=False)
+            content_type = res.headers.get('Content-Type', '')
+            if 'text' not in content_type and 'html' not in content_type: return None
+            if res.status_code == 200: return res.text[:80000]
+            return None
+        except Exception: return None
+
+    def search_generator(self, query: str) -> Iterator[str]:
+        import urllib.parse
+        if not query or not isinstance(query, str):
+            self._log("[Система] Ошибка: Пустой или некорректный запрос.")
+            return
+
+        pages_fetched: int = 0
+        b_offset: int = 1
+        
+        with requests.Session() as session:
+            session.headers.update(self.headers)
+            
+            while True:
+                retries: int = 0
+                success: bool = False
+                
+                url = f"https://search.yahoo.com/yhs/search?hspart=aol&hsimp=yhs-aol_catchall&q={urllib.parse.quote_plus(query)}&b={b_offset}"
+                
+                while retries < self.max_retries:
+                    proxy_url: Optional[str] = self.proxy_manager.get_proxy()
+                    
+                    if self.proxy_manager.get_total_count() > 0 and not proxy_url:
+                        self._log("[Система] Все прокси мертвы. Остановка парсинга.")
+                        return 
+                        
+                    proxies: Optional[Dict[str, str]] = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+                    timeout: float = float(getattr(self.proxy_manager, 'timeout', 15.0))
+                    
+                    if retries % 5 == 0:
+                        session.headers["User-Agent"] = random.choice(USER_AGENTS)
+                    
+                    try:
+                        res = session.get(url, proxies=proxies, timeout=timeout)
+                        
+                        # Handle AOL/Yahoo captchas or blocks
+                        if res.status_code != 200 or "yahoo.com/neo/b" in res.url or "captcha" in res.url:
+                            if proxy_url: self.proxy_manager.mark_fail(proxy_url)
+                            raise requests.exceptions.ProxyError("Возможна капча или блокировка")
+                        
+                        res.raise_for_status()
+                        html: str = res.text
+                        
+                        if "we did not find results for" in html.lower() or "no results found" in html.lower():
+                            return # No more results
+                            
+                        # === Отдаём HTML сниппетов (быстрый проход) ===
+                        yield html
+                        
+                        if proxy_url:
+                            self.proxy_manager.mark_success(proxy_url)
+                            
+                        # === ЭТАП 2: Скрапинг целевых URL-ов (глубокий проход) ===
+                        target_urls = self._extract_result_urls(html)
+                        if target_urls:
+                            self._log(f"[AOL] Стр.{pages_fetched + 1}: {len(target_urls)} ссылок → скрапинг целевых сайтов...")
+                            scraped_count = 0
+                            for target in target_urls:
+                                page_content = self._scrape_target_url(session, target, proxies)
+                                if page_content:
+                                    scraped_count += 1
+                                    yield page_content
+                            if scraped_count > 0:
+                                self._log(f"[AOL] Стр.{pages_fetched + 1}: успешно скрапнуто {scraped_count}/{len(target_urls)} сайтов")
+                        
+                        success = True
+                        pages_fetched += 1
+                        
+                        # AOL Pagination uses 'b' parameter (b=1, b=11, b=21...)
+                        # Check if "Next" button exists.
+                        if 'class="next"' in html.lower() or 'class="comppagination"' in html.lower() or "next</a>" in html.lower():
+                            b_offset += 10
+                            break
+                        else:
+                            return
+                            
+                    except requests.exceptions.ProxyError:
+                        if proxy_url: self.proxy_manager.mark_fail(proxy_url)
+                    except requests.exceptions.Timeout:
+                        if proxy_url: self.proxy_manager.mark_fail(proxy_url)
+                    except Exception as e:
+                        error_msg = str(e)
+                        short_proxy = proxy_url.split("//")[-1] if proxy_url else "direct"
+                        if retries % 5 == 0:
+                            self._log(f"[Прокси] {short_proxy} - Сбой: {error_msg[:80]}")
+                        if proxy_url: self.proxy_manager.mark_fail(proxy_url)
+                    finally:
+                        retries += 1
+                        time.sleep(random.uniform(0.3, 1.0))
+                
+                if not success:
+                    self._log(f"[Система] Не удалось загрузить страницу {pages_fetched + 1} после {self.max_retries} попыток.")
+                    break

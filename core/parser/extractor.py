@@ -40,6 +40,10 @@ class EmailExtractor:
             while email and email[-1] in {'.', ',', ';', ':', '>', '<', '"', "'"}:
                 email = email[:-1]
                 
+            # NEW: Clean leading underscores and punctuation (from markdown/formatting)
+            while email and email[0] in {'_', '.', '-', ',', ';', ':', '>', '<', '"', "'"}:
+                email = email[1:]
+                
             # 2. Basic length validation
             if len(email) < 6 or '@' not in email or '.' not in email:
                 continue
