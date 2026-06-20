@@ -432,7 +432,7 @@ class AOLEngine:
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.5",
             }
-            res = session.get(target_url, proxies=proxies, timeout=12, headers=scrape_headers, allow_redirects=True, verify=False)
+            res = session.get(target_url, proxies=proxies, timeout=5.0, headers=scrape_headers, allow_redirects=True, verify=False)
             content_type = res.headers.get('Content-Type', '')
             if 'text' not in content_type and 'html' not in content_type: return None
             if res.status_code == 200: return res.text[:80000]
@@ -455,7 +455,7 @@ class AOLEngine:
                 retries: int = 0
                 success: bool = False
                 
-                url = f"https://search.yahoo.com/yhs/search?hspart=aol&hsimp=yhs-aol_catchall&q={urllib.parse.quote_plus(query)}&b={b_offset}"
+                url = f"https://search.yahoo.com/yhs/search?hspart=aol&hsimp=yhs-aol_catchall&p={urllib.parse.quote_plus(query)}&b={b_offset}"
                 
                 while retries < self.max_retries:
                     proxy_url: Optional[str] = self.proxy_manager.get_proxy()
@@ -507,26 +507,37 @@ class AOLEngine:
                         pages_fetched += 1
                         
                         # AOL Pagination uses 'b' parameter (b=1, b=11, b=21...)
-                        # Check if "Next" button exists.
-                        if 'class="next"' in html.lower() or 'class="comppagination"' in html.lower() or "next</a>" in html.lower():
+                        # Check for the next button or the next page offset in the HTML
+                        next_offset_str = f"b={b_offset + 10}"
+                        if 'class="next"' in html.lower() or 'class="compPagination"' in html.lower() or next_offset_str in html:
                             b_offset += 10
-                            break
+                            break # Break the retry loop to fetch the next page
                         else:
-                            return
+                            return # No results found on this page, stop paginating
                             
+                    except requests.exceptions.Timeout:
+                        if retries % 10 == 0:
+                            self._log("[Система] Ожидание ответа от Tor превысило лимит. Запрос смены IP...")
+                        if proxy_url: self.proxy_manager.mark_fail(proxy_url)
+                        time.sleep(1.0)
                     except requests.exceptions.ProxyError:
                         if proxy_url: self.proxy_manager.mark_fail(proxy_url)
-                    except requests.exceptions.Timeout:
-                        if proxy_url: self.proxy_manager.mark_fail(proxy_url)
+                        time.sleep(1.0)
                     except Exception as e:
                         error_msg = str(e)
-                        short_proxy = proxy_url.split("//")[-1] if proxy_url else "direct"
-                        if retries % 5 == 0:
-                            self._log(f"[Прокси] {short_proxy} - Сбой: {error_msg[:80]}")
+                        if "timed out" in error_msg.lower():
+                            if retries % 10 == 0:
+                                self._log("[Система] Ожидание ответа от Tor превысило лимит. Запрос смены IP...")
+                            time.sleep(1.0)
+                        elif "10053" in error_msg or "connection aborted" in error_msg.lower() or "connection closed" in error_msg.lower():
+                            # Tor is likely restarting circuits (NEWNYM), silently wait
+                            time.sleep(1.0)
+                        elif retries % 5 == 0:
+                            self._log(f"[Система] Сбой соединения через Tor: {error_msg[:80]}")
                         if proxy_url: self.proxy_manager.mark_fail(proxy_url)
                     finally:
                         retries += 1
-                        time.sleep(random.uniform(0.3, 1.0))
+                        time.sleep(random.uniform(1.0, 2.5))
                 
                 if not success:
                     self._log(f"[Система] Не удалось загрузить страницу {pages_fetched + 1} после {self.max_retries} попыток.")
