@@ -1,0 +1,54 @@
+@downloaded-at 2026-06-20 07:08:46
+@source "192.0.2.3"
+@purpose bridge
+router flakey11 193.187.88.42 33019 0 0
+identity-ed25519
+-----BEGIN ED25519 CERT-----
+AQQAB43oAUoWz918EfCX2Ls7A2VemMDbprc/07a6St4sW7zBk7x3AQAgBADXM4em
+D4XGpB+L/qMMu0KkceoFMfyCNiYIpeS6zUPkqhGccjU21ta1qEW6smO52/uziXlv
+3m8LMnx/XBbxOvv8XnKwC1lWN64Vjmfmojh/hY31By9fls3QrjP5GNebJwE=
+-----END ED25519 CERT-----
+master-key-ed25519 1zOHpg+FxqQfi/6jDLtCpHHqBTH8gjYmCKXkus1D5Ko
+platform Tor 0.4.9.8 on Linux
+proto Conflux=1 Cons=1-2 Desc=1-4 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=1-2 Link=3-5 LinkAuth=3 Microdesc=1-3 Padding=2 Relay=2-6
+published 2026-06-20 06:24:30
+fingerprint 2B28 0B23 E110 7BB6 2ABF C40D DCC8 8248 14F8 0A72
+uptime 1996587
+bandwidth 1073741824 1073741824 52471585
+extra-info-digest 63C060AAA29A1A718F7970F935CE0E4AD7150645 g6DoPnS/oAptxPdK+HV6Haifjt6GsCbmURZaq4RdlKs
+onion-key
+-----BEGIN RSA PUBLIC KEY-----
+MIGJAoGBAL4M823keJx7iocPNfVvkGEEiy9OEndXj9JGm2iP1CNxX22sie8Xea7U
+xvTVFrOZcpaLOXwFvpjS1XQgX3HjwmPeswCPbehivO0HcCoiGM1ZJ/zFSLmV+DNK
+FQ8kF3DkbvmDLABa3vdGPuE89oYOq08ISafP1AfajPQuTXPFqUlhAgMBAAE=
+-----END RSA PUBLIC KEY-----
+signing-key
+-----BEGIN RSA PUBLIC KEY-----
+MIGJAoGBALZH1IXukeABviaP44qHCYxSQ8FJHK2JXcTZnZQ7q/2hSehmVZzXuZuY
+9CeQ7iIxu+qNQFnhhfo39XPnCvJCHa2z+HVJn85x++FiRLO/ZTC/7VeoRUATnMDz
+bGQHXGey+sCuXeamCqYSMiXRRnHPIXTA6UqyXpF/JuN3qziY1OHBAgMBAAE=
+-----END RSA PUBLIC KEY-----
+onion-key-crosscert
+-----BEGIN CROSSCERT-----
+KOLGFOJsZRL4hYjegks5imIxNtMNMr2rjU85XN1nPNzx53Ka7j5ZUMKv/sWJ6KSH
+zH2tHM4bZTCwv8Da98+SBNzMvsOCUdqZZOu9awuNLf3bnWRKts804/zEjgd5XxOm
+7OjPc3/BPU1jdKao/NlqlYNhiiP8dENwRJHr7E/9o48=
+-----END CROSSCERT-----
+ntor-onion-key-crosscert 0
+-----BEGIN ED25519 CERT-----
+AQoAB5AnAdczh6YPhcakH4v+owy7QqRx6gUx/II2Jgil5LrNQ+SqAM4EZrynPqvs
+03IdN7K6RLO3A/QOKaaP8nnlJaoTlOzZSPcpkLlhYacqZ2C9eWxI/aO0G01ltJ45
+hPsa33tq0QE=
+-----END ED25519 CERT-----
+hidden-service-dir
+bridge-distribution-request none
+ntor-onion-key u61PlrYpYPELtrfUnqAOLVjQ4izDFFopVTI+KiuDvg0
+reject *:*
+tunnelled-dir-server
+router-sig-ed25519 yoLSVJLmsTMOaGlZXa5TSHTcnZ+Cui3DGoQ9iJczw6kdTtel7itPU3J4HryVX9h91y6+qeipe7PxnGfy4BDXCA
+router-signature
+-----BEGIN SIGNATURE-----
+hbiE2YfGqQ1G/YVVxQli2+Wr2AKhHRc/rfNqhDdqF5VsVAhPD9ecGX/cTUexyzv1
+0X6r2FUboRGZV10HV9mGKpZOz3xDfBaR4TeGvwHiwcAXvUVNOA5CjbBbFeBu4aaZ
+8oog1Ht9H4LSwiTbh+44yx5JynpWOsJoG7QI3lfHUrM=
+-----END SIGNATURE-----

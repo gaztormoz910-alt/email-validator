@@ -374,12 +374,13 @@ class AOLEngine:
     """
     Scraper Engine for AOL/Yahoo Search via Tor.
     """
-    def __init__(self, proxy_manager: Any, max_retries: int = 50, max_results_per_dork: int = 500, on_log: Optional[Any] = None) -> None:
+    def __init__(self, proxy_manager: Any, max_retries: int = 15, max_results_per_dork: int = 500, on_log: Optional[Any] = None, is_stopped: Optional[Any] = None) -> None:
         self.proxy_manager = proxy_manager
         self.max_retries = max_retries
         self.max_results = max_results_per_dork
         self.on_log = on_log
         self._safe_log = on_log if callable(on_log) else (lambda x: logging.info(x))
+        self._is_stopped = is_stopped or (lambda: False)
         
         self.headers: Dict[str, str] = {
             "User-Agent": random.choice(USER_AGENTS),
@@ -416,7 +417,9 @@ class AOLEngine:
             'youtube.com', 'twitter.com', 'x.com', 'facebook.com', 'instagram.com',
             'tiktok.com', 'reddit.com', 'wikipedia.org', 'amazon.com', 'ebay.com',
             'google.com', 'bing.com', 'yahoo.com', 'duckduckgo.com', 'pinterest.com',
-            'apple.com', 'microsoft.com', 'github.com', 'stackoverflow.com', 'aol.com'
+            'apple.com', 'microsoft.com', 'github.com', 'stackoverflow.com', 'aol.com',
+            'linkedin.com', 'glassdoor.com', 'medium.com', 'yelp.com', 'tripadvisor.com',
+            'quora.com', 'netflix.com'
         ]
         url_lower = target_url.lower()
         for skip in skip_domains:
@@ -452,19 +455,27 @@ class AOLEngine:
             session.headers.update(self.headers)
             
             while True:
+                # Check if user pressed Stop
+                if self._is_stopped():
+                    return
+                    
                 retries: int = 0
                 success: bool = False
                 
                 url = f"https://search.yahoo.com/yhs/search?hspart=aol&hsimp=yhs-aol_catchall&p={urllib.parse.quote_plus(query)}&b={b_offset}"
                 
                 while retries < self.max_retries:
+                    # Check stop event inside retry loop
+                    if self._is_stopped():
+                        return
+                        
                     proxy_url: Optional[str] = self.proxy_manager.get_proxy()
                     
-                    if self.proxy_manager.get_total_count() > 0 and not proxy_url:
-                        self._log("[Система] Все прокси мертвы. Остановка парсинга.")
-                        return 
+                    # If all Tor instances are dead, stop
+                    if not proxy_url:
+                        return
                         
-                    proxies: Optional[Dict[str, str]] = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+                    proxies: Optional[Dict[str, str]] = {"http": proxy_url, "https": proxy_url}
                     timeout: float = float(getattr(self.proxy_manager, 'timeout', 15.0))
                     
                     if retries % 5 == 0:
@@ -473,72 +484,87 @@ class AOLEngine:
                     try:
                         res = session.get(url, proxies=proxies, timeout=timeout)
                         
-                        # Handle AOL/Yahoo captchas or blocks
-                        if res.status_code != 200 or "yahoo.com/neo/b" in res.url or "captcha" in res.url:
-                            if proxy_url: self.proxy_manager.mark_fail(proxy_url)
-                            raise requests.exceptions.ProxyError("Возможна капча или блокировка")
+                        # Check for captcha/block by examining response body
+                        if res.status_code != 200:
+                            retries += 1
+                            time.sleep(0.5)
+                            continue
                         
-                        res.raise_for_status()
                         html: str = res.text
+                        html_lower = html.lower()
                         
-                        if "we did not find results for" in html.lower() or "no results found" in html.lower():
-                            return # No more results
+                        # Detect captchas and blocks in the response body
+                        if "captcha" in html_lower or "robot" in html_lower and "are you a" in html_lower:
+                            self.proxy_manager.mark_fail(proxy_url)
+                            retries += 1
+                            time.sleep(1.0)
+                            continue
+                        
+                        # Check for 'no results' responses
+                        if "we did not find results for" in html_lower or "no results found" in html_lower or "no matching documents" in html_lower:
+                            return  # No more results for this query
+                        
+                        # Check that we actually got search results (not an empty/error page)
+                        if len(html) < 500:
+                            retries += 1
+                            time.sleep(0.5)
+                            continue
                             
                         # === Отдаём HTML сниппетов (быстрый проход) ===
                         yield html
                         
-                        if proxy_url:
-                            self.proxy_manager.mark_success(proxy_url)
+                        self.proxy_manager.mark_success(proxy_url)
                             
                         # === ЭТАП 2: Скрапинг целевых URL-ов (глубокий проход) ===
                         target_urls = self._extract_result_urls(html)
                         if target_urls:
-                            self._log(f"[AOL] Стр.{pages_fetched + 1}: {len(target_urls)} ссылок → скрапинг целевых сайтов...")
                             scraped_count = 0
-                            for target in target_urls:
+                            for target in target_urls[:10]:  # Limit to 10 URLs per page to avoid slowdown
+                                if self._is_stopped():
+                                    return
                                 page_content = self._scrape_target_url(session, target, proxies)
                                 if page_content:
                                     scraped_count += 1
                                     yield page_content
-                            if scraped_count > 0:
-                                self._log(f"[AOL] Стр.{pages_fetched + 1}: успешно скрапнуто {scraped_count}/{len(target_urls)} сайтов")
                         
                         success = True
                         pages_fetched += 1
                         
-                        # AOL Pagination uses 'b' parameter (b=1, b=11, b=21...)
-                        # Check for the next button or the next page offset in the HTML
-                        next_offset_str = f"b={b_offset + 10}"
-                        if 'class="next"' in html.lower() or 'class="compPagination"' in html.lower() or next_offset_str in html:
-                            b_offset += 10
-                            break # Break the retry loop to fetch the next page
+                        # AOL Pagination: check for next page
+                        # Extract exact 'b=' offset from the Next button to precisely follow Yahoo/AOL pagination
+                        next_b_match = re.search(r'<a[^>]+class=["\'][^"\']*next[^"\']*["\'][^>]*href=["\'][^"\']*b=(\d+)[^"\']*["\']', html, re.IGNORECASE)
+                        
+                        if next_b_match:
+                            b_offset = int(next_b_match.group(1))
+                            # Protect against infinite loops (limit to ~1000 results instead of 300)
+                            if b_offset > 1000:
+                                return
+                            break  # Break retry loop, fetch next page
                         else:
-                            return # No results found on this page, stop paginating
-                            
+                            # Fallback if class='next' is not found, but pagination block exists
+                            next_offset_str = f"b={b_offset + 10}"
+                            if ('next' in html_lower and 'href' in html_lower) or next_offset_str in html or 'pagination' in html_lower:
+                                b_offset += 10
+                                if b_offset > 1000:
+                                    return
+                                break  # Break retry loop, fetch next page
+                            else:
+                                return  # No more pages
                     except requests.exceptions.Timeout:
-                        if retries % 10 == 0:
-                            self._log("[Система] Ожидание ответа от Tor превысило лимит. Запрос смены IP...")
-                        if proxy_url: self.proxy_manager.mark_fail(proxy_url)
-                        time.sleep(1.0)
+                        self.proxy_manager.mark_fail(proxy_url)
+                        time.sleep(0.3)
                     except requests.exceptions.ProxyError:
-                        if proxy_url: self.proxy_manager.mark_fail(proxy_url)
-                        time.sleep(1.0)
+                        self.proxy_manager.mark_fail(proxy_url)
+                        time.sleep(0.3)
+                    except requests.exceptions.ConnectionError:
+                        time.sleep(0.3)
                     except Exception as e:
                         error_msg = str(e)
-                        if "timed out" in error_msg.lower():
-                            if retries % 10 == 0:
-                                self._log("[Система] Ожидание ответа от Tor превысило лимит. Запрос смены IP...")
-                            time.sleep(1.0)
-                        elif "10053" in error_msg or "connection aborted" in error_msg.lower() or "connection closed" in error_msg.lower():
-                            # Tor is likely restarting circuits (NEWNYM), silently wait
-                            time.sleep(1.0)
-                        elif retries % 5 == 0:
-                            self._log(f"[Система] Сбой соединения через Tor: {error_msg[:80]}")
-                        if proxy_url: self.proxy_manager.mark_fail(proxy_url)
+                        if "10053" not in error_msg and "connection aborted" not in error_msg.lower():
+                            if retries == self.max_retries - 1:
+                                self._log(f"[Система] Сбой: {error_msg[:80]}")
                     finally:
                         retries += 1
-                        time.sleep(random.uniform(1.0, 2.5))
                 
                 if not success:
-                    self._log(f"[Система] Не удалось загрузить страницу {pages_fetched + 1} после {self.max_retries} попыток.")
                     break
