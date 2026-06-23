@@ -1,0 +1,101 @@
+# Tor state file last generated on 2026-06-20 13:20:49 local time
+# Other times below are in UTC
+# You *do not* need to edit this file.
+
+CircuitBuildTimeBin 835 1
+CircuitBuildTimeBin 935 1
+CircuitBuildTimeBin 2405 1
+CircuitBuildTimeBin 4055 1
+CircuitBuildTimeBin 4105 1
+CircuitBuildTimeBin 4115 1
+CircuitBuildTimeBin 4125 1
+CircuitBuildTimeBin 4475 1
+CircuitBuildTimeBin 4695 1
+CircuitBuildTimeBin 4755 1
+CircuitBuildTimeBin 4965 1
+CircuitBuildTimeBin 5025 1
+CircuitBuildTimeBin 5075 1
+CircuitBuildTimeBin 5125 1
+CircuitBuildTimeBin 5165 1
+CircuitBuildTimeBin 5235 1
+CircuitBuildTimeBin 5395 1
+CircuitBuildTimeBin 5545 1
+CircuitBuildTimeBin 5825 1
+CircuitBuildTimeBin 5835 2
+CircuitBuildTimeBin 5935 5
+CircuitBuildTimeBin 6135 1
+CircuitBuildTimeBin 6255 1
+CircuitBuildTimeBin 6265 1
+CircuitBuildTimeBin 6305 1
+CircuitBuildTimeBin 6365 1
+CircuitBuildTimeBin 6435 1
+CircuitBuildTimeBin 6485 1
+CircuitBuildTimeBin 6955 1
+CircuitBuildTimeBin 6965 1
+CircuitBuildTimeBin 6975 1
+CircuitBuildTimeBin 6985 1
+CircuitBuildTimeBin 7235 1
+CircuitBuildTimeBin 7245 1
+CircuitBuildTimeBin 7355 1
+CircuitBuildTimeBin 7445 1
+CircuitBuildTimeBin 7545 1
+CircuitBuildTimeBin 7595 1
+CircuitBuildTimeBin 7715 2
+CircuitBuildTimeBin 7725 2
+CircuitBuildTimeBin 7945 1
+CircuitBuildTimeBin 8415 1
+CircuitBuildTimeBin 9095 1
+CircuitBuildTimeBin 9235 1
+CircuitBuildTimeBin 9315 1
+CircuitBuildTimeBin 9395 1
+CircuitBuildTimeBin 9405 1
+CircuitBuildTimeBin 9785 1
+CircuitBuildTimeBin 9905 1
+CircuitBuildTimeBin 10085 1
+CircuitBuildTimeBin 10385 1
+CircuitBuildTimeBin 11195 1
+CircuitBuildTimeBin 11835 1
+CircuitBuildTimeBin 12465 1
+CircuitBuildTimeBin 12685 1
+CircuitBuildTimeBin 12905 1
+CircuitBuildTimeBin 12935 1
+CircuitBuildTimeBin 13335 2
+CircuitBuildTimeBin 13795 1
+CircuitBuildTimeBin 13885 1
+CircuitBuildTimeBin 14085 1
+CircuitBuildTimeBin 14175 1
+CircuitBuildTimeBin 14295 1
+CircuitBuildTimeBin 14995 1
+CircuitBuildTimeBin 15185 2
+CircuitBuildTimeBin 15195 2
+CircuitBuildTimeBin 15215 1
+CircuitBuildTimeBin 15595 2
+CircuitBuildTimeBin 15725 1
+CircuitBuildTimeBin 16285 1
+CircuitBuildTimeBin 16325 1
+CircuitBuildTimeBin 16385 1
+CircuitBuildTimeBin 17015 1
+CircuitBuildTimeBin 17445 1
+CircuitBuildTimeBin 17495 1
+CircuitBuildTimeBin 17635 1
+CircuitBuildTimeBin 19145 1
+CircuitBuildTimeBin 24695 2
+CircuitBuildTimeBin 24705 3
+CircuitBuildTimeBin 24895 1
+CircuitBuildTimeBin 24925 1
+CircuitBuildTimeBin 28665 1
+CircuitBuildTimeBin 29125 1
+CircuitBuildTimeBin 29335 1
+CircuitBuildTimeBin 29455 1
+CircuitBuildTimeBin 29655 1
+CircuitBuildTimeBin 31395 1
+Dormant 0
+Guard in=bridges rsa_id=2B280B23E1107BB62ABFC40DDCC8824814F80A72 bridge_addr=192.0.2.3:80 sampled_on=2026-06-18T09:38:42 sampled_idx=0 sampled_by=0.4.9.9 listed=1 confirmed_on=2026-06-13T05:38:22 confirmed_idx=0 pb_use_attempts=1.000000 pb_use_successes=1.000000 pb_circ_attempts=31.000000 pb_circ_successes=31.000000 pb_successful_circuits_closed=31.000000
+Guard in=bridges rsa_id=8838024498816A039FCBBAB14E6F40A0843051FA bridge_addr=192.0.2.4:80 sampled_on=2026-06-09T04:58:32 sampled_idx=1 sampled_by=0.4.9.9 listed=1 confirmed_on=2026-06-09T21:46:47 confirmed_idx=1 pb_circ_attempts=31.000000 pb_circ_successes=30.000000 pb_successful_circuits_closed=30.000000 pb_timeouts=1.000000
+Guard in=bridges rsa_id=ECE3DCE4E74BBEB0A2624EB5256DDE62A3764835 bridge_addr=85.17.30.79:443 sampled_on=2026-06-18T22:13:37 sampled_idx=2 sampled_by=0.4.9.9 unlisted_since=2026-06-16T18:00:18 listed=0
+Guard in=bridges rsa_id=CA98889950A949826315A519E86266FA71578F8C bridge_addr=146.19.106.136:8023 sampled_on=2026-06-16T01:25:29 sampled_idx=3 sampled_by=0.4.9.9 unlisted_since=2026-06-17T15:23:08 listed=0
+Guard in=bridges rsa_id=CDF2E852BF539B82BD10E27E9115A31734E378C2 bridge_addr=192.95.36.142:443 sampled_on=2026-06-10T05:29:18 sampled_idx=4 sampled_by=0.4.9.9 unlisted_since=2026-06-17T14:47:47 listed=0
+Guard in=bridges rsa_id=2D8EA1BD8B2A2BD1D5F54077673ACAE4656F623F bridge_addr=193.11.166.194:27015 sampled_on=2026-06-17T06:47:23 sampled_idx=5 sampled_by=0.4.9.9 unlisted_since=2026-06-18T04:02:49 listed=0
+LastWritten 2026-06-20 07:20:49
+TorVersion Tor 0.4.9.9 (git-74b53bd1992da4ec)
+TotalBuildTimes 101

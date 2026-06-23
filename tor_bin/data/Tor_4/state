@@ -1,0 +1,14 @@
+# Tor state file last generated on 2026-06-20 13:08:51 local time
+# Other times below are in UTC
+# You *do not* need to edit this file.
+
+Dormant 0
+Guard in=bridges rsa_id=8838024498816A039FCBBAB14E6F40A0843051FA bridge_addr=192.0.2.4:80 sampled_on=2026-06-19T10:44:26 sampled_idx=0 sampled_by=0.4.9.9 listed=1 confirmed_on=2026-06-08T06:59:54 confirmed_idx=0
+Guard in=bridges rsa_id=2B280B23E1107BB62ABFC40DDCC8824814F80A72 bridge_addr=192.0.2.3:80 sampled_on=2026-06-13T22:42:15 sampled_idx=1 sampled_by=0.4.9.9 listed=1 confirmed_on=2026-06-08T22:54:32 confirmed_idx=1
+Guard in=bridges rsa_id=CDF2E852BF539B82BD10E27E9115A31734E378C2 bridge_addr=192.95.36.142:443 sampled_on=2026-06-13T00:52:07 sampled_idx=2 sampled_by=0.4.9.9 unlisted_since=2026-06-16T11:49:37 listed=0
+Guard in=bridges rsa_id=2D8EA1BD8B2A2BD1D5F54077673ACAE4656F623F bridge_addr=193.11.166.194:27015 sampled_on=2026-06-13T01:08:28 sampled_idx=3 sampled_by=0.4.9.9 unlisted_since=2026-06-18T21:16:33 listed=0
+Guard in=bridges rsa_id=ECE3DCE4E74BBEB0A2624EB5256DDE62A3764835 bridge_addr=85.17.30.79:443 sampled_on=2026-06-12T15:44:28 sampled_idx=4 sampled_by=0.4.9.9 unlisted_since=2026-06-16T17:33:14 listed=0
+Guard in=bridges rsa_id=CA98889950A949826315A519E86266FA71578F8C bridge_addr=146.19.106.136:8023 sampled_on=2026-06-12T00:30:57 sampled_idx=5 sampled_by=0.4.9.9 unlisted_since=2026-06-19T04:35:36 listed=0
+LastWritten 2026-06-20 07:08:51
+MinutesSinceUserActivity 2
+TorVersion Tor 0.4.9.9 (git-74b53bd1992da4ec)

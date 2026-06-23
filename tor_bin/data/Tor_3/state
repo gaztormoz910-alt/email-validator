@@ -1,0 +1,135 @@
+# Tor state file last generated on 2026-06-20 13:05:00 local time
+# Other times below are in UTC
+# You *do not* need to edit this file.
+
+CircuitBuildTimeBin 1545 1
+CircuitBuildTimeBin 1655 1
+CircuitBuildTimeBin 1675 1
+CircuitBuildTimeBin 1685 1
+CircuitBuildTimeBin 2575 1
+CircuitBuildTimeBin 2615 1
+CircuitBuildTimeBin 2695 1
+CircuitBuildTimeBin 2735 1
+CircuitBuildTimeBin 4395 1
+CircuitBuildTimeBin 4795 1
+CircuitBuildTimeBin 5975 1
+CircuitBuildTimeBin 6065 1
+CircuitBuildTimeBin 6085 1
+CircuitBuildTimeBin 6095 1
+CircuitBuildTimeBin 6225 1
+CircuitBuildTimeBin 6245 1
+CircuitBuildTimeBin 6415 1
+CircuitBuildTimeBin 6495 1
+CircuitBuildTimeBin 6735 1
+CircuitBuildTimeBin 6745 1
+CircuitBuildTimeBin 6795 1
+CircuitBuildTimeBin 6925 1
+CircuitBuildTimeBin 7525 1
+CircuitBuildTimeBin 7535 1
+CircuitBuildTimeBin 7685 1
+CircuitBuildTimeBin 7755 1
+CircuitBuildTimeBin 7855 2
+CircuitBuildTimeBin 7925 1
+CircuitBuildTimeBin 7995 1
+CircuitBuildTimeBin 8075 1
+CircuitBuildTimeBin 8125 1
+CircuitBuildTimeBin 8145 1
+CircuitBuildTimeBin 8155 1
+CircuitBuildTimeBin 8245 1
+CircuitBuildTimeBin 8285 1
+CircuitBuildTimeBin 8315 1
+CircuitBuildTimeBin 8815 1
+CircuitBuildTimeBin 8835 1
+CircuitBuildTimeBin 9125 1
+CircuitBuildTimeBin 9165 1
+CircuitBuildTimeBin 9285 1
+CircuitBuildTimeBin 9335 1
+CircuitBuildTimeBin 9435 1
+CircuitBuildTimeBin 9475 1
+CircuitBuildTimeBin 9485 1
+CircuitBuildTimeBin 9995 1
+CircuitBuildTimeBin 10245 1
+CircuitBuildTimeBin 10275 1
+CircuitBuildTimeBin 10345 1
+CircuitBuildTimeBin 10505 1
+CircuitBuildTimeBin 11135 1
+CircuitBuildTimeBin 11215 1
+CircuitBuildTimeBin 11225 2
+CircuitBuildTimeBin 11305 1
+CircuitBuildTimeBin 11355 1
+CircuitBuildTimeBin 11395 1
+CircuitBuildTimeBin 11485 1
+CircuitBuildTimeBin 11505 1
+CircuitBuildTimeBin 11595 1
+CircuitBuildTimeBin 11805 1
+CircuitBuildTimeBin 11885 1
+CircuitBuildTimeBin 11895 2
+CircuitBuildTimeBin 11915 2
+CircuitBuildTimeBin 11925 1
+CircuitBuildTimeBin 11935 2
+CircuitBuildTimeBin 12035 1
+CircuitBuildTimeBin 12405 2
+CircuitBuildTimeBin 12435 1
+CircuitBuildTimeBin 12485 1
+CircuitBuildTimeBin 12545 2
+CircuitBuildTimeBin 12665 1
+CircuitBuildTimeBin 12815 1
+CircuitBuildTimeBin 12855 1
+CircuitBuildTimeBin 13085 1
+CircuitBuildTimeBin 13165 1
+CircuitBuildTimeBin 13275 1
+CircuitBuildTimeBin 13385 1
+CircuitBuildTimeBin 13515 1
+CircuitBuildTimeBin 13525 1
+CircuitBuildTimeBin 13645 1
+CircuitBuildTimeBin 13695 1
+CircuitBuildTimeBin 13765 1
+CircuitBuildTimeBin 13785 1
+CircuitBuildTimeBin 14025 1
+CircuitBuildTimeBin 14035 1
+CircuitBuildTimeBin 14045 2
+CircuitBuildTimeBin 14065 1
+CircuitBuildTimeBin 14075 1
+CircuitBuildTimeBin 14155 1
+CircuitBuildTimeBin 14165 1
+CircuitBuildTimeBin 14185 1
+CircuitBuildTimeBin 14315 1
+CircuitBuildTimeBin 14435 1
+CircuitBuildTimeBin 14445 1
+CircuitBuildTimeBin 14535 1
+CircuitBuildTimeBin 14575 2
+CircuitBuildTimeBin 14635 1
+CircuitBuildTimeBin 15705 1
+CircuitBuildTimeBin 15895 1
+CircuitBuildTimeBin 15955 1
+CircuitBuildTimeBin 16065 1
+CircuitBuildTimeBin 16615 1
+CircuitBuildTimeBin 17815 1
+CircuitBuildTimeBin 17965 1
+CircuitBuildTimeBin 19155 4
+CircuitBuildTimeBin 20275 1
+CircuitBuildTimeBin 21125 1
+CircuitBuildTimeBin 21155 1
+CircuitBuildTimeBin 21195 1
+CircuitBuildTimeBin 21215 1
+CircuitBuildTimeBin 22545 1
+CircuitBuildTimeBin 28715 1
+CircuitBuildTimeBin 28905 1
+CircuitBuildTimeBin 29565 1
+CircuitBuildTimeBin 29615 1
+CircuitBuildTimeBin 29765 1
+CircuitBuildTimeBin 29775 1
+CircuitBuildTimeBin 29835 1
+CircuitBuildTimeBin 47745 1
+CircuitBuildAbandonedCount 2
+Dormant 0
+Guard in=bridges rsa_id=8838024498816A039FCBBAB14E6F40A0843051FA bridge_addr=192.0.2.4:80 sampled_on=2026-06-10T14:24:18 sampled_idx=0 sampled_by=0.4.9.9 listed=1 confirmed_on=2026-06-15T16:27:28 confirmed_idx=1 pb_circ_attempts=40.000000 pb_circ_successes=38.000000 pb_successful_circuits_closed=38.000000 pb_timeouts=3.000000
+Guard in=bridges rsa_id=2B280B23E1107BB62ABFC40DDCC8824814F80A72 bridge_addr=192.0.2.3:80 sampled_on=2026-06-12T13:50:47 sampled_idx=1 sampled_by=0.4.9.9 listed=1 confirmed_on=2026-06-14T10:50:18 confirmed_idx=0 pb_circ_attempts=37.000000 pb_circ_successes=36.000000 pb_successful_circuits_closed=36.000000 pb_timeouts=1.000000
+Guard in=bridges rsa_id=ECE3DCE4E74BBEB0A2624EB5256DDE62A3764835 bridge_addr=85.17.30.79:443 sampled_on=2026-06-19T21:22:10 sampled_idx=2 sampled_by=0.4.9.9 unlisted_since=2026-06-16T18:37:25 listed=0
+Guard in=bridges rsa_id=2D8EA1BD8B2A2BD1D5F54077673ACAE4656F623F bridge_addr=193.11.166.194:27015 sampled_on=2026-06-20T04:47:33 sampled_idx=3 sampled_by=0.4.9.9 unlisted_since=2026-06-18T11:51:19 listed=0
+Guard in=bridges rsa_id=CA98889950A949826315A519E86266FA71578F8C bridge_addr=146.19.106.136:8023 sampled_on=2026-06-15T23:18:53 sampled_idx=4 sampled_by=0.4.9.9 unlisted_since=2026-06-17T19:10:33 listed=0
+Guard in=bridges rsa_id=CDF2E852BF539B82BD10E27E9115A31734E378C2 bridge_addr=192.95.36.142:443 sampled_on=2026-06-18T01:06:34 sampled_idx=5 sampled_by=0.4.9.9 unlisted_since=2026-06-16T22:08:14 listed=0
+LastWritten 2026-06-20 07:05:00
+MinutesSinceUserActivity 27
+TorVersion Tor 0.4.9.9 (git-74b53bd1992da4ec)
+TotalBuildTimes 133
