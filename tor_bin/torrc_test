@@ -1,0 +1,7 @@
+SocksPort 9090
+ControlPort 9091
+DataDirectory ../Data/Tor_test
+Log notice stdout
+UseBridges 1
+ClientTransportPlugin obfs4 exec pluggable_transports/lyrebird.exe
+Bridge obfs4 192.95.36.142:443 CDF2E852BF539B82BD10E27E9115A31734E378C2 cert=qUVQ0srL1JI/vO6V6m/24anYFAmojq8B04TGG2n8l2N/eO2kM222+j229x5tN2q8N+T3gA iat-mode=0

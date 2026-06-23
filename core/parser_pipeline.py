@@ -91,7 +91,12 @@ class ParserPipeline(threading.Thread):
         if use_tor:
             from core.tor_manager import TorManager
             self.tor_manager = TorManager(log_callback=self.log)
-            if not self.tor_manager.start():
+            
+            # 1 Tor instance per 50 threads, max 10 instances
+            import math
+            num_tor_instances = max(1, min(10, math.ceil(self.max_threads / 50)))
+            
+            if not self.tor_manager.start(num_instances=num_tor_instances):
                 self.log("[Ошибка] Не удалось запустить Tor. Парсинг невозможен.")
                 if self.on_complete:
                     self.on_complete(aborted=True)
@@ -127,14 +132,31 @@ class ParserPipeline(threading.Thread):
         def worker():
             if self.engine_name == "AOL (Tor)":
                 class TorProxyManagerWrapper:
-                    def __init__(self, tm, configured_timeout):
-                        self.tm = tm
-                        self.timeout = float(configured_timeout)
-                    def get_total_count(self): return 1
-                    def get_proxy(self): return self.tm.get_proxy_url()
-                    def mark_fail(self, url): self.tm.renew_ip()
-                    def mark_success(self, url): pass
-                engine = AOLEngine(TorProxyManagerWrapper(self.tor_manager, self.timeout), on_log=self.log)
+                    def __init__(wrapper_self, tm, configured_timeout):
+                        wrapper_self.tm = tm
+                        # Cap timeout at 20s for Tor — waiting 300s per request kills performance
+                        wrapper_self.timeout = min(float(configured_timeout), 20.0)
+                        wrapper_self._last_renew = 0
+                        wrapper_self._renew_lock = threading.Lock()
+                    def get_total_count(wrapper_self):
+                        return max(1, wrapper_self.tm.get_alive_count())
+                    def get_proxy(wrapper_self):
+                        url = wrapper_self.tm.get_proxy_url()
+                        if url is None:
+                            return None  # All Tor instances dead
+                        return url
+                    def mark_fail(wrapper_self, url):
+                        # Rate-limit: don't hammer renew_ip from every thread
+                        now = time.time()
+                        if now - wrapper_self._last_renew < 5.0:
+                            return  # Someone already renewed recently, skip
+                        with wrapper_self._renew_lock:
+                            if now - wrapper_self._last_renew < 5.0:
+                                return
+                            wrapper_self.tm.renew_ip(proxy_url=url)
+                            wrapper_self._last_renew = time.time()
+                    def mark_success(wrapper_self, url): pass
+                engine = AOLEngine(TorProxyManagerWrapper(self.tor_manager, self.timeout), on_log=self.log, is_stopped=lambda: self._stop_event.is_set())
             else:
                 engine = DuckDuckGoEngine(self.proxy_manager, on_log=self.log)
                 
@@ -209,16 +231,20 @@ class ParserPipeline(threading.Thread):
 
         # 3. Spawn workers
         threads = []
-        # Ограничиваем количество физических потоков до 500, чтобы не убить Windows (RuntimeError: can't start new thread)
         safe_max_threads = min(self.max_threads, 500)
+        
+        # For Tor mode: limit threads to 5 per alive Tor instance (Tor SOCKS can't handle more)
         if use_tor:
-            safe_max_threads = min(safe_max_threads, 50) # Tor daemon bottleneck 
+            alive_count = self.tor_manager.get_alive_count()
+            tor_max = max(5, alive_count * 5)
+            safe_max_threads = min(safe_max_threads, tor_max)
+            self.log(f"[Система] Tor: {alive_count} живых узлов × 5 = {tor_max} потоков")
             
         num_threads = min(safe_max_threads, self.total_dorks)
         if num_threads <= 0: num_threads = 1
         
         if num_threads < self.max_threads:
-            self.log(f"[Система] Запуск {num_threads} потоков (ограничено {'системой безопасности' if safe_max_threads < self.max_threads else 'количеством текущих задач'})...")
+            self.log(f"[Система] Запуск {num_threads} потоков (адаптировано под Tor)...")
         else:
             self.log(f"[Система] Запуск {num_threads} потоков...")
         for i in range(num_threads):

@@ -9,6 +9,124 @@ from pathlib import Path
 from stem.control import Controller
 from stem import Signal
 
+class TorInstance:
+    def __init__(self, index, base_dir, tor_exe, log_callback, password, hashed_password):
+        self.index = index
+        self.base_dir = base_dir
+        self.tor_exe = tor_exe
+        self.log_callback = log_callback
+        self.tor_port = 9050 + (index * 2)
+        self.control_port = 9051 + (index * 2)
+        self.password = password
+        self.hashed_password = hashed_password
+        self.data_dir = base_dir / "tor_bin" / "Data" / f"Tor_{index}"
+        self.tor_dir = base_dir / "tor_bin"
+        self.process = None
+        self._renew_lock = threading.Lock()
+        self._last_renew_time = 0
+
+    def _log(self, msg, level="info"):
+        try:
+            self.log_callback(msg)
+        except Exception as e:
+            print(f"TorInstance log error: {e}")
+
+    def start(self):
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        torrc_path = self.tor_dir / f"torrc_{self.index}"
+        data_dir_str = str(self.data_dir).replace("\\", "/")
+        
+        with open(torrc_path, "w", encoding="utf-8") as f:
+            f.write(f"SocksPort {self.tor_port}\n")
+            f.write(f"ControlPort {self.control_port}\n")
+            f.write(f"HashedControlPassword {self.hashed_password}\n")
+            f.write(f'DataDirectory "{data_dir_str}"\n')
+            f.write("Log notice stdout\n")
+            f.write("UseBridges 1\n")
+            f.write("ClientTransportPlugin snowflake exec pluggable_transports/lyrebird.exe\n")
+            f.write("Bridge snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn\n")
+            f.write("Bridge snowflake 192.0.2.4:80 8838024498816A039FCBBAB14E6F40A0843051FA fingerprint=8838024498816A039FCBBAB14E6F40A0843051FA url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn\n")
+            
+        creation_flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            
+        self.process = subprocess.Popen(
+            [str(self.tor_exe), "-f", str(torrc_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=creation_flags,
+            text=True,
+            cwd=str(self.tor_dir / "tor")
+        )
+        
+        start_time = time.time()
+        bootstrapped = False
+        while time.time() - start_time < 300:
+            line = self.process.stdout.readline()
+            if not line: break
+            if "Bootstrapped 100%" in line:
+                bootstrapped = True
+                break
+                
+        if bootstrapped:
+            self._log(f"[Система] Tor #{self.index} успешно запущен (Порт {self.tor_port})", "success")
+            return True
+        else:
+            self._log(f"[DEAD] Ошибка: Tor #{self.index} не смог подключиться (Таймаут).", "dead")
+            self.stop()
+            return False
+
+    def renew_ip(self):
+        if not self.process or self.process.poll() is not None:
+            return False
+            
+        with self._renew_lock:
+            current_time = time.time()
+            # Rate-limit: IP was recently changed, skip without blocking
+            if current_time - self._last_renew_time < 10.0:
+                return True
+                
+            try:
+                import socket
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(5.0)
+                    s.connect(('127.0.0.1', self.control_port))
+                    s.sendall(f'AUTHENTICATE "{self.password}"\r\n'.encode('utf-8'))
+                    resp = s.recv(1024).decode('utf-8')
+                    if not resp.startswith('250'): raise Exception("Auth Error")
+                    
+                    s.sendall(b'SIGNAL NEWNYM\r\n')
+                    resp = s.recv(1024).decode('utf-8')
+                    if not resp.startswith('250'): raise Exception("NEWNYM Error")
+                
+                self._last_renew_time = time.time()
+                return True
+            except Exception:
+                return False
+            finally:
+                self._last_renew_time = time.time()
+
+    def stop(self):
+        if self.process:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+            
+            try:
+                import psutil
+                parent = psutil.Process(self.process.pid)
+                for child in parent.children(recursive=True):
+                    child.kill()
+                parent.kill()
+            except:
+                pass
+                
+            self.process = None
+
+    def is_alive(self):
+        return self.process is not None and self.process.poll() is None
+
 class TorManager:
     _instance = None
     _lock = threading.Lock()
@@ -25,10 +143,7 @@ class TorManager:
             return
             
         self.log_callback = log_callback or print
-        self._renew_lock = threading.Lock()
-        self._last_renew_time = 0
         
-        # Determine paths
         if getattr(sys, 'frozen', False):
             self.base_dir = Path(sys.executable).parent
         else:
@@ -36,14 +151,11 @@ class TorManager:
             
         self.tor_dir = self.base_dir / "tor_bin"
         self.tor_exe = self.tor_dir / "Tor" / "tor.exe"
-        self.data_dir = self.tor_dir / "Data" / "Tor"
         
-        self.process = None
-        self.tor_port = 9050
-        self.control_port = 9051
-        self.password = "parser_secret" # Simple password for local control port
-        self.hashed_password = "16:0276BB60159E2A43607648F746CFC086CE78F225E20C1E526107CDD6E0" # Hash for "parser_secret" generated via tor --hash-password
+        self.password = "parser_secret"
+        self.hashed_password = "16:0276BB60159E2A43607648F746CFC086CE78F225E20C1E526107CDD6E0"
         
+        self.instances = []
         self._initialized = True
 
     def _log(self, msg, level="info"):
@@ -59,7 +171,6 @@ class TorManager:
             return True
             
         self._log("[Система] Исполняемый файл Tor не найден. Получение последней версии...", "info")
-        
         try:
             import json
             req_version = urllib.request.Request("https://aus1.torproject.org/torbrowser/update_3/release/downloads.json", headers={'User-Agent': 'Mozilla/5.0'})
@@ -69,41 +180,33 @@ class TorManager:
             url = f"https://dist.torproject.org/torbrowser/{version}/tor-expert-bundle-windows-x86_64-{version}.tar.gz"
             self._log(f"[Система] Начинаю автоматическую загрузку Tor v{version} (около 15 МБ)...", "info")
         except Exception as e:
-            self._log(f"[Система] Не удалось получить последнюю версию, используем резервную 15.0.16. Ошибка: {e}", "info")
+            self._log(f"[Система] Не удалось получить последнюю версию, используем резервную 15.0.16.", "info")
             url = "https://dist.torproject.org/torbrowser/15.0.16/tor-expert-bundle-windows-x86_64-15.0.16.tar.gz"
-        import tarfile
         
+        import tarfile
         tar_path = self.base_dir / "tor_bundle.tar.gz"
         
         try:
             self.tor_dir.mkdir(parents=True, exist_ok=True)
-            
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req) as response, open(tar_path, 'wb') as out_file:
                 total_length = response.getheader('content-length')
                 if total_length is None:
                     out_file.write(response.read())
                 else:
-                    dl = 0
-                    total_length = int(total_length)
                     for data in iter(lambda: response.read(4096), b""):
-                        dl += len(data)
                         out_file.write(data)
                         
             self._log("[Система] Загрузка завершена. Распаковка архива...", "info")
-            
             with tarfile.open(tar_path, "r:gz") as tar:
                 tar.extractall(path=self.tor_dir)
             
             if (self.tor_dir / "tor" / "tor.exe").exists():
                 self.tor_exe = self.tor_dir / "tor" / "tor.exe"
             
-            if tar_path.exists():
-                tar_path.unlink()
-                
+            if tar_path.exists(): tar_path.unlink()
             self._log("[Система] Установка встроенного Tor успешно завершена!", "success")
             return True
-            
         except Exception as e:
             self._log(f"[DEAD] Ошибка при загрузке Tor: {e}", "dead")
             if tar_path.exists():
@@ -111,130 +214,80 @@ class TorManager:
                 except: pass
             return False
 
-    def start(self):
-        if self.process and self.process.poll() is None:
-            self._log("[Система] Процесс Tor уже запущен в фоне.", "info")
-            return True
-            
+    def start(self, num_instances=1):
         if not self.check_and_download():
             return False
             
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.stop() # Clean up old instances if any
+        self.instances = []
         
-        torrc_path = self.tor_dir / "torrc"
-        
-        data_dir_str = str(self.data_dir).replace("\\", "/")
-        
-        with open(torrc_path, "w", encoding="utf-8") as f:
-            f.write(f"SocksPort {self.tor_port}\n")
-            f.write(f"ControlPort {self.control_port}\n")
-            f.write(f"HashedControlPassword {self.hashed_password}\n")
-            f.write(f'DataDirectory "{data_dir_str}"\n')
-            f.write("Log notice stdout\n")
-            f.write("UseBridges 1\n")
-            f.write("ClientTransportPlugin snowflake exec pluggable_transports/lyrebird.exe\n")
-            f.write("Bridge snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn\n")
-            f.write("Bridge snowflake 192.0.2.4:80 8838024498816A039FCBBAB14E6F40A0843051FA fingerprint=8838024498816A039FCBBAB14E6F40A0843051FA url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn\n")
-            
         self._log("[Система] Очистка старых процессов Tor...", "info")
         if os.name == 'nt':
             os.system("taskkill /F /IM tor.exe >nul 2>&1")
             
-        self._log("[Система] Запуск локального движка Tor (через мосты Snowflake)...", "info")
+        self._log(f"[Система] Запуск {num_instances} процессов Tor (через Snowflake)...", "info")
         
-        creation_flags = 0
-        if os.name == 'nt':
-            creation_flags = subprocess.CREATE_NO_WINDOW
+        def start_instance(idx):
+            # Stagger startup to avoid hammering the Snowflake broker simultaneously
+            time.sleep(idx * 6.0)
             
-        self.process = subprocess.Popen(
-            [str(self.tor_exe), "-f", str(torrc_path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            creationflags=creation_flags,
-            text=True,
-            cwd=str(self.tor_dir / "tor")
-        )
-        
-        start_time = time.time()
-        bootstrapped = False
-        while time.time() - start_time < 300:
-            line = self.process.stdout.readline()
-            if not line:
-                break
-            if "Bootstrapped 100%" in line:
-                bootstrapped = True
-                break
-            if "Bootstrapped" in line:
-                try:
-                    pct = line.split("Bootstrapped ")[1].split("%")[0]
-                    self._log(f"[Система] Подключение к анонимной сети: {pct}%", "info")
-                except: pass
+            for attempt in range(2): # 2 attempts per instance
+                inst = TorInstance(idx, self.base_dir, self.tor_exe, self.log_callback, self.password, self.hashed_password)
+                if inst.start():
+                    with self._lock:
+                        self.instances.append(inst)
+                    return
+                # If failed, wait a bit before retrying
+                if attempt == 0:
+                    self._log(f"[Система] Повторная попытка запуска Tor #{idx}...", "warning")
+                    time.sleep(10.0)
                 
-        if bootstrapped:
-            self._log(f"[Система] Tor успешно запущен и готов к работе!", "success")
+        threads = []
+        for i in range(num_instances):
+            t = threading.Thread(target=start_instance, args=(i,))
+            t.start()
+            threads.append(t)
+            
+        for t in threads:
+            t.join()
+            
+        if len(self.instances) > 0:
+            self._log(f"[Система] {len(self.instances)}/{num_instances} Tor-узлов успешно запущены!", "success")
             return True
         else:
-            self._log("[DEAD] Ошибка: Не удалось подключиться к сети Tor (Таймаут).", "dead")
-            self.stop()
+            self._log("[DEAD] Не удалось запустить ни одного процесса Tor.", "dead")
             return False
 
-    def renew_ip(self):
-        if not self.process or self.process.poll() is not None:
-            return False
-            
-        # Prevent threads from hammering the control port simultaneously
-        with self._renew_lock:
-            # Throttle renew requests to max 1 per 10 seconds to avoid overloading Tor
-            current_time = time.time()
-            if current_time - self._last_renew_time < 10.0:
-                # Another thread recently renewed the IP. 
-                # We must wait a bit to ensure Tor has fully established new circuits before retrying.
-                time.sleep(1.5)
-                return True
-                
+    def renew_ip(self, proxy_url=None):
+        alive = [inst for inst in self.instances if inst.is_alive()]
+        if not alive: return False
+        
+        if proxy_url:
             try:
-                self._log("[Система] Запрашиваю смену IP адреса у Tor...", "warning")
-                
-                # Использование сырых сокетов с таймаутом для предотвращения зависания (заменяем stem)
-                import socket
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(5.0)
-                    s.connect(('127.0.0.1', self.control_port))
-                    s.sendall(f'AUTHENTICATE "{self.password}"\r\n'.encode('utf-8'))
-                    resp = s.recv(1024).decode('utf-8')
-                    if not resp.startswith('250'):
-                        raise Exception("Ошибка аутентификации Tor Control")
-                    
-                    s.sendall(b'SIGNAL NEWNYM\r\n')
-                    resp = s.recv(1024).decode('utf-8')
-                    if not resp.startswith('250'):
-                        raise Exception("Ошибка отправки NEWNYM")
-                
-                time.sleep(2.5) # Ждем пока построится новая цепочка
-                self._last_renew_time = time.time()
-                self._log("[Система] IP адрес успешно изменен! Продолжаю парсинг.", "success")
-                return True
-            except socket.timeout:
-                self._log("[Система] Tor-клиент перегружен. Временная пауза перед сменой IP...", "warning")
-                return False
-            except ConnectionRefusedError:
-                self._log("[Система] Tor-клиент временно недоступен. Ожидание...", "warning")
-                return False
-            except Exception as e:
-                # Silently catch other transient Tor control port errors
-                return False
-            finally:
-                self._last_renew_time = time.time()
+                port = int(proxy_url.split(":")[-1])
+                for inst in alive:
+                    if inst.tor_port == port:
+                        return inst.renew_ip()
+            except: pass
+            
+        # Renew a random alive instance
+        import random
+        return random.choice(alive).renew_ip()
 
     def stop(self):
-        if self.process:
-            self._log("[Система] Остановка процесса Tor...", "info")
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-            self.process = None
+        if self.instances:
+            self._log(f"[Система] Остановка {len(self.instances)} процессов Tor...", "info")
+            for inst in self.instances:
+                inst.stop()
+            self.instances.clear()
 
     def get_proxy_url(self):
-        return f"socks5h://127.0.0.1:{self.tor_port}"
+        import random
+        alive = [inst for inst in self.instances if inst.is_alive()]
+        if not alive:
+            return None
+        inst = random.choice(alive)
+        return f"socks5h://127.0.0.1:{inst.tor_port}"
+
+    def get_alive_count(self):
+        return len([inst for inst in self.instances if inst.is_alive()])

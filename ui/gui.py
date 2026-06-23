@@ -163,7 +163,7 @@ class ProxyHunterInputSelector(ctk.CTkFrame):
     def configure(self, state):
         self.btn.configure(state=state)
         self.clear_btn.configure(state=state)
-        self.seg_btn.configure(state=state)
+        # self.seg_btn.configure(state=state) # Keep toggle active so user can switch tabs
         if state == "disabled":
             self.textbox.configure(state="disabled")
         else:
@@ -448,18 +448,37 @@ class ValidatorApp(ctk.CTk):
     def _on_engine_change(self, value):
         tor_engines = ["AOL (Tor)"]
         
-        # Limit threads slider for Tor to max 50
-        max_t = 50 if value in tor_engines else min(self.max_hw_threads, 500)
-        self.parser_threads_slider.to = max_t
-        self.parser_threads_slider.slider.configure(to=max_t)
-        if self.parser_threads_slider.val > max_t:
-            self.parser_threads_slider.val = max_t
-        self.parser_threads_slider._update_all()
-        
         if value in tor_engines:
+            # Tor mode: cap threads to 50 (will be further limited by alive instances)
+            max_t = min(self.max_hw_threads, 50)
+            self.parser_threads_slider.label.configure(text="Потоки (Tor)")
+            self.parser_threads_slider.to = max_t
+            self.parser_threads_slider.slider.configure(to=max_t)
+            self.parser_threads_slider.val = min(self.parser_threads_slider.val, max_t)
+            self.parser_threads_slider._update_all()
+            
+            # Cap timeout to 20 for Tor
+            self.parser_timeout_slider.label.configure(text="Таймаут Tor (сек)")
+            self.parser_timeout_slider.to = 30
+            self.parser_timeout_slider.slider.configure(to=30)
+            self.parser_timeout_slider.val = min(self.parser_timeout_slider.val, 15)
+            self.parser_timeout_slider._update_all()
+            
             self.parser_proxy_frame.pack_forget()
-            self.parser_proxy_selector.clear_btn.invoke() # Also clear the loaded proxies for safety
+            self.parser_proxy_selector.clear_btn.invoke()
         else:
+            # Non-Tor mode: restore original limits
+            max_t = min(self.max_hw_threads, 500)
+            self.parser_threads_slider.label.configure(text="Потоки (Dorks)")
+            self.parser_threads_slider.to = max_t
+            self.parser_threads_slider.slider.configure(to=max_t)
+            self.parser_threads_slider._update_all()
+            
+            self.parser_timeout_slider.label.configure(text="Таймаут прокси (сек)")
+            self.parser_timeout_slider.to = 300
+            self.parser_timeout_slider.slider.configure(to=300)
+            self.parser_timeout_slider._update_all()
+            
             self.parser_proxy_frame.pack(fill="x", before=self.engine_frame)
             
         if self.app_mode == "Парсер":
@@ -734,7 +753,7 @@ class ValidatorApp(ctk.CTk):
         self.parser_dashboard_frame.pack(fill="x", pady=(0, 20))
         self.parser_dashboard_frame.grid_columnconfigure((0, 1), weight=1, uniform="card")
 
-        self._create_stat_card(self.parser_dashboard_frame, 0, 0, "Всего Подзапросов", "0", ACCENT_PRIMARY, "🔍", "parser_stat_dorks")
+        self._create_stat_card(self.parser_dashboard_frame, 0, 0, "Обработано Дорков", "0", ACCENT_PRIMARY, "🔍", "parser_stat_dorks")
         self._create_stat_card(self.parser_dashboard_frame, 0, 1, "Страниц (Пагинация)", "0", TEXT_MUTED, "📄", "parser_stat_pages")
         self._create_stat_card(self.parser_dashboard_frame, 1, 0, "Проверено Сниппетов", "0", TEXT_MUTED, "👁", "parser_stat_snippets")
         self._create_stat_card(self.parser_dashboard_frame, 1, 1, "Найдено Email-ов", "0", ACCENT_SUCCESS, "📬", "parser_stat_emails")
@@ -1293,7 +1312,7 @@ class ValidatorApp(ctk.CTk):
         self.stats_queue.put((dorks_tot, dorks_done, pages, snippets, emails))
 
     def _update_parser_stats_ui(self, dorks_tot, dorks_done, pages, snippets, emails):
-        self.parser_stat_dorks.configure(text=str(dorks_tot))
+        self.parser_stat_dorks.configure(text=f"{dorks_done}/{dorks_tot}")
         self.parser_stat_pages.configure(text=f"{pages:.0f}")
         self.parser_stat_snippets.configure(text=str(int(snippets)))
         self.parser_stat_emails.configure(text=str(emails))
