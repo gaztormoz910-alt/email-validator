@@ -6,6 +6,30 @@ from typing import Callable
 from .parser.engine import ProxyManager, DuckDuckGoEngine, AOLEngine
 from .parser.extractor import EmailExtractor
 
+GLOBAL_VERIFIED_DOMAINS = {
+    # USA / Global
+    "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com", "icloud.com", "mac.com", "me.com", "comcast.net", "sbcglobal.net", "att.net", "verizon.net", "cox.net", "charter.net",
+    # Canada
+    "yahoo.ca", "hotmail.ca", "bell.net", "sympatico.ca", "rogers.com", "shaw.ca", "telus.net", "videotron.ca", "cogeco.ca",
+    # Australia
+    "yahoo.com.au", "hotmail.com.au", "outlook.com.au", "live.com.au", "bigpond.com", "bigpond.net.au", "optusnet.com.au", "iinet.net.au", "tpg.com.au",
+    # Netherlands
+    "hotmail.nl", "live.nl", "ziggo.nl", "kpnmail.nl", "planet.nl", "hetnet.nl", "upcmail.nl", "chello.nl", "xs4all.nl",
+    # UK
+    "hotmail.co.uk", "yahoo.co.uk", "live.co.uk", "btinternet.com", "sky.com", "virginmedia.com", "talktalk.net", "blueyonder.co.uk", "ntlworld.com",
+    # Germany
+    "gmx.de", "gmx.net", "web.de", "t-online.de", "freenet.de", "googlemail.com", "hotmail.de", "yahoo.de", "outlook.de",
+    # France
+    "orange.fr", "free.fr", "sfr.fr", "laposte.net", "wanadoo.fr", "yahoo.fr", "hotmail.fr",
+    # Italy
+    "libero.it", "virgilio.it", "tim.it", "alice.it", "tiscali.it", "yahoo.it", "hotmail.it",
+    # Spain
+    "yahoo.es", "hotmail.es", "telefonica.net",
+    # Poland
+    "wp.pl", "onet.pl", "o2.pl", "interia.pl", "gazeta.pl"
+}
+
+
 class ParserPipeline(threading.Thread):
     def __init__(self, dorks, proxies, max_threads, timeout=5.0,
                  on_log=None, on_progress=None, on_stats_update=None, on_result_found=None, on_complete=None, engine_name="DuckDuckGo Lite"):
@@ -199,9 +223,21 @@ class ParserPipeline(threading.Thread):
                         
                         emails = self.extractor.extract(snippet)
                         
-                        # Filter emails by domain from dork query
-                        if emails and domain_filter:
-                            emails = {e for e in emails if e.endswith('@' + domain_filter)}
+                        # Filter emails by domain from dork query OR global verified list
+                        if emails:
+                            valid_emails = set()
+                            for e in emails:
+                                try:
+                                    e_domain = e.split('@')[-1].lower()
+                                    # Allow if it matches the specific dork domain, OR if it's in our global verified list
+                                    if (domain_filter and e_domain == domain_filter) or e_domain in GLOBAL_VERIFIED_DOMAINS:
+                                        valid_emails.add(e)
+                                    # If no specific domain was requested in dork, keep all emails (original behavior)
+                                    elif not domain_filter:
+                                        valid_emails.add(e)
+                                except Exception:
+                                    pass
+                            emails = valid_emails
                         
                         if emails:
                             new_unique_emails = []
