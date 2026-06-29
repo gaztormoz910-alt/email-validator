@@ -3,7 +3,7 @@ import queue
 import time
 import logging
 from typing import Callable
-from .parser.engine import ProxyManager, DuckDuckGoEngine, AOLEngine
+from .parser.engine import ProxyManager, DuckDuckGoEngine, AOLEngine, YahooEngine
 from .parser.extractor import EmailExtractor
 
 GLOBAL_VERIFIED_DOMAINS = {
@@ -109,7 +109,7 @@ class ParserPipeline(threading.Thread):
     def run(self):
         self.log(f"[Система] Инициализация парсера. Поисковик: {self.engine_name}. Загружено дорков: {self.total_dorks}")
         
-        tor_engines = ["AOL (Tor)"]
+        tor_engines = ["AOL (Tor)", "Yahoo (Tor)"]
         use_tor = self.engine_name in tor_engines
         
         if use_tor:
@@ -180,7 +180,10 @@ class ParserPipeline(threading.Thread):
                             wrapper_self.tm.renew_ip(proxy_url=url)
                             wrapper_self._last_renew = time.time()
                     def mark_success(wrapper_self, url): pass
-                engine = AOLEngine(TorProxyManagerWrapper(self.tor_manager, self.timeout), on_log=self.log, is_stopped=lambda: self._stop_event.is_set())
+                if self.engine_name == "AOL (Tor)":
+                    engine = AOLEngine(TorProxyManagerWrapper(self.tor_manager, self.timeout), on_log=self.log, is_stopped=lambda: self._stop_event.is_set())
+                elif self.engine_name == "Yahoo (Tor)":
+                    engine = YahooEngine(TorProxyManagerWrapper(self.tor_manager, self.timeout), on_log=self.log, is_stopped=lambda: self._stop_event.is_set())
             else:
                 engine = DuckDuckGoEngine(self.proxy_manager, on_log=self.log)
                 

@@ -21,12 +21,9 @@ class ValidationPipeline:
         self.ai = None
         
     def setup(self, timeout=5, enable_ai=False, proxies=None, threads=100):
-        self.callbacks['on_log']("[INFO] Загрузка баз с GitHub (Spam-Traps, Disposable)...", "info")
-        downloader = BlacklistDownloader()
-        downloader.download_all()
-        
-        self.callbacks['on_log']("[INFO] Загрузка списков в ОЗУ для O(1) поиска...", "info")
-        self.filter = SpamFilter()
+        # Очистка мусора: больше не загружаем блэклисты с GitHub, так как работает принцип Whitelist
+        self.callbacks['on_log']("[INFO] Подготовка валидатора (работает в режиме Whitelist)...", "info")
+        self.filter = None
         
         if proxies:
             from core.network import filter_live_proxies
@@ -96,10 +93,8 @@ class ValidationPipeline:
                     self.callbacks['on_result'](email, "Trap/Disposable", "AI: Bot/Spam Pattern", "N/A")
                     return
                 
-            # Шаг 2: Фильтр Спам-ловушек (Blacklist)
-            if check_spam and self.filter.is_spam_or_disposable(email):
-                self.callbacks['on_result'](email, "Trap/Disposable", "Blacklisted", "N/A")
-                return
+            # Шаг 2: Устарел. Проверка на спам-ловушки и временные почты
+            # теперь происходит на этапе очистки (Whitelist)
                 
             # Шаг 3: Глубокий SMTP Ping
             if deep_ping:
