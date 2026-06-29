@@ -415,7 +415,7 @@ class ValidatorApp(ctk.CTk):
         self.engine_lbl.pack(padx=20, anchor="w", pady=(0, 5))
         
         self.engine_var = ctk.StringVar(value="DuckDuckGo Lite")
-        self.engine_selector = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["DuckDuckGo Lite", "AOL (Tor)", "Yahoo", "Bing"], fg_color=BG_CARD_2, button_color=BORDER, button_hover_color=ACCENT_PRIMARY, command=self._on_engine_change)
+        self.engine_selector = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["DuckDuckGo Lite", "AOL (Tor)", "Yahoo (Tor)"], fg_color=BG_CARD_2, button_color=BORDER, button_hover_color=ACCENT_PRIMARY, command=self._on_engine_change)
         self.engine_selector.pack(fill="x", padx=20, pady=(0, 20))
 
         parser_max_threads = min(self.max_hw_threads, 500)
@@ -446,7 +446,7 @@ class ValidatorApp(ctk.CTk):
             self.sub_title_lbl.configure(text=f"{engine} Dork Engine")
 
     def _on_engine_change(self, value):
-        tor_engines = ["AOL (Tor)"]
+        tor_engines = ["AOL (Tor)", "Yahoo (Tor)"]
         
         if value in tor_engines:
             # Tor mode: cap threads to 50 (will be further limited by alive instances)
@@ -512,20 +512,24 @@ class ValidatorApp(ctk.CTk):
 
     # --- DUMMY HANDLERS FOR PARSER (to be fully implemented later) ---
     def load_dorks(self):
-        filepath = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
-        if filepath:
-            with open(filepath, "r", encoding="utf-8") as f:
-                new_dorks = [clean_input_line(line) for line in f if line.strip()]
-            self.parser_raw_dorks = list(set(self.parser_raw_dorks + new_dorks))
-            if not self.parser_raw_dorks:
-                messagebox.showerror("Ошибка загрузки", "Файл пуст или содержит только пустые строки!")
+        filepaths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
+        if filepaths:
+            all_new_dorks = []
+            for filepath in filepaths:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    all_new_dorks.extend([clean_input_line(line) for line in f if line.strip()])
+            
+            if not all_new_dorks and not self.parser_raw_dorks:
+                messagebox.showerror("Ошибка загрузки", "Файлы пусты или содержат только пустые строки!")
                 self.dork_selector.set_text("")
                 self.loaded_dorks_lbl.configure(text="Загружено: 0")
                 return
-            self.dork_selector.set_text("Несколько файлов" if len(self.parser_raw_dorks) > len(new_dorks) else filepath)
-            self.dork_selector.append_to_textbox(new_dorks)
+                
+            self.parser_raw_dorks = list(set(self.parser_raw_dorks + all_new_dorks))
+            self.dork_selector.set_text("Несколько файлов" if len(filepaths) > 1 or len(self.parser_raw_dorks) > len(all_new_dorks) else filepaths[0])
+            self.dork_selector.append_to_textbox(all_new_dorks)
             self.loaded_dorks_lbl.configure(text=f"Загружено: {len(self.parser_raw_dorks)}")
-            self.safe_parser_log(f"[INFO] Добавлено {len(new_dorks)} Dork-запросов. Всего: {len(self.parser_raw_dorks)}", "info")
+            self.safe_parser_log(f"[INFO] Добавлено {len(all_new_dorks)} Dork-запросов. Всего: {len(self.parser_raw_dorks)}", "info")
 
     def on_dorks_pasted(self, text):
         new_dorks = [clean_input_line(line) for line in text.split("\n") if line.strip()]
@@ -533,15 +537,18 @@ class ValidatorApp(ctk.CTk):
         self.loaded_dorks_lbl.configure(text=f"Загружено: {len(self.parser_raw_dorks)}")
 
     def load_parser_proxies(self):
-        filepath = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
-        if filepath:
-            file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
-            if file_size_mb > 50:
-                if not messagebox.askyesno("Огромный файл", f"Размер файла прокси: {file_size_mb:.1f} МБ.\nПродолжить?"):
-                    return
-            with open(filepath, "r", encoding="utf-8") as f:
-                raw_proxies = list(set([clean_input_line(line) for line in f if line.strip()]))
-            
+        filepaths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
+        if filepaths:
+            raw_proxies = []
+            for filepath in filepaths:
+                file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+                if file_size_mb > 50:
+                    if not messagebox.askyesno("Огромный файл", f"Размер файла {os.path.basename(filepath)}: {file_size_mb:.1f} МБ.\nПродолжить?"):
+                        continue
+                with open(filepath, "r", encoding="utf-8") as f:
+                    raw_proxies.extend([clean_input_line(line) for line in f if line.strip()])
+                    
+            raw_proxies = list(set(raw_proxies))
             new_proxies = []
             for p in raw_proxies:
                 p_lower = p.lower()
@@ -549,10 +556,9 @@ class ValidatorApp(ctk.CTk):
                     continue
                 new_proxies.append(p)
                 
-            self.parser_proxies = list(set(self.parser_proxies + new_proxies))
             ignored_count = len(raw_proxies) - len(new_proxies)
             
-            if not self.parser_proxies:
+            if not new_proxies and not self.parser_proxies:
                 if ignored_count > 0:
                     messagebox.showerror("Ошибка прокси", "В файлах не найдено SOCKS5 прокси!\nВсе адреса были отброшены.")
                 else:
@@ -561,7 +567,8 @@ class ValidatorApp(ctk.CTk):
                 self.loaded_parser_proxies_lbl.configure(text="Прокси: 0")
                 return
                 
-            self.parser_proxy_selector.set_text("Несколько файлов" if len(self.parser_proxies) > len(new_proxies) else filepath)
+            self.parser_proxies = list(set(self.parser_proxies + new_proxies))
+            self.parser_proxy_selector.set_text("Несколько файлов" if len(filepaths) > 1 or len(self.parser_proxies) > len(new_proxies) else filepaths[0])
             self.parser_proxy_selector.append_to_textbox(new_proxies)
             self.loaded_parser_proxies_lbl.configure(text=f"Прокси: {len(self.parser_proxies)}")
             self.safe_parser_log(f"[INFO] Добавлено {len(new_proxies)} SOCKS5 прокси. Всего: {len(self.parser_proxies)}", "info")
@@ -922,24 +929,27 @@ class ValidatorApp(ctk.CTk):
         return max_threads, rank, color
 
     def load_file(self):
-        filepath = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
-        if filepath:
-            file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
-            if file_size_mb > 100:
-                if not messagebox.askyesno("Огромный файл", f"Размер файла: {file_size_mb:.1f} МБ.\n\nЗагрузка гигантских файлов целиком в ОЗУ может привести к зависанию.\nПродолжить?"):
-                    return
-            with open(filepath, "r", encoding="utf-8") as f:
-                new_emails = [clean_input_line(line) for line in f if line.strip()]
+        filepaths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
+        if filepaths:
+            new_emails = []
+            for filepath in filepaths:
+                file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+                if file_size_mb > 100:
+                    if not messagebox.askyesno("Огромный файл", f"Размер файла {os.path.basename(filepath)}: {file_size_mb:.1f} МБ.\n\nЗагрузка гигантских файлов целиком в ОЗУ может привести к зависанию.\nПродолжить?"):
+                        continue
+                with open(filepath, "r", encoding="utf-8") as f:
+                    new_emails.extend([clean_input_line(line) for line in f if line.strip()])
             
-            self.raw_emails.extend(new_emails)
-            self.raw_emails = list(dict.fromkeys(self.raw_emails))
-            
-            if not self.raw_emails:
-                messagebox.showerror("Ошибка загрузки", "Файл пуст или содержит только пустые строки!")
+            if not new_emails and not self.raw_emails:
+                messagebox.showerror("Ошибка загрузки", "Файлы пусты или содержат только пустые строки!")
                 self.db_selector.set_text("")
                 self.loaded_lbl.configure(text="Загружено: 0")
                 return
-            self.db_selector.set_text("Несколько файлов" if len(self.raw_emails) > len(new_emails) else filepath)
+                
+            self.raw_emails.extend(new_emails)
+            self.raw_emails = list(dict.fromkeys(self.raw_emails))
+            
+            self.db_selector.set_text("Несколько файлов" if len(filepaths) > 1 or len(self.raw_emails) > len(new_emails) else filepaths[0])
             self.db_selector.append_to_textbox(new_emails)
             self.loaded_lbl.configure(text=f"Загружено: {len(self.raw_emails)}")
             self.safe_log(f"[INFO] Добавлено {len(new_emails)} строк. Всего: {len(self.raw_emails)}", "info")
@@ -951,15 +961,18 @@ class ValidatorApp(ctk.CTk):
         self.loaded_lbl.configure(text=f"Загружено: {len(self.raw_emails)}")
 
     def load_proxies(self):
-        filepath = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
-        if filepath:
-            file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
-            if file_size_mb > 50:
-                if not messagebox.askyesno("Огромный файл", f"Размер файла прокси: {file_size_mb:.1f} МБ.\nПродолжить?"):
-                    return
-            with open(filepath, "r", encoding="utf-8") as f:
-                raw_proxies = list(set([clean_input_line(line) for line in f if line.strip()]))
-            
+        filepaths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
+        if filepaths:
+            raw_proxies = []
+            for filepath in filepaths:
+                file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+                if file_size_mb > 50:
+                    if not messagebox.askyesno("Огромный файл", f"Размер файла {os.path.basename(filepath)}: {file_size_mb:.1f} МБ.\nПродолжить?"):
+                        continue
+                with open(filepath, "r", encoding="utf-8") as f:
+                    raw_proxies.extend([clean_input_line(line) for line in f if line.strip()])
+                    
+            raw_proxies = list(set(raw_proxies))
             new_proxies = []
             for p in raw_proxies:
                 p_lower = p.lower()
@@ -967,19 +980,19 @@ class ValidatorApp(ctk.CTk):
                     continue
                 new_proxies.append(p)
                 
-            self.proxies = list(set(self.proxies + new_proxies))
             ignored_count = len(raw_proxies) - len(new_proxies)
             
-            if not self.proxies:
+            if not new_proxies and not self.proxies:
                 if ignored_count > 0:
                     messagebox.showerror("Ошибка прокси", "В файлах не найдено SOCKS5 прокси!\nВсе адреса были отброшены.")
                 else:
-                    messagebox.showerror("Ошибка загрузки", "Файл с прокси абсолютно пуст!")
+                    messagebox.showerror("Ошибка загрузки", "Файлы с прокси абсолютно пусты!")
                 self.proxy_selector.set_text("")
                 self.loaded_proxies_lbl.configure(text="Прокси: 0")
                 return
                 
-            self.proxy_selector.set_text("Несколько файлов" if len(self.proxies) > len(new_proxies) else filepath)
+            self.proxies = list(set(self.proxies + new_proxies))
+            self.proxy_selector.set_text("Несколько файлов" if len(filepaths) > 1 or len(self.proxies) > len(new_proxies) else filepaths[0])
             self.proxy_selector.append_to_textbox(new_proxies)
             self.loaded_proxies_lbl.configure(text=f"Прокси: {len(self.proxies)}")
             self.safe_log(f"[INFO] Добавлено {len(new_proxies)} SOCKS5 прокси. Всего: {len(self.proxies)}", "info")
