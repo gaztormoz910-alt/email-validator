@@ -442,8 +442,11 @@ class AOLEngine:
             return None
         except Exception: return None
 
-    def search_generator(self, query: str) -> Iterator[str]:
+    def _build_url(self, query: str, offset: int) -> str:
         import urllib.parse
+        return f"https://search.yahoo.com/yhs/search?hspart=aol&hsimp=yhs-aol_catchall&p={urllib.parse.quote_plus(query)}&b={offset}"
+
+    def search_generator(self, query: str) -> Iterator[str]:
         if not query or not isinstance(query, str):
             self._log("[Система] Ошибка: Пустой или некорректный запрос.")
             return
@@ -462,7 +465,7 @@ class AOLEngine:
                 retries: int = 0
                 success: bool = False
                 
-                url = f"https://search.yahoo.com/yhs/search?hspart=aol&hsimp=yhs-aol_catchall&p={urllib.parse.quote_plus(query)}&b={b_offset}"
+                url = self._build_url(query, b_offset)
                 
                 while retries < self.max_retries:
                     # Check stop event inside retry loop
@@ -568,3 +571,12 @@ class AOLEngine:
                 
                 if not success:
                     break
+
+class YahooEngine(AOLEngine):
+    """
+    Scraper Engine for pure Yahoo Search via Tor.
+    Inherits everything from AOLEngine but overrides the target URL.
+    """
+    def _build_url(self, query: str, offset: int) -> str:
+        import urllib.parse
+        return f"https://search.yahoo.com/search?p={urllib.parse.quote_plus(query)}&b={offset}"
