@@ -497,11 +497,12 @@ class AOLEngine:
                         html_lower = html.lower()
                         
                         # Detect captchas and blocks in the response body
-                        if "captcha" in html_lower or "robot" in html_lower and "are you a" in html_lower:
+                        if "captcha" in html_lower or ("robot" in html_lower and "are you a" in html_lower) or "pardon our interruption" in html_lower or "verify you are a human" in html_lower:
                             self.proxy_manager.mark_fail(proxy_url)
                             retries += 1
                             time.sleep(1.0)
                             continue
+
                         
                         # Check for 'no results' responses
                         if "we did not find results for" in html_lower or "no results found" in html_lower or "no matching documents" in html_lower:

@@ -154,7 +154,7 @@ class ParserPipeline(threading.Thread):
 
         # 2. Worker thread logic
         def worker():
-            if self.engine_name == "AOL (Tor)":
+            if self.engine_name in ["AOL (Tor)", "Yahoo (Tor)"]:
                 class TorProxyManagerWrapper:
                     def __init__(wrapper_self, tm, configured_timeout):
                         wrapper_self.tm = tm
@@ -184,6 +184,10 @@ class ParserPipeline(threading.Thread):
                     engine = AOLEngine(TorProxyManagerWrapper(self.tor_manager, self.timeout), on_log=self.log, is_stopped=lambda: self._stop_event.is_set())
                 elif self.engine_name == "Yahoo (Tor)":
                     engine = YahooEngine(TorProxyManagerWrapper(self.tor_manager, self.timeout), on_log=self.log, is_stopped=lambda: self._stop_event.is_set())
+            elif self.engine_name == "AOL (Proxies)":
+                engine = AOLEngine(self.proxy_manager, on_log=self.log, is_stopped=lambda: self._stop_event.is_set())
+            elif self.engine_name == "Yahoo (Proxies)":
+                engine = YahooEngine(self.proxy_manager, on_log=self.log, is_stopped=lambda: self._stop_event.is_set())
             else:
                 engine = DuckDuckGoEngine(self.proxy_manager, on_log=self.log)
                 
@@ -283,7 +287,10 @@ class ParserPipeline(threading.Thread):
         if num_threads <= 0: num_threads = 1
         
         if num_threads < self.max_threads:
-            self.log(f"[Система] Запуск {num_threads} потоков (адаптировано под Tor)...")
+            if use_tor:
+                self.log(f"[Система] Запуск {num_threads} потоков (адаптировано под Tor)...")
+            else:
+                self.log(f"[Система] Запуск {num_threads} потоков (ограничено количеством дорков)...")
         else:
             self.log(f"[Система] Запуск {num_threads} потоков...")
         for i in range(num_threads):
