@@ -1,14 +1,12 @@
 # core/cleaner.py
 import difflib
 
+from .parser_pipeline import GLOBAL_VERIFIED_DOMAINS
+
 class EmailCleaner:
     def __init__(self):
         # Самые популярные провайдеры для проверки на опечатки
-        self.popular_domains = [
-            "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", 
-            "icloud.com", "mail.ru", "yandex.ru", "bk.ru", "inbox.ru",
-            "list.ru", "protonmail.com", "aol.com", "zoho.com"
-        ]
+        self.popular_domains = list(GLOBAL_VERIFIED_DOMAINS)
 
     def correct_and_normalize(self, email: str) -> str:
         """Исправляет опечатки в доменах и переводит в нижний регистр."""
@@ -52,7 +50,8 @@ class EmailCleaner:
             corrected_domain = matches[0]
             return f"{local_part}@{corrected_domain}"
             
-        return f"{local_part}@{domain}"
+        # 4. Если домен не найден в белом списке и не поддается лечению - возвращаем None
+        return None
 
     def process_batch(self, raw_emails: list) -> set:
         """
@@ -62,5 +61,6 @@ class EmailCleaner:
         cleaned_emails = set()
         for raw in raw_emails:
             corrected = self.correct_and_normalize(raw)
-            cleaned_emails.add(corrected)
+            if corrected: # Добавляем только если домен прошел проверку
+                cleaned_emails.add(corrected)
         return cleaned_emails
