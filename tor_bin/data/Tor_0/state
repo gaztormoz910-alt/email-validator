@@ -1,4 +1,4 @@
-# Tor state file last generated on 2026-06-26 14:52:58 local time
+# Tor state file last generated on 2026-06-29 15:41:21 local time
 # Other times below are in UTC
 # You *do not* need to edit this file.
 
@@ -42,6 +42,7 @@ CircuitBuildTimeBin 3835 1
 CircuitBuildTimeBin 3925 1
 CircuitBuildTimeBin 4245 1
 CircuitBuildTimeBin 4595 1
+CircuitBuildTimeBin 4665 1
 CircuitBuildTimeBin 4785 1
 CircuitBuildTimeBin 5035 1
 CircuitBuildTimeBin 5115 1
@@ -58,6 +59,8 @@ CircuitBuildTimeBin 6035 1
 CircuitBuildTimeBin 6215 1
 CircuitBuildTimeBin 6335 1
 CircuitBuildTimeBin 6425 1
+CircuitBuildTimeBin 6435 1
+CircuitBuildTimeBin 6595 1
 CircuitBuildTimeBin 6965 1
 CircuitBuildTimeBin 7255 1
 CircuitBuildTimeBin 7805 1
@@ -82,6 +85,7 @@ CircuitBuildTimeBin 9845 1
 CircuitBuildTimeBin 10025 1
 CircuitBuildTimeBin 10125 1
 CircuitBuildTimeBin 10365 1
+CircuitBuildTimeBin 10585 1
 CircuitBuildTimeBin 10945 1
 CircuitBuildTimeBin 11075 1
 CircuitBuildTimeBin 11155 1
@@ -115,9 +119,16 @@ CircuitBuildTimeBin 14915 1
 CircuitBuildTimeBin 15455 1
 CircuitBuildTimeBin 15695 1
 CircuitBuildTimeBin 15725 1
+CircuitBuildTimeBin 15985 1
 CircuitBuildTimeBin 16835 1
+CircuitBuildTimeBin 17405 1
 CircuitBuildTimeBin 18545 1
 CircuitBuildTimeBin 18885 1
+CircuitBuildTimeBin 20855 1
+CircuitBuildTimeBin 20945 1
+CircuitBuildTimeBin 20955 1
+CircuitBuildTimeBin 21025 1
+CircuitBuildTimeBin 21135 1
 CircuitBuildTimeBin 21285 1
 CircuitBuildTimeBin 22205 1
 CircuitBuildTimeBin 22225 1
@@ -194,12 +205,11 @@ CircuitBuildTimeBin 113565 1
 CircuitBuildAbandonedCount 1
 Dormant 0
 Guard in=bridges rsa_id=2B280B23E1107BB62ABFC40DDCC8824814F80A72 bridge_addr=192.0.2.3:80 sampled_on=2026-06-11T19:59:22 sampled_idx=0 sampled_by=0.4.9.9 listed=1 confirmed_on=2026-06-12T00:19:21 confirmed_idx=0 pb_use_attempts=2.000000 pb_use_successes=2.000000 pb_circ_attempts=45.000000 pb_circ_successes=44.000000 pb_successful_circuits_closed=44.000000 pb_timeouts=1.000000
-Guard in=bridges rsa_id=8838024498816A039FCBBAB14E6F40A0843051FA bridge_addr=192.0.2.4:80 sampled_on=2026-06-14T20:09:59 sampled_idx=1 sampled_by=0.4.9.9 listed=1 confirmed_on=2026-06-09T11:43:17 confirmed_idx=1 pb_use_attempts=4.000000 pb_use_successes=4.000000 pb_circ_attempts=61.000000 pb_circ_successes=61.000000 pb_successful_circuits_closed=61.000000
+Guard in=bridges rsa_id=8838024498816A039FCBBAB14E6F40A0843051FA bridge_addr=192.0.2.4:80 sampled_on=2026-06-14T20:09:59 sampled_idx=1 sampled_by=0.4.9.9 listed=1 confirmed_on=2026-06-09T11:43:17 confirmed_idx=1 pb_use_attempts=5.000000 pb_use_successes=5.000000 pb_circ_attempts=66.000000 pb_circ_successes=66.000000 pb_successful_circuits_closed=66.000000
 Guard in=bridges rsa_id=CA98889950A949826315A519E86266FA71578F8C bridge_addr=146.19.106.136:8023 sampled_on=2026-06-12T10:56:42 sampled_idx=2 sampled_by=0.4.9.9 unlisted_since=2026-06-19T20:21:04 listed=0
 Guard in=bridges rsa_id=CDF2E852BF539B82BD10E27E9115A31734E378C2 bridge_addr=192.95.36.142:443 sampled_on=2026-06-12T11:28:27 sampled_idx=3 sampled_by=0.4.9.9 unlisted_since=2026-06-17T08:31:45 listed=0
 Guard in=bridges rsa_id=ECE3DCE4E74BBEB0A2624EB5256DDE62A3764835 bridge_addr=85.17.30.79:443 sampled_on=2026-06-10T11:13:13 sampled_idx=4 sampled_by=0.4.9.9 unlisted_since=2026-06-17T19:45:28 listed=0
 Guard in=bridges rsa_id=2D8EA1BD8B2A2BD1D5F54077673ACAE4656F623F bridge_addr=193.11.166.194:27015 sampled_on=2026-06-15T21:18:11 sampled_idx=5 sampled_by=0.4.9.9 unlisted_since=2026-06-18T04:30:38 listed=0
-LastWritten 2026-06-26 08:52:58
-MinutesSinceUserActivity 7
+LastWritten 2026-06-29 09:41:21
 TorVersion Tor 0.4.9.9 (git-74b53bd1992da4ec)
-TotalBuildTimes 216
+TotalBuildTimes 227
