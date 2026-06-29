@@ -46,6 +46,7 @@ class TorInstance:
             f.write("ClientTransportPlugin snowflake exec pluggable_transports/lyrebird.exe\n")
             f.write("Bridge snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn\n")
             f.write("Bridge snowflake 192.0.2.4:80 8838024498816A039FCBBAB14E6F40A0843051FA fingerprint=8838024498816A039FCBBAB14E6F40A0843051FA url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn\n")
+            f.write("Bridge snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://snowflake-broker.azureedge.net/ fronts=ajax.aspnetcdn.com ice=stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,stun:stun.bluesip.net:3478,stun:stun.dus.net:3478,stun:stun.epygi.com:3478,stun:stun.sonetel.com:3478 utls-imitate=hellorandomizedalpn\n")
             
         creation_flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             
@@ -60,12 +61,21 @@ class TorInstance:
         
         start_time = time.time()
         bootstrapped = False
-        while time.time() - start_time < 300:
+        last_progress = ""
+        while time.time() - start_time < 600:
             line = self.process.stdout.readline()
             if not line: break
-            if "Bootstrapped 100%" in line:
-                bootstrapped = True
-                break
+            if "Bootstrapped" in line:
+                if "100%" in line:
+                    bootstrapped = True
+                    break
+                else:
+                    try:
+                        percent = line.split("Bootstrapped ")[1].split("%")[0]
+                        if percent != last_progress:
+                            self._log(f"[Tor #{self.index}] Bootstrap: {percent}%", "info")
+                            last_progress = percent
+                    except: pass
                 
         if bootstrapped:
             self._log(f"[Система] Tor #{self.index} успешно запущен (Порт {self.tor_port})", "success")
@@ -139,10 +149,14 @@ class TorManager:
         return cls._instance
 
     def __init__(self, log_callback=None):
-        if self._initialized:
+        if log_callback:
+            self.log_callback = log_callback
+        else:
+            if not hasattr(self, 'log_callback'):
+                self.log_callback = print
+                
+        if getattr(self, '_initialized', False):
             return
-            
-        self.log_callback = log_callback or print
         
         if getattr(sys, 'frozen', False):
             self.base_dir = Path(sys.executable).parent

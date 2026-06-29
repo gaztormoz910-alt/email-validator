@@ -415,7 +415,7 @@ class ValidatorApp(ctk.CTk):
         self.engine_lbl.pack(padx=20, anchor="w", pady=(0, 5))
         
         self.engine_var = ctk.StringVar(value="DuckDuckGo Lite")
-        self.engine_selector = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["DuckDuckGo Lite", "AOL (Tor)", "Yahoo (Tor)"], fg_color=BG_CARD_2, button_color=BORDER, button_hover_color=ACCENT_PRIMARY, command=self._on_engine_change)
+        self.engine_selector = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["DuckDuckGo Lite", "AOL (Tor)", "Yahoo (Tor)", "AOL (Proxies)", "Yahoo (Proxies)"], fg_color=BG_CARD_2, button_color=BORDER, button_hover_color=ACCENT_PRIMARY, command=self._on_engine_change)
         self.engine_selector.pack(fill="x", padx=20, pady=(0, 20))
 
         parser_max_threads = min(self.max_hw_threads, 500)
