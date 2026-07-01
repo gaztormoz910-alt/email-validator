@@ -45,17 +45,24 @@ def check_single_proxy(proxy, timeout):
     except Exception:
         return None
 
-def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None):
+def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None, log_callback=None):
     """Тестирует список прокси и возвращает только рабочие (у которых открыт 25 порт)."""
     from core.async_proxy import run_async_checker
     
+    def on_prog(c, t, l):
+        if progress_callback:
+            progress_callback(c, t)
+        if log_callback:
+            if c % 100 == 0 or c == t:
+                log_callback(f"[PROXY] Проверка... {c}/{t} | Найдено рабочих: {l}", "info")
+
     # We use mode="smtp" to ensure port 25 is open and responds with 220 greeting.
     live_proxies = run_async_checker(
         proxies=proxies,
         workers=threads,
         timeout=timeout,
         mode="smtp",
-        progress_callback=lambda c, t, l: progress_callback(c, t) if progress_callback else None
+        progress_callback=on_prog
     )
     
     return live_proxies
