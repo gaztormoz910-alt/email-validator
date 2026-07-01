@@ -280,7 +280,7 @@ class ValidatorApp(ctk.CTk):
             pass
         
         self.app_mode = "Валидатор"
-        self.raw_emails = []
+        self.raw_emails = {}
         self.proxies = []
         self.stats = {"valid": 0, "invalid": 0, "spam": 0, "unknown": 0}
         self.results_data = []
@@ -290,13 +290,18 @@ class ValidatorApp(ctk.CTk):
         self.parser_results_data = []
         self.parser_pipeline = None
         
+        self.validator_page = 1
+        self.validator_page_size = 100
+        
         import queue
         self.log_queue = queue.Queue()
         self.stats_queue = queue.Queue()
         self.progress_queue = queue.Queue()
         self.result_queue = queue.Queue()
+        self.validator_result_queue = queue.Queue()
+        self.validator_log_queue = queue.Queue()
         self._poll_queues()
-        
+        self._poll_validator_queues()
 
         self.pipeline = ValidationPipeline(callbacks={
             'on_log': self.safe_log,
@@ -314,6 +319,32 @@ class ValidatorApp(ctk.CTk):
         self._build_sidebar()
         self._build_main_workspace()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # Fix for Cyrillic keyboard layout shortcuts using hardware keycodes (Windows)
+        self.bind_all("<Control-KeyPress>", self._ru_shortcuts)
+
+    def _ru_shortcuts(self, event):
+        # 67=C, 86=V, 88=X, 65=A, 90=Z (Windows Virtual Key Codes)
+        if event.keycode == 67:
+            event.widget.event_generate("<<Copy>>")
+            return "break"
+        elif event.keycode == 86:
+            event.widget.event_generate("<<Paste>>")
+            return "break"
+        elif event.keycode == 88:
+            event.widget.event_generate("<<Cut>>")
+            return "break"
+        elif event.keycode == 65:
+            if hasattr(event.widget, 'tag_add'):
+                event.widget.tag_add("sel", "1.0", "end")
+            elif hasattr(event.widget, 'select_range'):
+                event.widget.select_range(0, 'end')
+            return "break"
+        elif event.keycode == 90:
+            try:
+                event.widget.event_generate("<<Undo>>")
+            except: pass
+            return "break"
 
     def on_closing(self):
         import os
@@ -389,6 +420,10 @@ class ValidatorApp(ctk.CTk):
         self.chk_ai = ctk.CTkSwitch(self.validator_sidebar_frame, text="Использовать AI фильтр (ML)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color="#FFFFFF", button_hover_color="#E2E8F0")
         self.chk_ai.select()
         self.chk_ai.pack(padx=20, anchor="w", pady=(0, 20))
+        
+        self.chk_osint_val = ctk.CTkSwitch(self.validator_sidebar_frame, text="Обогащение данных (OSINT)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color="#FFFFFF", button_hover_color="#E2E8F0")
+        self.chk_osint_val.select()
+        self.chk_osint_val.pack(padx=20, anchor="w", pady=(0, 20))
         
         # --- PARSER SIDEBAR CONTENT ---
         self.parser_sidebar_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -637,6 +672,7 @@ class ValidatorApp(ctk.CTk):
         self._create_stat_card(self.dashboard_frame, 0, 2, "Невалидные", "0", ACCENT_ERROR, "🗑", "stat_2")
         self._create_stat_card(self.dashboard_frame, 1, 0, "Спам / Ловушки", "0", ACCENT_WARNING, "⚠️", "stat_3")
         self._create_stat_card(self.dashboard_frame, 1, 1, "Неизвестно", "0", TEXT_MUTED, "❓", "stat_4")
+        self._create_stat_card(self.dashboard_frame, 1, 2, "Имена найдены", "0", "#8B5CF6", "👤", "stat_names")
 
         # Прогресс-бар (Validator)
         self.progress_frame = ctk.CTkFrame(self.validator_workspace, fg_color="transparent")
@@ -689,21 +725,33 @@ class ValidatorApp(ctk.CTk):
         self.table_export_frame = ctk.CTkFrame(self.table_view, fg_color="transparent")
         self.table_export_frame.pack(fill="x", pady=(0, 10))
         
+        self.pagination_frame = ctk.CTkFrame(self.table_export_frame, fg_color="transparent")
+        self.pagination_frame.pack(side="left", padx=(0, 20))
+        
+        self.btn_prev_page = ctk.CTkButton(self.pagination_frame, text="<", width=30, height=28, command=self.prev_validator_page, fg_color=BG_SIDEBAR, hover_color=BORDER)
+        self.btn_prev_page.pack(side="left", padx=(0, 5))
+        
+        self.lbl_page = ctk.CTkLabel(self.pagination_frame, text="Стр. 1 / 1", font=ctk.CTkFont(size=12))
+        self.lbl_page.pack(side="left", padx=5)
+        
+        self.btn_next_page = ctk.CTkButton(self.pagination_frame, text=">", width=30, height=28, command=self.next_validator_page, fg_color=BG_SIDEBAR, hover_color=BORDER)
+        self.btn_next_page.pack(side="left", padx=(5, 15))
+        
         self.chk_valid_var = ctk.BooleanVar(value=True)
         self.chk_invalid_var = ctk.BooleanVar(value=False)
         self.chk_spam_var = ctk.BooleanVar(value=False)
         self.chk_unknown_var = ctk.BooleanVar(value=False)
         
-        self.chk_valid = ctk.CTkCheckBox(self.table_export_frame, text="Valid", variable=self.chk_valid_var, fg_color=ACCENT_SUCCESS, hover_color="#22C55E", text_color=TEXT_MAIN, font=ctk.CTkFont(size=12))
+        self.chk_valid = ctk.CTkCheckBox(self.table_export_frame, text="Valid", variable=self.chk_valid_var, command=self._on_filter_change, fg_color=ACCENT_SUCCESS, hover_color="#22C55E", text_color=TEXT_MAIN, font=ctk.CTkFont(size=12))
         self.chk_valid.pack(side="left", padx=(0, 10))
         
-        self.chk_invalid = ctk.CTkCheckBox(self.table_export_frame, text="Invalid", variable=self.chk_invalid_var, fg_color=ACCENT_ERROR, hover_color="#EF4444", text_color=TEXT_MAIN, font=ctk.CTkFont(size=12))
+        self.chk_invalid = ctk.CTkCheckBox(self.table_export_frame, text="Invalid", variable=self.chk_invalid_var, command=self._on_filter_change, fg_color=ACCENT_ERROR, hover_color="#EF4444", text_color=TEXT_MAIN, font=ctk.CTkFont(size=12))
         self.chk_invalid.pack(side="left", padx=(0, 10))
         
-        self.chk_spam = ctk.CTkCheckBox(self.table_export_frame, text="Spam/Trap", variable=self.chk_spam_var, fg_color=ACCENT_WARNING, hover_color="#F59E0B", text_color=TEXT_MAIN, font=ctk.CTkFont(size=12))
+        self.chk_spam = ctk.CTkCheckBox(self.table_export_frame, text="Spam/Trap", variable=self.chk_spam_var, command=self._on_filter_change, fg_color=ACCENT_WARNING, hover_color="#F59E0B", text_color=TEXT_MAIN, font=ctk.CTkFont(size=12))
         self.chk_spam.pack(side="left", padx=(0, 10))
         
-        self.chk_unknown = ctk.CTkCheckBox(self.table_export_frame, text="Unknown", variable=self.chk_unknown_var, fg_color=BORDER, hover_color="#4B5563", text_color=TEXT_MAIN, font=ctk.CTkFont(size=12))
+        self.chk_unknown = ctk.CTkCheckBox(self.table_export_frame, text="Unknown", variable=self.chk_unknown_var, command=self._on_filter_change, fg_color=BORDER, hover_color="#4B5563", text_color=TEXT_MAIN, font=ctk.CTkFont(size=12))
         self.chk_unknown.pack(side="left", padx=(0, 15))
         
         self.export_btn = ctk.CTkButton(self.table_export_frame, text="💾 Сохранить", command=self.export_results, width=100, height=28, fg_color=ACCENT_SUCCESS, hover_color="#22C55E", corner_radius=6)
@@ -735,17 +783,23 @@ class ValidatorApp(ctk.CTk):
         self.table_frame.grid_rowconfigure(0, weight=1)
         self.table_frame.grid_columnconfigure(0, weight=1)
 
-        columns = ("email", "status", "reason", "mx")
+        columns = ("email", "status", "reason", "mx", "name", "gender", "country")
         self.tree = ttk.Treeview(self.table_frame, columns=columns, show="headings")
         self.tree.heading("email", text="Email", anchor="w")
         self.tree.heading("status", text="Status", anchor="center")
         self.tree.heading("reason", text="Reason", anchor="w")
         self.tree.heading("mx", text="MX-Record", anchor="w")
+        self.tree.heading("name", text="Name", anchor="w")
+        self.tree.heading("gender", text="Gender", anchor="w")
+        self.tree.heading("country", text="Country", anchor="w")
         
-        self.tree.column("email", width=300, minwidth=200, stretch=True, anchor="w")
-        self.tree.column("status", width=120, minwidth=100, stretch=False, anchor="center")
-        self.tree.column("reason", width=300, minwidth=200, stretch=True, anchor="w")
-        self.tree.column("mx", width=250, minwidth=150, stretch=True, anchor="w")
+        self.tree.column("email", width=220, minwidth=150, stretch=True, anchor="w")
+        self.tree.column("status", width=100, minwidth=80, stretch=False, anchor="center")
+        self.tree.column("reason", width=200, minwidth=150, stretch=True, anchor="w")
+        self.tree.column("mx", width=200, minwidth=150, stretch=True, anchor="w")
+        self.tree.column("name", width=120, minwidth=80, stretch=True, anchor="w")
+        self.tree.column("gender", width=80, minwidth=60, stretch=True, anchor="w")
+        self.tree.column("country", width=100, minwidth=60, stretch=True, anchor="w")
         self.tree.grid(row=0, column=0, sticky="nsew")
 
         self.scrollbar = ctk.CTkScrollbar(self.table_frame, orientation="vertical", command=self.tree.yview, fg_color="transparent", button_color=ACCENT_PRIMARY, button_hover_color="#60A5FA")
@@ -929,35 +983,54 @@ class ValidatorApp(ctk.CTk):
         return max_threads, rank, color
 
     def load_file(self):
-        filepaths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
+        filepaths = filedialog.askopenfilenames(filetypes=[("Text/CSV Files", "*.txt *.csv")])
         if filepaths:
-            new_emails = []
+            new_emails = {}
             for filepath in filepaths:
                 file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
                 if file_size_mb > 100:
                     if not messagebox.askyesno("Огромный файл", f"Размер файла {os.path.basename(filepath)}: {file_size_mb:.1f} МБ.\n\nЗагрузка гигантских файлов целиком в ОЗУ может привести к зависанию.\nПродолжить?"):
                         continue
-                with open(filepath, "r", encoding="utf-8") as f:
-                    new_emails.extend([clean_input_line(line) for line in f if line.strip()])
+                with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line: continue
+                        parts = line.split(":")
+                        email = clean_input_line(parts[0])
+                        if email:
+                            data = {"name": "", "gender": "", "country": ""}
+                            if len(parts) >= 2: data["name"] = parts[1].strip()
+                            if len(parts) >= 3: data["gender"] = parts[2].strip()
+                            if len(parts) >= 4: data["country"] = parts[3].strip()
+                            new_emails[email] = data
             
             if not new_emails and not self.raw_emails:
-                messagebox.showerror("Ошибка загрузки", "Файлы пусты или содержат только пустые строки!")
+                messagebox.showerror("Ошибка загрузки", "Файлы пусты или не содержат валидных адресов!")
                 self.db_selector.set_text("")
                 self.loaded_lbl.configure(text="Загружено: 0")
                 return
                 
-            self.raw_emails.extend(new_emails)
-            self.raw_emails = list(dict.fromkeys(self.raw_emails))
+            self.raw_emails.update(new_emails)
             
             self.db_selector.set_text("Несколько файлов" if len(filepaths) > 1 or len(self.raw_emails) > len(new_emails) else filepaths[0])
-            self.db_selector.append_to_textbox(new_emails)
+            self.db_selector.append_to_textbox(list(new_emails.keys()))
             self.loaded_lbl.configure(text=f"Загружено: {len(self.raw_emails)}")
             self.safe_log(f"[INFO] Добавлено {len(new_emails)} строк. Всего: {len(self.raw_emails)}", "info")
 
     def on_emails_pasted(self, text):
-        lines = [clean_input_line(line) for line in text.split("\n") if line.strip()]
-        self.raw_emails.extend(lines)
-        self.raw_emails = list(dict.fromkeys(self.raw_emails))
+        new_emails = {}
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line: continue
+            parts = line.split(":")
+            email = clean_input_line(parts[0])
+            if email:
+                data = {"name": "", "gender": "", "country": ""}
+                if len(parts) >= 2: data["name"] = parts[1].strip()
+                if len(parts) >= 3: data["gender"] = parts[2].strip()
+                if len(parts) >= 4: data["country"] = parts[3].strip()
+                new_emails[email] = data
+        self.raw_emails.update(new_emails)
         self.loaded_lbl.configure(text=f"Загружено: {len(self.raw_emails)}")
 
     def load_proxies(self):
@@ -1018,6 +1091,7 @@ class ValidatorApp(ctk.CTk):
         self.threads_slider.configure(state=state)
         self.timeout_slider.configure(state=state)
         self.chk_ai.configure(state=state)
+        self.chk_osint_val.configure(state=state)
         self.dork_selector.configure(state=state)
         self.parser_proxy_selector.configure(state=state)
         self.parser_threads_slider.configure(state=state)
@@ -1065,7 +1139,7 @@ class ValidatorApp(ctk.CTk):
             self.safe_log("[DEAD] Ошибка: Отсутствует подключение к интернету.", "dead")
             return
             
-        self.stats = {"valid": 0, "invalid": 0, "spam": 0, "unknown": 0}
+        self.stats = {"valid": 0, "invalid": 0, "spam": 0, "unknown": 0, "names": 0}
         self.results_data.clear()
         
         self.stat_0.configure(text="0")
@@ -1073,6 +1147,7 @@ class ValidatorApp(ctk.CTk):
         self.stat_2.configure(text="0")
         self.stat_3.configure(text="0")
         self.stat_4.configure(text="0")
+        self.stat_names.configure(text="0")
         
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -1089,13 +1164,14 @@ class ValidatorApp(ctk.CTk):
         timeout = int(self.timeout_slider.get())
         
         self.pipeline.start(
-            raw_emails=self.raw_emails,
+            raw_emails_dict=self.raw_emails,
             threads=threads,
             timeout=timeout,
             fix_typos=True,
             check_spam=True,
             deep_ping=True,
             enable_ai=self.chk_ai.get() == 1,
+            enable_osint=self.chk_osint_val.get() == 1,
             proxies=self.proxies
         )
 
@@ -1113,12 +1189,21 @@ class ValidatorApp(ctk.CTk):
         self.safe_log("[INFO] Процесс остановлен пользователем (STOP).", "info")
         self.on_pipeline_complete()
 
-    def safe_log(self, message, tag="info"):
-        self.after(0, lambda: self._update_log(message, tag))
+    def safe_log(self, text, tag="info"):
+        self.validator_log_queue.put((text, tag))
         
-    def _update_log(self, message, tag):
+    def _log_ui(self, text, tag):
         self.terminal_box.configure(state="normal")
-        self.terminal_box.insert("end", message + "\n", tag)
+        self.terminal_box.insert("end", text + "\n", tag)
+        
+        # Keep only the last 1000 lines
+        try:
+            line_count = int(self.terminal_box.index('end-1c').split('.')[0])
+            if line_count > 1000:
+                self.terminal_box.delete("1.0", f"{line_count - 1000}.0")
+        except Exception:
+            pass
+            
         self.terminal_box.see("end")
         self.terminal_box.configure(state="disabled")
 
@@ -1143,16 +1228,47 @@ class ValidatorApp(ctk.CTk):
         else:
             self.progress_bar.configure(progress_color=ACCENT_PRIMARY)
 
-    def safe_add_result(self, email, status, reason, mx):
-        self.after(0, lambda: self._add_result_ui(email, status, reason, mx))
+    def _poll_validator_queues(self):
+        import queue
+        # Process logs
+        for _ in range(500):
+            try:
+                msg, tag = self.validator_log_queue.get_nowait()
+                self._log_ui(msg, tag)
+            except queue.Empty:
+                break
+                
+        # Batch process results
+        results_to_insert = []
+        for _ in range(500):
+            try:
+                item = self.validator_result_queue.get_nowait()
+                results_to_insert.append(item)
+            except queue.Empty:
+                break
+                
+        if results_to_insert:
+            for email, status, reason, mx, data in results_to_insert:
+                self._add_result_ui(email, status, reason, mx, data)
+                
+            self.refresh_validator_tree()
+                
+        self.after(50, self._poll_validator_queues)
+
+    def safe_add_result(self, email, status, reason, mx, data=None):
+        if data is None:
+            data = {}
+        self.validator_result_queue.put((email, status, reason, mx, data))
         
-    def _add_result_ui(self, email, status, reason, mx):
-        self.results_data.append({"email": email, "status": status, "reason": reason, "mx": mx})
-        self.tree.insert("", "end", values=(email, status, reason, mx))
+    def _add_result_ui(self, email, status, reason, mx, data):
+        self.results_data.append({"email": email, "status": status, "reason": reason, "mx": mx, "data": data})
         
         if status == "Valid":
             self.stats["valid"] += 1
             self.stat_1.configure(text=str(self.stats["valid"]))
+            if data.get("name"):
+                self.stats["names"] += 1
+                self.stat_names.configure(text=str(self.stats["names"]))
             self.safe_log(f"[VALID] {email} -> {reason}", "valid")
         elif "Trap" in status or "Disposable" in status or status == "Risky":
             self.stats["spam"] += 1
@@ -1169,6 +1285,61 @@ class ValidatorApp(ctk.CTk):
             self.stats["invalid"] += 1
             self.stat_2.configure(text=str(self.stats["invalid"]))
             self.safe_log(f"[DEAD] {email} -> {reason}", "dead")
+            
+    def _on_filter_change(self):
+        self.validator_page = 1
+        self.refresh_validator_tree(force=True)
+        
+    def prev_validator_page(self):
+        if self.validator_page > 1:
+            self.validator_page -= 1
+            self.refresh_validator_tree(force=True)
+            
+    def next_validator_page(self):
+        filtered = self._get_filtered_results()
+        import math
+        total_pages = max(1, math.ceil(len(filtered) / self.validator_page_size))
+        if self.validator_page < total_pages:
+            self.validator_page += 1
+            self.refresh_validator_tree(force=True)
+            
+    def refresh_validator_tree(self, force=False):
+        filtered = self._get_filtered_results()
+        import math
+        total_pages = max(1, math.ceil(len(filtered) / self.validator_page_size))
+        
+        if self.validator_page > total_pages:
+            self.validator_page = max(1, total_pages)
+            
+        self.lbl_page.configure(text=f"Стр. {self.validator_page} / {total_pages}")
+        
+        start_idx = (self.validator_page - 1) * self.validator_page_size
+        end_idx = start_idx + self.validator_page_size
+        page_data = filtered[start_idx:end_idx]
+        
+        current_emails = [self.tree.item(child)["values"][0] for child in self.tree.get_children()]
+        new_emails = [r["email"] for r in page_data]
+        
+        if not force and current_emails == new_emails:
+            return
+            
+        for child in self.tree.get_children():
+            self.tree.delete(child)
+            
+        for r in page_data:
+            email = r["email"]
+            status = r["status"]
+            reason = r["reason"]
+            mx = r["mx"]
+            data = r.get("data", {})
+            
+            tag = ""
+            if status == "Valid": tag = "valid"
+            elif status == "Trap/Disposable": tag = "trap"
+            elif status == "Unknown": tag = "unknown"
+            else: tag = "dead"
+            
+            self.tree.insert("", "end", values=(email, status, reason, mx, data.get("name", ""), data.get("gender", ""), data.get("country", "")), tags=(tag,))
 
     def start_parsing(self):
         if hasattr(self, 'parser_pipeline') and self.parser_pipeline and self.parser_pipeline.is_alive():
@@ -1405,12 +1576,23 @@ class ValidatorApp(ctk.CTk):
             try:
                 with open(filepath, "w", encoding="utf-8") as f:
                     if filepath.endswith(".csv"):
-                        f.write("Email,Status,Reason,MX-Record\n")
+                        f.write("Email,Status,Reason,MX-Record,Name,Gender,Country\n")
                         for r in export_data:
-                            f.write(f"{r['email']},{r['status']},{r['reason']},{r['mx']}\n")
+                            data = r.get("data", {})
+                            name = data.get("name", "")
+                            gender = data.get("gender", "")
+                            country = data.get("country", "")
+                            f.write(f"{r['email']},{r['status']},{r['reason']},{r['mx']},{name},{gender},{country}\n")
                     else:
                         for r in export_data:
-                            f.write(f"{r['email']}\n")
+                            data = r.get("data", {})
+                            name = data.get("name", "")
+                            gender = data.get("gender", "")
+                            country = data.get("country", "")
+                            if name or gender or country:
+                                f.write(f"{r['email']}:{name}:{gender}:{country}\n")
+                            else:
+                                f.write(f"{r['email']}\n")
                 messagebox.showinfo("Успех", f"Успешно сохранено {len(export_data)} строк!\nФайл: {os.path.basename(filepath)}")
             except Exception as e:
                 messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
@@ -1426,7 +1608,17 @@ class ValidatorApp(ctk.CTk):
             messagebox.showwarning("Пусто", "По выбранным критериям не найдено ни одного адреса.")
             return
             
-        text = "\n".join([r['email'] for r in export_data])
+        lines = []
+        for r in export_data:
+            data = r.get("data", {})
+            name = data.get("name", "")
+            gender = data.get("gender", "")
+            country = data.get("country", "")
+            if name or gender or country:
+                lines.append(f"{r['email']}:{name}:{gender}:{country}")
+            else:
+                lines.append(r['email'])
+        text = "\n".join(lines)
         self.clipboard_clear()
         self.clipboard_append(text)
         messagebox.showinfo("Скопировано", f"Успешно скопировано {len(export_data)} адресов в буфер обмена.")
