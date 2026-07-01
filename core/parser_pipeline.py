@@ -5,6 +5,8 @@ import logging
 from typing import Callable
 from .parser.engine import ProxyManager, DuckDuckGoEngine, AOLEngine, YahooEngine
 from .parser.extractor import EmailExtractor
+from .parser.name_extractor import NameExtractor
+from .parser.ml_predictor import MLPredictor
 
 GLOBAL_VERIFIED_DOMAINS = {
     # USA / Global
@@ -32,7 +34,7 @@ GLOBAL_VERIFIED_DOMAINS = {
 
 class ParserPipeline(threading.Thread):
     def __init__(self, dorks, proxies, max_threads, timeout=5.0,
-                 on_log=None, on_progress=None, on_stats_update=None, on_result_found=None, on_complete=None, engine_name="DuckDuckGo Lite"):
+                 on_log=None, on_progress=None, on_stats_update=None, on_result_found=None, on_complete=None, engine_name="DuckDuckGo Lite", enable_osint=False):
         super().__init__()
         self.dorks = dorks
         self.proxies = proxies
@@ -51,6 +53,8 @@ class ParserPipeline(threading.Thread):
         
         self.proxy_manager = ProxyManager(self.proxies, timeout=self.timeout)
         self.extractor = EmailExtractor()
+        self.name_extractor = NameExtractor(enable_osint=enable_osint)
+        self.ml_predictor = MLPredictor()
         self.dork_queue = queue.Queue()
         
         self.total_dorks = len(self.dorks)
@@ -263,7 +267,9 @@ class ParserPipeline(threading.Thread):
                                 
                                 if self.on_result_found:
                                     for e in new_unique_emails:
-                                        self.on_result_found(e, base_dork)
+                                        extracted_name = self.name_extractor.extract_name(e)
+                                        gender, country = self.ml_predictor.predict(extracted_name, email=e)
+                                        self.on_result_found(e, base_dork, name=extracted_name, gender=gender, country=country)
                                     
                 except Exception as e:
                     self.log(f"[Ошибка DORK {dork_idx}] {str(e)}")
