@@ -42,11 +42,8 @@ class TorInstance:
             f.write(f"HashedControlPassword {self.hashed_password}\n")
             f.write(f'DataDirectory "{data_dir_str}"\n')
             f.write("Log notice stdout\n")
-            f.write("UseBridges 1\n")
-            f.write("ClientTransportPlugin snowflake exec pluggable_transports/lyrebird.exe\n")
-            f.write("Bridge snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn\n")
-            f.write("Bridge snowflake 192.0.2.4:80 8838024498816A039FCBBAB14E6F40A0843051FA fingerprint=8838024498816A039FCBBAB14E6F40A0843051FA url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn\n")
-            f.write("Bridge snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://snowflake-broker.azureedge.net/ fronts=ajax.aspnetcdn.com ice=stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,stun:stun.bluesip.net:3478,stun:stun.dus.net:3478,stun:stun.epygi.com:3478,stun:stun.sonetel.com:3478 utls-imitate=hellorandomizedalpn\n")
+            f.write("UseBridges 0\n")
+            # Bridges removed for direct connection
             
         creation_flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             
@@ -62,7 +59,7 @@ class TorInstance:
         start_time = time.time()
         bootstrapped = False
         last_progress = ""
-        while time.time() - start_time < 600:
+        while time.time() - start_time < 90:
             line = self.process.stdout.readline()
             if not line: break
             if "Bootstrapped" in line:
@@ -117,11 +114,12 @@ class TorInstance:
 
     def stop(self):
         if self.process:
-            self.process.terminate()
             try:
-                self.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
+                # Use taskkill to cleanly kill Tor and its lyrebird child processes
+                subprocess.call(['taskkill', '/F', '/T', '/PID', str(self.process.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except:
+                pass
+            self.process = None
             
             try:
                 import psutil

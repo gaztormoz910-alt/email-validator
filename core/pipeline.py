@@ -77,7 +77,7 @@ class ValidationPipeline:
             self.name_extractor = NameExtractor(enable_osint=enable_osint)
         if not self.ml_predictor:
             self.callbacks['on_log']("[INFO] Загрузка предиктора пола/страны...", "info")
-            self.ml_predictor = MLPredictor()
+            self.ml_predictor = MLPredictor(enable_ml=enable_ai)
 
         def process_single(item):
             if not self.is_running:
@@ -130,12 +130,16 @@ class ValidationPipeline:
                             if not is_human:
                                 name = "" # ИИ понял, что это не человек (например ORG)
                         
-                        pred_gender, pred_country = self.ml_predictor.predict(name, email=email)
+                        pred_gender, pred_country_from_email = self.ml_predictor.predict(name, email=email)
+                        
+                        pred_country_from_name = ""
+                        if name and enable_ai:
+                            pred_country_from_name = self.ml_predictor.predict_country(name)
                         
                         if not gender or gender == "":
                             gender = pred_gender
                         if not country or country == "":
-                            country = pred_country
+                            country = pred_country_from_name if pred_country_from_name else pred_country_from_email
                             
                     data["name"] = name
                     data["gender"] = gender

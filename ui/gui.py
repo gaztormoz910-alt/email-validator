@@ -8,9 +8,11 @@ import re
 from ui.colors import *
 from core.pipeline import ValidationPipeline
 
+CLEAN_PREFIX_RE = re.compile(r'^\d+[-.)\]:й]*\s+')
+
 def clean_input_line(line):
     # Убирает нумерацию типа "1. ", "2)", "1-й ", "100:", "1 ", оставляя только суть.
-    return re.sub(r'^\d+[-.)\]:й]*\s+', '', line.strip())
+    return CLEAN_PREFIX_RE.sub('', line.strip())
 
 
 class ProxyHunterInputSelector(ctk.CTkFrame):
@@ -45,7 +47,7 @@ class ProxyHunterInputSelector(ctk.CTkFrame):
         
         self.text_frame = ctk.CTkFrame(self, fg_color="transparent")
         
-        self.textbox = ctk.CTkTextbox(self.text_frame, height=80, fg_color=BG_CARD_2, border_color=BORDER, border_width=1, text_color=TEXT_MAIN, font=ctk.CTkFont(size=11))
+        self.textbox = ctk.CTkTextbox(self.text_frame, height=80, fg_color=BG_CARD_2, border_color=BORDER, border_width=1, text_color=TEXT_MAIN, font=ctk.CTkFont(size=11), wrap="none")
         self.textbox.pack(fill="x")
         self.textbox.bind("<KeyRelease>", self._text_modified)
         
@@ -568,7 +570,7 @@ class ValidatorApp(ctk.CTk):
 
     def on_dorks_pasted(self, text):
         new_dorks = [clean_input_line(line) for line in text.split("\n") if line.strip()]
-        self.parser_raw_dorks = list(set(self.parser_raw_dorks + new_dorks))
+        self.parser_raw_dorks = list(set(new_dorks)) # Use set to remove exact duplicates
         self.loaded_dorks_lbl.configure(text=f"Загружено: {len(self.parser_raw_dorks)}")
 
     def load_parser_proxies(self):
@@ -713,7 +715,7 @@ class ValidatorApp(ctk.CTk):
         self.copy_logs_btn = ctk.CTkButton(self.terminal_header, text="📋 Копировать", width=120, height=28, corner_radius=6, font=ctk.CTkFont(size=12), command=self.copy_terminal_logs, fg_color=ACCENT_PRIMARY, hover_color="#2563EB", text_color="#FFFFFF")
         self.copy_logs_btn.pack(side="right")
         
-        self.terminal_box = ctk.CTkTextbox(self.terminal_view, fg_color=BG_CARD_2, text_color=TEXT_MAIN, font=ctk.CTkFont(family="Consolas", size=12), border_width=0, corner_radius=8)
+        self.terminal_box = ctk.CTkTextbox(self.terminal_view, fg_color=BG_CARD_2, text_color=TEXT_MAIN, font=ctk.CTkFont(family="Consolas", size=12), border_width=0, corner_radius=8, wrap="none")
         self.terminal_box.pack(fill="both", expand=True)
         
         self.terminal_box.tag_config("info", foreground=TEXT_MUTED)
@@ -1030,7 +1032,7 @@ class ValidatorApp(ctk.CTk):
                 if len(parts) >= 3: data["gender"] = parts[2].strip()
                 if len(parts) >= 4: data["country"] = parts[3].strip()
                 new_emails[email] = data
-        self.raw_emails.update(new_emails)
+        self.raw_emails = new_emails # Complete override to sync with textbox content accurately
         self.loaded_lbl.configure(text=f"Загружено: {len(self.raw_emails)}")
 
     def load_proxies(self):
@@ -1458,7 +1460,11 @@ class ValidatorApp(ctk.CTk):
         results_to_insert = []
         for _ in range(500):
             try:
-                email, dork = self.result_queue.get_nowait()
+                item = self.result_queue.get_nowait()
+                if len(item) == 2:
+                    email, dork = item
+                else:
+                    email, dork = item[0], item[1]
                 results_to_insert.append((email, dork))
             except queue.Empty:
                 break
@@ -1515,10 +1521,10 @@ class ValidatorApp(ctk.CTk):
         else:
             self.parser_progress_bar.configure(progress_color=ACCENT_PRIMARY)
 
-    def safe_add_parser_result(self, email, dork):
+    def safe_add_parser_result(self, email, dork, *args, **kwargs):
         self.result_queue.put((email, dork))
         
-    def _add_parser_result_ui(self, email, dork):
+    def _add_parser_result_ui(self, email, dork, *args, **kwargs):
         self.parser_results_data.append({"email": email, "dork": dork})
         self.parser_tree.insert("", "end", values=(email, dork))
 
