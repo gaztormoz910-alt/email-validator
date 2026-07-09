@@ -53,7 +53,11 @@ class AsyncProxyChecker:
         writer.write(req)
         await asyncio.wait_for(writer.drain(), timeout=self.timeout)
         
-        resp = await asyncio.wait_for(reader.read(8), timeout=self.timeout)
+        try:
+            resp = await asyncio.wait_for(reader.readexactly(8), timeout=self.timeout)
+        except asyncio.IncompleteReadError:
+            return False
+            
         if len(resp) < 2 or resp[1] != 0x5a:
             return False
             
@@ -66,8 +70,12 @@ class AsyncProxyChecker:
         writer.write(b"\x05\x01\x00")
         await asyncio.wait_for(writer.drain(), timeout=self.timeout)
         
-        resp = await asyncio.wait_for(reader.read(2), timeout=self.timeout)
-        if len(resp) != 2 or resp[0] != 0x05 or resp[1] != 0x00:
+        try:
+            resp = await asyncio.wait_for(reader.readexactly(2), timeout=self.timeout)
+        except asyncio.IncompleteReadError:
+            return False
+            
+        if resp[0] != 0x05 or resp[1] != 0x00:
             return False
             
         domain_bytes = self.target_host.encode('utf-8')
@@ -76,20 +84,26 @@ class AsyncProxyChecker:
         writer.write(req)
         await asyncio.wait_for(writer.drain(), timeout=self.timeout)
         
-        resp = await asyncio.wait_for(reader.read(4), timeout=self.timeout)
-        if len(resp) < 4 or resp[0] != 0x05 or resp[1] != 0x00:
+        try:
+            resp = await asyncio.wait_for(reader.readexactly(4), timeout=self.timeout)
+        except asyncio.IncompleteReadError:
+            return False
+            
+        if resp[0] != 0x05 or resp[1] != 0x00:
             return False
             
         atyp = resp[3]
-        if atyp == 0x01:
-            await asyncio.wait_for(reader.read(6), timeout=self.timeout)
-        elif atyp == 0x03:
-            domain_len_b = await asyncio.wait_for(reader.read(1), timeout=self.timeout)
-            if not domain_len_b: return False
-            await asyncio.wait_for(reader.read(domain_len_b[0] + 2), timeout=self.timeout)
-        elif atyp == 0x04:
-            await asyncio.wait_for(reader.read(18), timeout=self.timeout)
-        else:
+        try:
+            if atyp == 0x01:
+                await asyncio.wait_for(reader.readexactly(6), timeout=self.timeout)
+            elif atyp == 0x03:
+                domain_len_b = await asyncio.wait_for(reader.readexactly(1), timeout=self.timeout)
+                await asyncio.wait_for(reader.readexactly(domain_len_b[0] + 2), timeout=self.timeout)
+            elif atyp == 0x04:
+                await asyncio.wait_for(reader.readexactly(18), timeout=self.timeout)
+            else:
+                return False
+        except asyncio.IncompleteReadError:
             return False
 
         if self.mode == "http":
@@ -168,9 +182,9 @@ class AsyncProxyChecker:
             self.queue.put_nowait(proxy)
             
         # AV Evation & Network Stack Optimization:
-        # 1. Cap workers to 500 max (asyncio doesn't need 4000 threads, 500 handles 30k proxies in seconds)
-        # 2. Stagger worker startup so we don't open 500 sockets in the exact same millisecond.
-        safe_workers = min(self.workers, len(self.proxies), 500)
+        # 1. Cap workers to a safe OS limit (5000 max instead of 500)
+        # 2. Stagger worker startup so we don't open all sockets in the exact same millisecond.
+        safe_workers = min(self.workers, len(self.proxies), 5000)
         
         tasks = []
         for i in range(safe_workers):
