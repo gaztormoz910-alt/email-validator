@@ -267,9 +267,7 @@ class ParserPipeline(threading.Thread):
                                 
                                 if self.on_result_found:
                                     for e in new_unique_emails:
-                                        extracted_name = self.name_extractor.extract_name(e)
-                                        gender, country = self.ml_predictor.predict(extracted_name, email=e)
-                                        self.on_result_found(e, base_dork, name=extracted_name, gender=gender, country=country)
+                                        self.on_result_found(e, base_dork)
                                     
                 except Exception as e:
                     self.log(f"[Ошибка DORK {dork_idx}] {str(e)}")

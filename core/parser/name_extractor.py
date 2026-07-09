@@ -51,7 +51,19 @@ class NameExtractor:
             "thomas", "karen", "charles", "lisa", "matthew", "betty", "anthony",
             "donald", "sandra", "ashley", "dorothy", "steven", "kimberly", "andrew",
             "emily", "joshua", "donna", "kenneth", "michelle", "kevin", "carol", "brian",
-            "amanda", "melissa", "edward", "deborah"
+            "amanda", "melissa", "edward", "deborah", "jeffrey", "jeff", "smith", "fisher",
+            "taylor", "brown", "williams", "jones", "miller", "davis", "garcia", "rodriguez",
+            "wilson", "martinez", "anderson", "thomas", "hernandez", "moore", "martin",
+            "jackson", "thompson", "white", "lopez", "lee", "gonzalez", "harris", "clark",
+            "lewis", "robinson", "walker", "perez", "hall", "young", "allen", "sanchez",
+            "wright", "king", "scott", "green", "baker", "adams", "nelson", "hill", "ramirez",
+            "campbell", "mitchell", "roberts", "carter", "phillips", "evans", "turner",
+            "torres", "parker", "collins", "edwards", "stewart", "flores", "morris", "nguyen",
+            "murphy", "rivera", "cook", "rogers", "morgan", "peterson", "cooper", "reed",
+            "bailey", "bell", "gomez", "kelly", "howard", "ward", "cox", "diaz", "richardson",
+            "wood", "watson", "brooks", "bennett", "gray", "james", "reyes", "cruz", "hughes",
+            "price", "myers", "long", "foster", "sanders", "ross", "morales", "powell",
+            "sullivan", "russell", "ortiz", "jenkins", "gutierrez", "perry", "butler", "barnes"
         }
 
     def _is_generic_word(self, word):
@@ -140,10 +152,12 @@ class NameExtractor:
                     return self._fallback_osint(email)
                     
                 first_part = clean_parts[0]
-                if self._is_generic_word(first_part):
+                name_to_check = clean_parts[1] if len(first_part) == 1 and len(clean_parts) > 1 else first_part
+
+                if self._is_generic_word(name_to_check):
                     return self._fallback_osint(email)
                     
-                if self.nd and not self._is_valid_name(first_part):
+                if self.nd and not self._is_valid_name(name_to_check):
                     return self._fallback_osint(email)
                     
                 return " ".join(clean_parts)
@@ -160,10 +174,12 @@ class NameExtractor:
                 return self._fallback_osint(email)
                 
             first_part = camel_case_parts[0]
-            if self._is_generic_word(first_part):
+            name_to_check = camel_case_parts[1] if len(first_part) == 1 and len(camel_case_parts) > 1 else first_part
+
+            if self._is_generic_word(name_to_check):
                 return self._fallback_osint(email)
                 
-            if self.nd and not self._is_valid_name(first_part):
+            if self.nd and not self._is_valid_name(name_to_check):
                 return self._fallback_osint(email)
                 
             return " ".join(camel_case_parts)
@@ -182,12 +198,13 @@ class NameExtractor:
                 return self._fallback_osint(email)
                 
             first_word = segmented[0]
+            name_to_check = segmented[1] if len(first_word) == 1 and len(segmented) > 1 else first_word
             
-            # Reject if the first word is a generic dictionary word (e.g. "the", "lets", "porn", "uk")
-            if self._is_generic_word(first_word):
+            # Reject if the check word is a generic dictionary word
+            if self._is_generic_word(name_to_check):
                 return self._fallback_osint(email)
                 
-            if self.nd and not self._is_valid_name(first_word):
+            if self.nd and not self._is_valid_name(name_to_check):
                 return self._fallback_osint(email)
             
             extracted = " ".join(part.title() for part in segmented)
