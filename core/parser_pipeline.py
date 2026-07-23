@@ -33,10 +33,10 @@ GLOBAL_VERIFIED_DOMAINS = {
 
 
 class ParserPipeline(threading.Thread):
-    def __init__(self, dorks, proxies, max_threads, timeout=5.0,
+    def __init__(self, dork_sources, proxies, max_threads, timeout=5.0,
                  on_log=None, on_progress=None, on_stats_update=None, on_result_found=None, on_complete=None, engine_name="DuckDuckGo Lite", enable_osint=False):
         super().__init__()
-        self.dorks = dorks
+        self.dork_sources = dork_sources
         self.proxies = proxies
         self.max_threads = max_threads
         self.timeout = timeout
@@ -52,12 +52,13 @@ class ParserPipeline(threading.Thread):
         self._pause_event = threading.Event()
         
         self.proxy_manager = ProxyManager(self.proxies, timeout=self.timeout)
+        self.enable_osint = enable_osint
         self.extractor = EmailExtractor()
-        self.name_extractor = NameExtractor(enable_osint=enable_osint)
-        self.ml_predictor = MLPredictor()
-        self.dork_queue = queue.Queue()
+        self.name_extractor = None
+        self.ml_predictor = None
+        self.dork_queue = queue.Queue(maxsize=1000)
         
-        self.total_dorks = len(self.dorks)
+        self.total_dorks = 0
         self.processed_dorks = 0
         self.processed_pages = 0
         self.processed_snippets = 0
@@ -67,9 +68,19 @@ class ParserPipeline(threading.Thread):
         self.seen_lock = threading.Lock()
         self.global_seen_emails = set()
         
-        for i, d in enumerate(self.dorks, 1):
-            # Передаем оригинальный dork без добавления мусорных символов
+        self.feeder_thread = threading.Thread(target=self._feed_dorks, daemon=True)
+        
+    def _feed_dorks(self):
+        from core.streamer import StreamLoader
+        for i, d in enumerate(StreamLoader(self.dork_sources).stream_lines(), 1):
+            if self._stop_event.is_set():
+                break
+            # block until space in queue
             self.dork_queue.put((i, d.strip(), d))
+        
+        # sentinel workers
+        for _ in range(self.max_threads * 2):
+            self.dork_queue.put(None)
     def _update_stats(self, dork_done=False, page=0, snippet=0, emails=0):
         with self.stats_lock:
             if dork_done:
@@ -111,6 +122,14 @@ class ParserPipeline(threading.Thread):
         self._pause_event.clear()
 
     def run(self):
+        self.ml_predictor = MLPredictor()
+        if self.name_extractor is None:
+            self.name_extractor = NameExtractor(enable_osint=self.enable_osint)
+        
+        from core.streamer import StreamLoader
+        self.log("[Система] Подсчёт количества дорков...")
+        self.total_dorks = StreamLoader(self.dork_sources).count_total_lines()
+        
         self.log(f"[Система] Инициализация парсера. Поисковик: {self.engine_name}. Загружено дорков: {self.total_dorks}")
         
         tor_engines = ["AOL (Tor)", "Yahoo (Tor)"]
@@ -203,8 +222,7 @@ class ParserPipeline(threading.Thread):
                     dork_idx, sub_query, base_dork = self.dork_queue.get_nowait()
                 except queue.Empty:
                     break # queue is empty, worker can exit
-                
-                self.log(f"[DORK {dork_idx}/{len(self.dorks)}] Sub-query: {sub_query}")
+                self.log(f"[DORK {dork_idx}/{self.total_dorks}] Sub-query: {sub_query}")
                 
                 # Extract domain filter from dork (e.g. "@gmail.com" -> "gmail.com")
                 import re as _re
@@ -263,7 +281,7 @@ class ParserPipeline(threading.Thread):
                                 emails_from_dork += new_emails_count
                                 self._update_stats(emails=new_emails_count)
                                 
-                                self.log(f"[DORK {dork_idx}/{len(self.dorks)}] Страница: {max(1, int(pages_found*10))}, Найдено уникальных почт: {new_emails_count}")
+                                self.log(f"[DORK {dork_idx}/{self.total_dorks}] Страница: {max(1, int(pages_found*10))}, Найдено уникальных почт: {new_emails_count}")
                                 
                                 if self.on_result_found:
                                     for e in new_unique_emails:
@@ -277,6 +295,7 @@ class ParserPipeline(threading.Thread):
                 self.dork_queue.task_done()
 
         # 3. Spawn workers
+        self.feeder_thread.start()
         threads = []
         safe_max_threads = min(self.max_threads, 500)
         

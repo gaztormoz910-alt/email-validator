@@ -7,6 +7,7 @@ import os
 import re
 from ui.colors import *
 from core.pipeline import ValidationPipeline
+from core.streamer import StreamLoader
 
 CLEAN_PREFIX_RE = re.compile(r'^\d+[-.)\]:й]*\s+')
 
@@ -282,13 +283,13 @@ class ValidatorApp(ctk.CTk):
             pass
         
         self.app_mode = "Валидатор"
-        self.raw_emails = {}
-        self.proxies = []
+        self.email_sources = [] # [{"type": "text", "content": "..."}, {"type": "file", "path": "..."}]
+        self.proxy_sources = []
         self.stats = {"valid": 0, "invalid": 0, "spam": 0, "unknown": 0}
         self.results_data = []
         
-        self.parser_raw_dorks = []
-        self.parser_proxies = []
+        self.dork_sources = []
+        self.parser_proxy_sources = []
         self.parser_results_data = []
         self.parser_pipeline = None
         
@@ -413,7 +414,9 @@ class ValidatorApp(ctk.CTk):
 
         self.max_hw_threads, self.hw_rank, self.hw_color = self.get_hardware_limits()
 
-        self.threads_slider = ProxyHunterSlider(self.validator_sidebar_frame, "Потоки", 1, self.max_hw_threads, self.max_hw_threads)
+        # Максимальное значение ползунка ограничено 300 — максимальное безопасное число для домашней сети
+        safe_max_threads = min(self.max_hw_threads, 300)
+        self.threads_slider = ProxyHunterSlider(self.validator_sidebar_frame, "Потоки", 1, safe_max_threads, safe_max_threads)
         self.threads_slider.pack(fill="x", padx=20, pady=(0, 20))
         
         self.timeout_slider = ProxyHunterSlider(self.validator_sidebar_frame, "Таймаут (сек)", 1, 300, 5)
@@ -455,7 +458,8 @@ class ValidatorApp(ctk.CTk):
         self.engine_selector = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["DuckDuckGo Lite", "AOL (Tor)", "Yahoo (Tor)", "AOL (Proxies)", "Yahoo (Proxies)"], fg_color=BG_CARD_2, button_color=BORDER, button_hover_color=ACCENT_PRIMARY, command=self._on_engine_change)
         self.engine_selector.pack(fill="x", padx=20, pady=(0, 20))
 
-        parser_max_threads = min(self.max_hw_threads, 500)
+        # Максимальное значение ползунка парсера ограничено 300 — чтобы не давить роутер
+        parser_max_threads = min(self.max_hw_threads, 300)
         self.parser_threads_slider = ProxyHunterSlider(self.parser_sidebar_frame, "Потоки (Dorks)", 1, parser_max_threads, parser_max_threads)
         self.parser_threads_slider.pack(fill="x", padx=20, pady=(0, 20))
 
@@ -522,28 +526,32 @@ class ValidatorApp(ctk.CTk):
             self.sub_title_lbl.configure(text=f"{value} Dork Engine")
 
     def clear_emails(self):
-        self.raw_emails.clear()
+        self.email_sources.clear()
         self.loaded_lbl.configure(text="Загружено: 0")
         self.db_selector.set_text("")
+        self.db_selector.textbox.delete("1.0", "end")
         self.safe_log("[INFO] База Email адресов очищена.", "trap")
         
     def clear_proxies(self):
-        self.proxies.clear()
+        self.proxy_sources.clear()
         self.loaded_proxies_lbl.configure(text="Прокси: 0")
         self.proxy_selector.set_text("")
+        self.proxy_selector.textbox.delete("1.0", "end")
         self.safe_log("[INFO] SOCKS5 прокси очищены.", "trap")
         
     def clear_dorks(self):
-        self.parser_raw_dorks.clear()
+        self.dork_sources.clear()
         self.loaded_dorks_lbl.configure(text="Загружено: 0")
         self.dork_selector.set_text("")
+        self.dork_selector.textbox.delete("1.0", "end")
         if hasattr(self, 'safe_parser_log'):
             self.safe_parser_log("[INFO] Dork-запросы очищены.", "trap")
         
     def clear_parser_proxies(self):
-        self.parser_proxies.clear()
+        self.parser_proxy_sources.clear()
         self.loaded_parser_proxies_lbl.configure(text="Прокси: 0")
         self.parser_proxy_selector.set_text("")
+        self.parser_proxy_selector.textbox.delete("1.0", "end")
         if hasattr(self, 'safe_parser_log'):
             self.safe_parser_log("[INFO] SOCKS5 прокси для парсера очищены.", "trap")
 
@@ -551,77 +559,86 @@ class ValidatorApp(ctk.CTk):
     def load_dorks(self):
         filepaths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
         if filepaths:
-            all_new_dorks = []
+            is_massive = False
             for filepath in filepaths:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    all_new_dorks.extend([clean_input_line(line) for line in f if line.strip()])
+                file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+                if file_size_mb > 20:
+                    is_massive = True
+                self.dork_sources.append({"type": "file", "path": filepath})
             
-            if not all_new_dorks and not self.parser_raw_dorks:
-                messagebox.showerror("Ошибка загрузки", "Файлы пусты или содержат только пустые строки!")
-                self.dork_selector.set_text("")
-                self.loaded_dorks_lbl.configure(text="Загружено: 0")
-                return
+            if is_massive:
+                self.dork_selector.textbox.delete("1.0", "end")
+                self.dork_selector.textbox.insert("1.0", "[ПРЕДПРОСМОТР ОТКЛЮЧЕН]\nОдин или несколько файлов слишком велики (>20 МБ).\nВключен режим потокового чтения (Lazy Loading).")
+                self.loaded_dorks_lbl.configure(text=f"Dorks источников: {len(self.dork_sources)}")
+                if hasattr(self, 'safe_parser_log'):
+                    self.safe_parser_log(f"[INFO] Добавлены массивные файлы Dorks (>{len(filepaths)} шт.).", "info")
+            else:
+                loader = StreamLoader([{"type": "file", "path": fp} for fp in filepaths])
+                preview_dorks = []
+                for idx, line in enumerate(loader.stream_lines()):
+                    if idx < 5000:
+                        preview_dorks.append(line)
                 
-            self.parser_raw_dorks = list(set(self.parser_raw_dorks + all_new_dorks))
-            self.dork_selector.set_text("Несколько файлов" if len(filepaths) > 1 or len(self.parser_raw_dorks) > len(all_new_dorks) else filepaths[0])
-            self.dork_selector.append_to_textbox(all_new_dorks)
-            self.loaded_dorks_lbl.configure(text=f"Загружено: {len(self.parser_raw_dorks)}")
-            self.safe_parser_log(f"[INFO] Добавлено {len(all_new_dorks)} Dork-запросов. Всего: {len(self.parser_raw_dorks)}", "info")
+                self.dork_selector.append_to_textbox(preview_dorks)
+                if len(preview_dorks) == 5000:
+                    self.dork_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
+                
+                total_loader = StreamLoader(self.dork_sources)
+                total_count = total_loader.count_total_lines()
+                self.loaded_dorks_lbl.configure(text=f"Загружено: {total_count}")
+                if hasattr(self, 'safe_parser_log'):
+                    self.safe_parser_log(f"[INFO] Dork-запросы добавлены. Строк: {total_count}", "info")
+            
+            self.dork_selector.set_text("Несколько файлов" if len(filepaths) > 1 else filepaths[0])
 
     def on_dorks_pasted(self, text):
-        new_dorks = [clean_input_line(line) for line in text.split("\n") if line.strip()]
-        self.parser_raw_dorks = list(set(new_dorks)) # Use set to remove exact duplicates
-        self.loaded_dorks_lbl.configure(text=f"Загружено: {len(self.parser_raw_dorks)}")
+        self.dork_sources.append({"type": "text", "content": text})
+        total_loader = StreamLoader(self.dork_sources)
+        total_count = total_loader.count_total_lines()
+        self.loaded_dorks_lbl.configure(text=f"Загружено: {total_count}")
 
     def load_parser_proxies(self):
         filepaths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
         if filepaths:
-            raw_proxies = []
+            is_massive = False
             for filepath in filepaths:
                 file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
-                if file_size_mb > 50:
-                    if not messagebox.askyesno("Огромный файл", f"Размер файла {os.path.basename(filepath)}: {file_size_mb:.1f} МБ.\nПродолжить?"):
-                        continue
-                with open(filepath, "r", encoding="utf-8") as f:
-                    raw_proxies.extend([clean_input_line(line) for line in f if line.strip()])
-                    
-            raw_proxies = list(set(raw_proxies))
-            new_proxies = []
-            for p in raw_proxies:
-                p_lower = p.lower()
-                if p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://"):
-                    continue
-                new_proxies.append(p)
-                
-            ignored_count = len(raw_proxies) - len(new_proxies)
+                if file_size_mb > 20:
+                    is_massive = True
+                self.parser_proxy_sources.append({"type": "file", "path": filepath})
             
-            if not new_proxies and not self.parser_proxies:
-                if ignored_count > 0:
-                    messagebox.showerror("Ошибка прокси", "В файлах не найдено SOCKS5 прокси!\nВсе адреса были отброшены.")
-                else:
-                    messagebox.showerror("Ошибка загрузки", "Файлы с прокси абсолютно пусты!")
-                self.parser_proxy_selector.set_text("")
-                self.loaded_parser_proxies_lbl.configure(text="Прокси: 0")
-                return
+            if is_massive:
+                self.parser_proxy_selector.textbox.delete("1.0", "end")
+                self.parser_proxy_selector.textbox.insert("1.0", "[ПРЕДПРОСМОТР ОТКЛЮЧЕН]\nОдин или несколько файлов слишком велики (>20 МБ).\nВключен режим потокового чтения (Lazy Loading).")
+                self.loaded_parser_proxies_lbl.configure(text=f"Прокси источников: {len(self.parser_proxy_sources)}")
+                if hasattr(self, 'safe_parser_log'):
+                    self.safe_parser_log(f"[INFO] Добавлены массивные файлы прокси парсера (>{len(filepaths)} шт.).", "info")
+            else:
+                loader = StreamLoader([{"type": "file", "path": fp} for fp in filepaths])
+                preview_proxies = []
+                for idx, p in enumerate(loader.stream_lines()):
+                    p_lower = p.lower()
+                    if p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://"):
+                        continue
+                    if idx < 5000:
+                        preview_proxies.append(p)
                 
-            self.parser_proxies = list(set(self.parser_proxies + new_proxies))
-            self.parser_proxy_selector.set_text("Несколько файлов" if len(filepaths) > 1 or len(self.parser_proxies) > len(new_proxies) else filepaths[0])
-            self.parser_proxy_selector.append_to_textbox(new_proxies)
-            self.loaded_parser_proxies_lbl.configure(text=f"Прокси: {len(self.parser_proxies)}")
-            self.safe_parser_log(f"[INFO] Добавлено {len(new_proxies)} SOCKS5 прокси. Всего: {len(self.parser_proxies)}", "info")
-            if ignored_count > 0:
-                self.safe_parser_log(f"[WARNING] Отброшено {ignored_count} прокси (HTTP/HTTPS/SOCKS4).", "trap")
-
+                self.parser_proxy_selector.append_to_textbox(preview_proxies)
+                if len(preview_proxies) == 5000:
+                    self.parser_proxy_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
+                
+                total_loader = StreamLoader(self.parser_proxy_sources)
+                total_count = total_loader.count_total_lines()
+                self.loaded_parser_proxies_lbl.configure(text=f"Прокси (оценка): {total_count}")
+                if hasattr(self, 'safe_parser_log'):
+                    self.safe_parser_log(f"[INFO] Прокси парсера добавлены. Строк: {total_count}", "info")
+            
+            self.parser_proxy_selector.set_text("Несколько файлов" if len(filepaths) > 1 else filepaths[0])
     def on_parser_proxies_pasted(self, text):
-        raw_proxies = list(set([clean_input_line(line) for line in text.split("\n") if line.strip()]))
-        new_proxies = []
-        for p in raw_proxies:
-            p_lower = p.lower()
-            if p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://"):
-                continue
-            new_proxies.append(p)
-        self.parser_proxies = list(set(self.parser_proxies + new_proxies))
-        self.loaded_parser_proxies_lbl.configure(text=f"Прокси: {len(self.parser_proxies)}")
+        self.parser_proxy_sources.append({"type": "text", "content": text})
+        total_loader = StreamLoader(self.parser_proxy_sources)
+        total_count = total_loader.count_total_lines()
+        self.loaded_parser_proxies_lbl.configure(text=f"Прокси (оценка): {total_count}")
 
     def _build_main_workspace(self):
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -987,103 +1004,83 @@ class ValidatorApp(ctk.CTk):
     def load_file(self):
         filepaths = filedialog.askopenfilenames(filetypes=[("Text/CSV Files", "*.txt *.csv")])
         if filepaths:
-            new_emails = {}
+            is_massive = False
             for filepath in filepaths:
                 file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
-                if file_size_mb > 100:
-                    if not messagebox.askyesno("Огромный файл", f"Размер файла {os.path.basename(filepath)}: {file_size_mb:.1f} МБ.\n\nЗагрузка гигантских файлов целиком в ОЗУ может привести к зависанию.\nПродолжить?"):
-                        continue
-                with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line: continue
-                        parts = line.split(":")
-                        email = clean_input_line(parts[0])
-                        if email:
-                            data = {"name": "", "gender": "", "country": ""}
-                            if len(parts) >= 2: data["name"] = parts[1].strip()
-                            if len(parts) >= 3: data["gender"] = parts[2].strip()
-                            if len(parts) >= 4: data["country"] = parts[3].strip()
-                            new_emails[email] = data
+                if file_size_mb > 20:
+                    is_massive = True
+                self.email_sources.append({"type": "file", "path": filepath})
             
-            if not new_emails and not self.raw_emails:
-                messagebox.showerror("Ошибка загрузки", "Файлы пусты или не содержат валидных адресов!")
-                self.db_selector.set_text("")
-                self.loaded_lbl.configure(text="Загружено: 0")
-                return
+            if is_massive:
+                self.db_selector.textbox.delete("1.0", "end")
+                self.db_selector.textbox.insert("1.0", "[ПРЕДПРОСМОТР ОТКЛЮЧЕН]\nОдин или несколько файлов слишком велики (>20 МБ).\nВключен режим потокового чтения (Lazy Loading).")
+                self.loaded_lbl.configure(text=f"Загружено источников: {len(self.email_sources)}")
+                self.safe_log(f"[INFO] Добавлены массивные файлы (>{len(filepaths)} шт.).", "info")
+            else:
+                loader = StreamLoader([{"type": "file", "path": fp} for fp in filepaths])
+                preview_emails = []
+                for idx, (email, _) in enumerate(loader.stream_emails()):
+                    if idx < 5000:
+                        preview_emails.append(email)
                 
-            self.raw_emails.update(new_emails)
+                self.db_selector.append_to_textbox(preview_emails)
+                if len(preview_emails) == 5000:
+                    self.db_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
+                
+                total_loader = StreamLoader(self.email_sources)
+                total_count = total_loader.count_total_lines()
+                self.loaded_lbl.configure(text=f"Загружено строк: {total_count}")
+                self.safe_log(f"[INFO] Файлы добавлены. Всего строк: {total_count}", "info")
             
-            self.db_selector.set_text("Несколько файлов" if len(filepaths) > 1 or len(self.raw_emails) > len(new_emails) else filepaths[0])
-            self.db_selector.append_to_textbox(list(new_emails.keys()))
-            self.loaded_lbl.configure(text=f"Загружено: {len(self.raw_emails)}")
-            self.safe_log(f"[INFO] Добавлено {len(new_emails)} строк. Всего: {len(self.raw_emails)}", "info")
+            self.db_selector.set_text("Несколько файлов" if len(filepaths) > 1 else filepaths[0])
 
     def on_emails_pasted(self, text):
-        new_emails = {}
-        for line in text.split("\n"):
-            line = line.strip()
-            if not line: continue
-            parts = line.split(":")
-            email = clean_input_line(parts[0])
-            if email:
-                data = {"name": "", "gender": "", "country": ""}
-                if len(parts) >= 2: data["name"] = parts[1].strip()
-                if len(parts) >= 3: data["gender"] = parts[2].strip()
-                if len(parts) >= 4: data["country"] = parts[3].strip()
-                new_emails[email] = data
-        self.raw_emails = new_emails # Complete override to sync with textbox content accurately
-        self.loaded_lbl.configure(text=f"Загружено: {len(self.raw_emails)}")
+        self.email_sources.append({"type": "text", "content": text})
+        total_loader = StreamLoader(self.email_sources)
+        total_count = total_loader.count_total_lines()
+        self.loaded_lbl.configure(text=f"Загружено строк: {total_count}")
 
     def load_proxies(self):
         filepaths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
         if filepaths:
-            raw_proxies = []
+            is_massive = False
             for filepath in filepaths:
                 file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
-                if file_size_mb > 50:
-                    if not messagebox.askyesno("Огромный файл", f"Размер файла {os.path.basename(filepath)}: {file_size_mb:.1f} МБ.\nПродолжить?"):
-                        continue
-                with open(filepath, "r", encoding="utf-8") as f:
-                    raw_proxies.extend([clean_input_line(line) for line in f if line.strip()])
-                    
-            raw_proxies = list(set(raw_proxies))
-            new_proxies = []
-            for p in raw_proxies:
-                p_lower = p.lower()
-                if p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://"):
-                    continue
-                new_proxies.append(p)
-                
-            ignored_count = len(raw_proxies) - len(new_proxies)
+                if file_size_mb > 20:
+                    is_massive = True
+                self.proxy_sources.append({"type": "file", "path": filepath})
             
-            if not new_proxies and not self.proxies:
-                if ignored_count > 0:
-                    messagebox.showerror("Ошибка прокси", "В файлах не найдено SOCKS5 прокси!\nВсе адреса были отброшены.")
-                else:
-                    messagebox.showerror("Ошибка загрузки", "Файлы с прокси абсолютно пусты!")
-                self.proxy_selector.set_text("")
-                self.loaded_proxies_lbl.configure(text="Прокси: 0")
-                return
+            if is_massive:
+                self.proxy_selector.textbox.delete("1.0", "end")
+                self.proxy_selector.textbox.insert("1.0", "[ПРЕДПРОСМОТР ОТКЛЮЧЕН]\nОдин или несколько файлов слишком велики (>20 МБ).\nВключен режим потокового чтения (Lazy Loading).")
+                self.loaded_proxies_lbl.configure(text=f"Прокси источников: {len(self.proxy_sources)}")
+                self.safe_log(f"[INFO] Добавлены массивные файлы прокси (>{len(filepaths)} шт.).", "info")
+            else:
+                loader = StreamLoader([{"type": "file", "path": fp} for fp in filepaths])
+                preview_proxies = []
+                for idx, p in enumerate(loader.stream_lines()):
+                    p_lower = p.lower()
+                    if p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://"):
+                        continue
+                    if idx < 5000:
+                        preview_proxies.append(p)
                 
-            self.proxies = list(set(self.proxies + new_proxies))
-            self.proxy_selector.set_text("Несколько файлов" if len(filepaths) > 1 or len(self.proxies) > len(new_proxies) else filepaths[0])
-            self.proxy_selector.append_to_textbox(new_proxies)
-            self.loaded_proxies_lbl.configure(text=f"Прокси: {len(self.proxies)}")
-            self.safe_log(f"[INFO] Добавлено {len(new_proxies)} SOCKS5 прокси. Всего: {len(self.proxies)}", "info")
-            if ignored_count > 0:
-                self.safe_log(f"[WARNING] Отброшено {ignored_count} прокси (HTTP/HTTPS/SOCKS4).", "trap")
+                self.proxy_selector.append_to_textbox(preview_proxies)
+                if len(preview_proxies) == 5000:
+                    self.proxy_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
+                
+                total_loader = StreamLoader(self.proxy_sources)
+                total_count = total_loader.count_total_lines()
+                self.loaded_proxies_lbl.configure(text=f"Прокси (оценка): {total_count}")
+                self.safe_log(f"[INFO] Прокси добавлены. Строк: {total_count}", "info")
+            
+            self.proxy_selector.set_text("Несколько файлов" if len(filepaths) > 1 else filepaths[0])
 
     def on_proxies_pasted(self, text):
-        raw_proxies = list(set([clean_input_line(line) for line in text.split("\n") if line.strip()]))
-        new_proxies = []
-        for p in raw_proxies:
-            p_lower = p.lower()
-            if p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://"):
-                continue
-            new_proxies.append(p)
-        self.proxies = list(set(self.proxies + new_proxies))
-        self.loaded_proxies_lbl.configure(text=f"Прокси: {len(self.proxies)}")
+        self.proxy_sources.append({"type": "text", "content": text})
+        total_loader = StreamLoader(self.proxy_sources)
+        total_count = total_loader.count_total_lines()
+        self.loaded_proxies_lbl.configure(text=f"Прокси (оценка): {total_count}")
 
     def _set_sidebar_state(self, state):
         if hasattr(self, 'engine_selector'):
@@ -1128,10 +1125,10 @@ class ValidatorApp(ctk.CTk):
             self.stop_parsing()
 
     def start_validation(self):
-        if not self.raw_emails:
+        if not self.email_sources:
             self.safe_log("[DEAD] Ошибка: Загрузите базу перед стартом!", "dead")
             return
-        if not self.proxies:
+        if not self.proxy_sources:
             self.safe_log("[DEAD] Ошибка: Загрузите прокси перед стартом!", "dead")
             return
         try:
@@ -1162,11 +1159,24 @@ class ValidatorApp(ctk.CTk):
         self.terminal_box.configure(state="disabled")
         self.safe_log("[INFO] Инициализация конвейера валидации...", "info")
 
+        actual_proxies = []
+        for p in StreamLoader(self.proxy_sources).stream_lines():
+            p_lower = p.lower()
+            if not (p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://")):
+                actual_proxies.append(p)
+        actual_proxies = list(set(actual_proxies))
+        
+        if not actual_proxies:
+            self.safe_log("[DEAD] Ошибка: Загруженные источники не содержат валидных SOCKS5 прокси!", "dead")
+            self._set_playback_state("stopped")
+            self._set_sidebar_state("normal")
+            return
+
         threads = int(self.threads_slider.get())
         timeout = int(self.timeout_slider.get())
         
         self.pipeline.start(
-            raw_emails_dict=self.raw_emails,
+            email_sources=self.email_sources,
             threads=threads,
             timeout=timeout,
             fix_typos=True,
@@ -1174,7 +1184,7 @@ class ValidatorApp(ctk.CTk):
             deep_ping=True,
             enable_ai=self.chk_ai.get() == 1,
             enable_osint=self.chk_osint_val.get() == 1,
-            proxies=self.proxies
+            proxies=actual_proxies
         )
 
     def pause_validation(self):
@@ -1276,6 +1286,10 @@ class ValidatorApp(ctk.CTk):
             self.stats["spam"] += 1
             self.stat_3.configure(text=str(self.stats["spam"]))
             self.safe_log(f"[{status.upper()}] {email} -> {reason}", "trap")
+        elif status == "Role-based":
+            self.stats["spam"] += 1
+            self.stat_3.configure(text=str(self.stats["spam"]))
+            self.safe_log(f"[ROLE] {email} -> {reason}", "trap")
         elif status == "Unknown":
             if "unknown" not in self.stats: self.stats["unknown"] = 0
             self.stats["unknown"] += 1
@@ -1338,6 +1352,7 @@ class ValidatorApp(ctk.CTk):
             tag = ""
             if status == "Valid": tag = "valid"
             elif status == "Trap/Disposable": tag = "trap"
+            elif status == "Role-based": tag = "trap"
             elif status == "Unknown": tag = "unknown"
             else: tag = "dead"
             
@@ -1347,7 +1362,7 @@ class ValidatorApp(ctk.CTk):
         if hasattr(self, 'parser_pipeline') and self.parser_pipeline and self.parser_pipeline.is_alive():
             return
             
-        if not self.parser_raw_dorks:
+        if not self.dork_sources:
             self.safe_parser_log("[Ошибка] Загрузите дорки перед стартом!", "dead")
             return
             
@@ -1372,10 +1387,17 @@ class ValidatorApp(ctk.CTk):
         threads = int(self.parser_threads_slider.get())
         timeout = float(self.parser_timeout_slider.get())
         
+        actual_proxies = []
+        for p in StreamLoader(self.parser_proxy_sources).stream_lines():
+            p_lower = p.lower()
+            if not (p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://")):
+                actual_proxies.append(p)
+        actual_proxies = list(set(actual_proxies))
+        
         from core.parser_pipeline import ParserPipeline
         self.parser_pipeline = ParserPipeline(
-            dorks=self.parser_raw_dorks,
-            proxies=self.parser_proxies,
+            dork_sources=self.dork_sources,
+            proxies=actual_proxies,
             max_threads=threads,
             timeout=timeout,
             on_log=self.safe_parser_log,
@@ -1557,7 +1579,7 @@ class ValidatorApp(ctk.CTk):
                 export_data.append(r)
             elif self.chk_invalid_var.get() and "Invalid" in st:
                 export_data.append(r)
-            elif self.chk_spam_var.get() and ("Trap" in st or "Disposable" in st or "Risky" in st):
+            elif self.chk_spam_var.get() and ("Trap" in st or "Disposable" in st or "Risky" in st or st == "Role-based"):
                 export_data.append(r)
             elif self.chk_unknown_var.get() and st == "Unknown":
                 export_data.append(r)
