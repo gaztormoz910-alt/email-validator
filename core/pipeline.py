@@ -25,8 +25,8 @@ class ValidationPipeline:
         self.ml_predictor = None
         
     def setup(self, timeout=5, enable_ai=False, proxies=None, threads=100):
-        # Очистка мусора: больше не загружаем блэклисты с GitHub, так как работает принцип Whitelist
-        self.callbacks['on_log']("[INFO] Подготовка валидатора (работает в режиме Whitelist)...", "info")
+        # Гибридный режим: Whitelist + DNS-проверка неизвестных доменов
+        self.callbacks['on_log']("[INFO] Подготовка валидатора (гибридный режим: Whitelist + DNS)...", "info")
         self.filter = None
         
         if proxies:
@@ -49,27 +49,24 @@ class ValidationPipeline:
             self.ai.train_models()
             self.callbacks['on_log']("[INFO] ИИ успешно обучен и готов к бою!", "info")
 
-    def run_pipeline(self, raw_emails_dict, threads=50, fix_typos=True, check_spam=True, deep_ping=True, enable_ai=False, enable_osint=False):
+    def run_pipeline(self, email_sources, threads=50, fix_typos=True, check_spam=True, deep_ping=True, enable_ai=False, enable_osint=False):
         self.is_running = True
         self.is_paused = False
         
-        total_emails = len(raw_emails_dict)
+        from core.streamer import StreamLoader
+        total_emails = StreamLoader(email_sources).count_total_lines()
         self.callbacks['on_log'](f"[INFO] Запуск обработки {total_emails} сырых email...", "info")
         
-        if fix_typos:
-            self.callbacks['on_log']("[INFO] Исправление опечаток и дедупликация (Cleaner)...", "info")
-            unique_emails = self.cleaner.process_batch(raw_emails_dict)
-            self.callbacks['on_log'](f"[INFO] После очистки: {len(unique_emails)} уникальных адресов.", "info")
-        else:
-            unique_emails = {e.strip().lower(): data for e, data in raw_emails_dict.items() if e.strip()}
-
-        emails_to_process = list(unique_emails.items())
-        total_unique = len(emails_to_process)
         if 'on_unique_count' in self.callbacks:
-            self.callbacks['on_unique_count'](total_unique)
+            self.callbacks['on_unique_count'](total_emails) # Approximate since dedup is lazy
             
-        self.callbacks['on_progress'](0, total_unique)
+        self.callbacks['on_progress'](0, total_emails)
         processed_count = 0
+        
+        # Очередь для Greylisting retry (п.2.4)
+        import queue as queue_module
+        greylisted_queue = queue_module.Queue()
+        greylisted_lock = threading.Lock()
         
         # Предзагрузка тяжелых модулей один раз (O(1) вместо O(N) в потоках)
         if not self.name_extractor:
@@ -87,18 +84,24 @@ class ValidationPipeline:
                 
             email, data = item
                 
-            # Шаг 1.2: Проверка на опасные домены и ролевые ящики (Validol)
+            # Шаг 1.2: Проверка на ролевые ящики (Role-based) — п.2.1
+            # НЕ убиваем их! Помечаем как отдельную категорию "Role-based".
+            # .gov/.edu/.mil — это легитимные домены, НЕ ловушки (п.1.2)
             if "@" in email:
                 local_p, domain_p = email.split("@", 1)
-                bad_tlds = {".gov", ".mil", ".edu"}
-                roles = {"admin", "support", "staff", "info", "sales", "postmaster", "webmaster", "contact", "billing", "help", "hr", "office", "marketing", "hello", "noreply", "no-reply"}
-                
-                for tld in bad_tlds:
-                    if domain_p.endswith(tld):
-                        self.callbacks['on_result'](email, "Trap/Disposable", "Dangerous TLD", "N/A", data)
-                        return
+                roles = {
+                    "abuse", "admin", "billing", "compliance", "contact", "devnull",
+                    "dns", "ftp", "help", "hostmaster", "hr", "info", "jobs",
+                    "list", "maildaemon", "marketing", "media", "noc",
+                    "no-reply", "noreply", "null", "office", "postmaster",
+                    "privacy", "registrar", "root", "sales", "security",
+                    "spam", "staff", "subscribe", "support", "sysadmin",
+                    "tech", "unsubscribe", "webmaster", "www", "hello",
+                    "press", "legal", "feedback"
+                }
                 if local_p in roles:
-                    self.callbacks['on_result'](email, "Trap/Disposable", "Role-based Account", "N/A", data)
+                    # Помечаем как Role-based, но НЕ отбрасываем — пусть пользователь решает
+                    self.callbacks['on_result'](email, "Role-based", "Role-based Account", "N/A", data)
                     return
 
             # Шаг 1.5: Проверка через ИИ (Машинное обучение)
@@ -110,9 +113,23 @@ class ValidationPipeline:
             # Шаг 3: Глубокий SMTP Ping
             if deep_ping:
                 res = self.network.check_email(email)
-                status_display = "Valid" if res["status"] == "valid" else ("Risky" if res["status"] == "risky" else "Invalid/Bounce")
-                if res["status"] == "unknown":
+                raw_status = res["status"]
+
+                # Greylisted — складываем в очередь для повторной проверки (п.2.4)
+                if raw_status == "greylisted":
+                    greylisted_queue.put((email, data))
+                    return  # Не выводим результат сейчас — перепроверим позже
+
+                if raw_status == "valid":
+                    status_display = "Valid"
+                elif raw_status == "catchall":
+                    status_display = "Unknown"  # Catch-All — нельзя доверять, кладём в Unknown
+                elif raw_status == "risky":
+                    status_display = "Risky"
+                elif raw_status == "unknown":
                     status_display = "Unknown"
+                else:
+                    status_display = "Invalid/Bounce"
                 
                 # Enrichment for valid emails
                 if status_display == "Valid":
@@ -149,30 +166,132 @@ class ValidationPipeline:
             else:
                 self.callbacks['on_result'](email, "Unverified", "Skipped Ping", "N/A", data)
 
-        # Аппаратное ограничение количества потоков для предотвращения зависания ОС
-        safe_threads = min(int(threads), 1000)
+        # Аппаратное ограничение количества потоков для предотвращения зависания сети и роутера
+        safe_threads = min(int(threads), 300)
         
-        with ThreadPoolExecutor(max_workers=safe_threads) as executor:
-            futures = []
-            for item in emails_to_process:
+        import queue
+        task_queue = queue.Queue(maxsize=safe_threads * 2)
+        seen_emails = set()
+        
+        def feeder_thread():
+            from core.streamer import StreamLoader
+            for email, data in StreamLoader(email_sources).stream_emails():
                 if not self.is_running:
                     break
-                futures.append(executor.submit(process_single, item))
+                    
+                if fix_typos:
+                    email = self.cleaner.clean_email(email)
+                    
+                if not email:
+                    continue
+                    
+                if email in seen_emails:
+                    continue
                 
-            for future in as_completed(futures):
+                seen_emails.add(email)
+                task_queue.put((email, data))
+                
+            for _ in range(safe_threads):
+                task_queue.put(None)
+                
+        t_feeder = threading.Thread(target=feeder_thread, daemon=True)
+        t_feeder.start()
+        
+        progress_lock = threading.Lock()
+        
+        def worker_loop():
+            nonlocal processed_count
+            while self.is_running:
+                item = task_queue.get()
+                if item is None:
+                    break
+                process_single(item)
+                with progress_lock:
+                    processed_count += 1
+                    current = processed_count
+                self.callbacks['on_progress'](current, total_emails)
+                
+        worker_threads = []
+        for _ in range(safe_threads):
+            wt = threading.Thread(target=worker_loop, daemon=True)
+            wt.start()
+            worker_threads.append(wt)
+            
+        for wt in worker_threads:
+            wt.join()
+        
+        # === Greylisting Auto-Retry (п.2.4) ===
+        greylisted_count = greylisted_queue.qsize()
+        if greylisted_count > 0 and self.is_running and deep_ping:
+            self.callbacks['on_log'](f"[INFO] Перепроверка {greylisted_count} Greylisted почт, ожидание 90 сек...", "info")
+            
+            # Ждём 90 секунд (серверы с greylisting ожидают повторной попытки через 1-5 мин)
+            for i in range(90):
                 if not self.is_running:
                     break
-                future.result()
-                processed_count += 1
-                self.callbacks['on_progress'](processed_count, total_unique)
+                time.sleep(1)
+            
+            if self.is_running:
+                self.callbacks['on_log'](f"[INFO] Начинаю перепроверку {greylisted_count} Greylisted почт...", "info")
+                retry_count = 0
+                while not greylisted_queue.empty() and self.is_running:
+                    try:
+                        email, data = greylisted_queue.get_nowait()
+                    except Exception:
+                        break
+                    
+                    res = self.network.check_email(email)
+                    raw_status = res["status"]
+                    
+                    if raw_status == "valid":
+                        status_display = "Valid"
+                    elif raw_status == "greylisted":
+                        status_display = "Risky"  # Второй раз greylisted — помечаем как Risky
+                    elif raw_status == "risky":
+                        status_display = "Risky"
+                    elif raw_status == "catchall":
+                        status_display = "Unknown"
+                    elif raw_status == "unknown":
+                        status_display = "Unknown"
+                    else:
+                        status_display = "Invalid/Bounce"
+                    
+                    # Enrichment for valid emails (same as above)
+                    if status_display == "Valid":
+                        name = data.get("name")
+                        gender = data.get("gender")
+                        country = data.get("country")
+                        if not name or not gender or not country or gender == "":
+                            if not name:
+                                name = self.name_extractor.extract_name(email)
+                            if name and enable_ai:
+                                is_human = self.ml_predictor.is_person(name)
+                                if not is_human:
+                                    name = ""
+                            pred_gender, pred_country_from_email = self.ml_predictor.predict(name, email=email)
+                            pred_country_from_name = ""
+                            if name and enable_ai:
+                                pred_country_from_name = self.ml_predictor.predict_country(name)
+                            if not gender or gender == "":
+                                gender = pred_gender
+                            if not country or country == "":
+                                country = pred_country_from_name if pred_country_from_name else pred_country_from_email
+                        data["name"] = name
+                        data["gender"] = gender
+                        data["country"] = country
+                    
+                    self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
+                    retry_count += 1
+                
+                self.callbacks['on_log'](f"[INFO] Перепроверка Greylisted завершена: {retry_count} почт обработано.", "info")
                 
         self.is_running = False
         self.callbacks['on_complete']()
 
-    def start(self, raw_emails_dict, threads, timeout, fix_typos, check_spam, deep_ping, enable_ai, proxies=None, enable_osint=False):
+    def start(self, email_sources, threads, timeout, fix_typos, check_spam, deep_ping, enable_ai, proxies=None, enable_osint=False):
         def worker():
             self.setup(timeout=timeout, enable_ai=enable_ai, proxies=proxies, threads=threads)
-            self.run_pipeline(raw_emails_dict, threads, fix_typos, check_spam, deep_ping, enable_ai, enable_osint=enable_osint)
+            self.run_pipeline(email_sources, threads, fix_typos, check_spam, deep_ping, enable_ai, enable_osint=enable_osint)
             
         t = threading.Thread(target=worker, daemon=True)
         t.start()

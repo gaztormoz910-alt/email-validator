@@ -182,15 +182,15 @@ class AsyncProxyChecker:
             self.queue.put_nowait(proxy)
             
         # AV Evation & Network Stack Optimization:
-        # 1. Cap workers to a safe OS limit (5000 max instead of 500)
+        # 1. Cap workers to a safe OS limit (500 max to avoid router/WiFi overload)
         # 2. Stagger worker startup so we don't open all sockets in the exact same millisecond.
-        safe_workers = min(self.workers, len(self.proxies), 5000)
+        safe_workers = min(self.workers, len(self.proxies), 500)
         
         tasks = []
         for i in range(safe_workers):
             tasks.append(asyncio.create_task(self._worker()))
             if i % 50 == 0:
-                await asyncio.sleep(0.01) # Small jitter to prevent heuristics triggering
+                await asyncio.sleep(0.02)  # Small jitter to prevent heuristics triggering
             
         await self.queue.join()
         for task in tasks:

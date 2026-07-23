@@ -341,8 +341,8 @@ class DuckDuckGoEngine:
                     except Exception as e:
                         error_msg = str(e)
                         short_proxy = proxy_url.split("//")[-1] if proxy_url else "direct"
-                        # Логируем только каждую 5-ю ошибку чтобы не засорять терминал
-                        if retries % 5 == 0:
+                        # Логируем только каждую 50-ю ошибку чтобы не засорять терминал (или вообще не логируем)
+                        if retries % 50 == 0 and pages_fetched == 0 and getattr(self, '_debug_proxy', False):
                             self._log(f"[Прокси] {short_proxy} - Сбой: {error_msg[:80]}")
                         if proxy_url: self.proxy_manager.mark_fail(proxy_url)
                     finally:
