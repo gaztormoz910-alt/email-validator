@@ -150,8 +150,12 @@ def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None, l
     return live_proxies
 
 
-def _generate_random_local():
-    """Генерирует случайный локальный-адрес для Catch-All теста."""
+def _generate_random_local(style="short"):
+    """Генерирует случайный локальный-адрес для Catch-All теста.
+    style='short' — классический (16 символов), style='uuid' — UUID-подобный (п.4 Catch-All)"""
+    if style == "uuid":
+        import uuid
+        return str(uuid.uuid4()).replace('-', '')[:24]
     chars = string.ascii_lowercase + string.digits
     prefix = ''.join(random.choices(chars, k=12))
     suffix = ''.join(random.choices(string.digits, k=4))
@@ -178,7 +182,7 @@ class NetworkValidator:
         self.catchall_cache = {}
         self.catchall_lock = threading.Lock()
 
-        # Кэш DNS-здоровья (SPF/DMARC) — п.2.2
+        # Кэш DNS-здоровья (SPF/DMARC/DKIM) — п.2.2+
         self.dns_health_cache = {}
         self.dns_health_lock = threading.Lock()
 
@@ -187,16 +191,68 @@ class NetworkValidator:
         self._mx_sem_lock = threading.Lock()
         self._max_concurrent_per_mx = 5  # Максимум 5 параллельных соединений к одному MX
 
+        # Адаптивный Rate Limiting: счётчик 421-ошибок по MX (п.5 — adaptive)
+        self._mx_error_counts = {}
+        self._mx_error_lock = threading.Lock()
+
+        # Proxy Health Scoring (п.8): score каждого прокси
+        self._proxy_scores = {}
+        self._proxy_score_lock = threading.Lock()
+        if self.proxies:
+            for p in self.proxies:
+                self._proxy_scores[p] = 0  # Начальный score = 0
+
         # Случайный HELO-хост для этой сессии (выглядит как настоящий почтовый сервер)
         self.helo_name = random.choice(LEGIT_HELO_NAMES)
 
     def _get_mx_semaphore(self, mx_host: str) -> threading.Semaphore:
-        """Возвращает семафор для конкретного MX-хоста (п.3.3 Rate Limiting)."""
+        """Возвращает семафор для конкретного MX-хоста (п.3.3 Rate Limiting + adaptive)."""
         mx_key = mx_host.lower()
         with self._mx_sem_lock:
             if mx_key not in self._mx_semaphores:
                 self._mx_semaphores[mx_key] = threading.Semaphore(self._max_concurrent_per_mx)
             return self._mx_semaphores[mx_key]
+
+    def _record_mx_error(self, mx_host: str):
+        """Записывает 421-ошибку для MX. При 3+ ошибках уменьшает семафор (adaptive rate limiting)."""
+        mx_key = mx_host.lower()
+        with self._mx_error_lock:
+            self._mx_error_counts[mx_key] = self._mx_error_counts.get(mx_key, 0) + 1
+            errors = self._mx_error_counts[mx_key]
+        # При 3+ ошибках — пересоздаём семафор с меньшим лимитом
+        if errors == 3:
+            with self._mx_sem_lock:
+                self._mx_semaphores[mx_key] = threading.Semaphore(2)  # Снижаем до 2
+        elif errors == 6:
+            with self._mx_sem_lock:
+                self._mx_semaphores[mx_key] = threading.Semaphore(1)  # Снижаем до 1
+
+    def _pick_best_proxy(self):
+        """Выбирает прокси с наивысшим health score (п.8)."""
+        if not self.proxies:
+            return None
+        with self._proxy_score_lock:
+            # Отфильтровываем мёртвые прокси (score < -5)
+            alive = [p for p in self.proxies if self._proxy_scores.get(p, 0) > -5]
+            if not alive:
+                # Все прокси мёртвые — берём случайный из оригинального списка
+                return random.choice(self.proxies)
+            # Сортируем по score (лучшие сверху) и берём из топ-5 случайный
+            alive_sorted = sorted(alive, key=lambda p: self._proxy_scores.get(p, 0), reverse=True)
+            top = alive_sorted[:max(5, len(alive_sorted) // 3)]
+            return random.choice(top)
+
+    def _update_proxy_score(self, proxy, success: bool):
+        """Обновляет health score прокси (п.8)."""
+        if not proxy:
+            return
+        with self._proxy_score_lock:
+            if proxy not in self._proxy_scores:
+                self._proxy_scores[proxy] = 0
+            if success:
+                self._proxy_scores[proxy] += 1
+            else:
+                self._proxy_scores[proxy] -= 3  # Штраф за неудачу в 3 раза больше
 
     def get_mx_records(self, domain: str) -> list:
         """Ищет MX-записи для домена. Если MX нет — фоллбэк на A-запись (RFC 5321, п.1.4)."""
@@ -226,16 +282,26 @@ class NetworkValidator:
         except Exception:
             pass
 
-        # Ни MX, ни A — домен мёртвый
+        # Фоллбэк на AAAA-запись (IPv6) — п.1 DNS +1 балл
+        try:
+            self.resolver.resolve(domain, 'AAAA')
+            result = [domain]
+            with self.mx_lock:
+                self.mx_cache[domain] = result
+            return result
+        except Exception:
+            pass
+
+        # Ни MX, ни A, ни AAAA — домен мёртвый
         with self.mx_lock:
             self.mx_cache[domain] = []
         return []
 
     def check_dns_health(self, domain: str) -> dict:
         """
-        Проверяет DNS-здоровье домена: наличие SPF и DMARC записей (п.2.2).
-        Возвращает {'has_spf': bool, 'has_dmarc': bool, 'score': int}
-        score: 0 = ничего, 1 = SPF или DMARC, 2 = оба
+        Проверяет DNS-здоровье домена: наличие SPF, DMARC и DKIM записей (п.2.2+).
+        Возвращает {'has_spf': bool, 'has_dmarc': bool, 'has_dkim': bool, 'score': int}
+        score: 0 = ничего, 1 = один из трёх, 2 = два из трёх, 3 = все три
         """
         with self.dns_health_lock:
             if domain in self.dns_health_cache:
@@ -243,6 +309,7 @@ class NetworkValidator:
 
         has_spf = False
         has_dmarc = False
+        has_dkim = False
 
         # Проверяем SPF (TXT-запись с v=spf1)
         try:
@@ -266,8 +333,23 @@ class NetworkValidator:
         except Exception:
             pass
 
-        score = int(has_spf) + int(has_dmarc)
-        result = {'has_spf': has_spf, 'has_dmarc': has_dmarc, 'score': score}
+        # Проверяем DKIM (п.2 DNS-здоровье +1 балл) — пробуем популярные селекторы
+        dkim_selectors = ['google', 'default', 'selector1', 'selector2', 'k1', 'mail', 'dkim', 's1', 's2']
+        for selector in dkim_selectors:
+            try:
+                dkim_answers = self.resolver.resolve(f'{selector}._domainkey.{domain}', 'TXT')
+                for rdata in dkim_answers:
+                    txt_str = str(rdata).lower()
+                    if 'v=dkim1' in txt_str or 'p=' in txt_str:
+                        has_dkim = True
+                        break
+                if has_dkim:
+                    break
+            except Exception:
+                continue
+
+        score = int(has_spf) + int(has_dmarc) + int(has_dkim)
+        result = {'has_spf': has_spf, 'has_dmarc': has_dmarc, 'has_dkim': has_dkim, 'score': score}
 
         with self.dns_health_lock:
             self.dns_health_cache[domain] = result
@@ -288,6 +370,7 @@ class NetworkValidator:
     def _parse_smtp_response(self, code, message, email, domain):
         """
         Расшифровывает SMTP-ответ сервера максимально точно.
+        Глубокий анализ баннеров (п.3 SMTP +4 балла).
         Возвращает словарь {'status': ..., 'reason': ...}
         """
         msg = message.decode('utf-8', 'ignore').lower() if isinstance(message, bytes) else str(message).lower()
@@ -299,15 +382,26 @@ class NetworkValidator:
         if code == 552 or "over quota" in msg or "storage" in msg or "mailbox full" in msg:
             return {"status": "valid", "reason": "250 OK (Full Inbox)"}
 
-        # Аккаунт заблокирован/отключён провайдером — физически существует, но недоступен
+        # 550 — самый информативный код, парсим текст детально
         if code == 550:
-            if any(x in msg for x in ["disabled", "deactivated", "suspended", "not exist", "no such user",
-                                       "does not exist", "invalid address", "user unknown", "unknown user",
-                                       "bad destination", "no mailbox", "mailbox not found"]):
-                return {"status": "invalid", "reason": f"550 User Does Not Exist"}
-            if any(x in msg for x in ["spam", "policy", "blocked", "denied", "rejected"]):
-                return {"status": "invalid", "reason": f"550 Rejected by Policy"}
-            return {"status": "invalid", "reason": f"550 Rejected"}
+            # Однозначно мёртв
+            if any(x in msg for x in ["does not exist", "not exist", "no such user",
+                                       "invalid address", "user unknown", "unknown user",
+                                       "bad destination", "no mailbox", "mailbox not found",
+                                       "recipient rejected", "address rejected",
+                                       "undeliverable", "unknown recipient",
+                                       "inactive", "no account", "not available"]):
+                return {"status": "invalid", "reason": "550 User Does Not Exist"}
+            # Аккаунт заморожен — физически есть, но недоступен
+            if any(x in msg for x in ["disabled", "deactivated", "suspended", "frozen",
+                                       "locked", "closed", "inactive account"]):
+                return {"status": "risky", "reason": "550 Account Disabled/Suspended"}
+            # Наш IP или домен заблокирован — почта может быть живой!
+            if any(x in msg for x in ["spam", "policy", "blocked", "denied", "rejected",
+                                       "blacklist", "rbl", "dnsbl", "spamhaus",
+                                       "barracuda", "listed", "reputation", "client host"]):
+                return {"status": "unknown", "reason": "550 Our IP Blocked (Email May Exist)"}
+            return {"status": "invalid", "reason": "550 Rejected"}
 
         if code == 551:
             return {"status": "invalid", "reason": "551 User Not Local"}
@@ -316,27 +410,38 @@ class NetworkValidator:
             return {"status": "invalid", "reason": "553 Bad Address Format"}
 
         if code == 554:
-            if "spam" in msg or "blacklist" in msg or "blocked" in msg:
-                return {"status": "invalid", "reason": "554 IP/Domain Blacklisted"}
-            return {"status": "invalid", "reason": f"554 Transaction Failed"}
+            if any(x in msg for x in ["spam", "blacklist", "blocked", "rbl", "dnsbl",
+                                       "reputation", "not allowed"]):
+                # Наш IP заблокирован — НЕ значит что почта мертва
+                return {"status": "unknown", "reason": "554 Our IP Blacklisted (Email May Exist)"}
+            return {"status": "invalid", "reason": "554 Transaction Failed"}
 
         # Временные ошибки (Greylisting / Server Busy) — email МОЖЕТ быть валидным
         if code == 450:
             if "grey" in msg or "greylist" in msg:
                 return {"status": "greylisted", "reason": "450 Greylisted (Retry Later)"}
-            # Некоторые серверы шлют 450 как мягкий reject (mailbox busy) — тоже greylisting
-            if "try again" in msg or "later" in msg or "busy" in msg:
+            if "try again" in msg or "later" in msg or "busy" in msg or "temporarily" in msg:
                 return {"status": "greylisted", "reason": "450 Greylisted (Retry Later)"}
-            return {"status": "unknown", "reason": f"450 Temp Unavailable"}
+            if "rate" in msg or "too many" in msg or "throttl" in msg:
+                return {"status": "greylisted", "reason": "450 Rate Limited (Retry Later)"}
+            return {"status": "unknown", "reason": "450 Temp Unavailable"}
 
         if code == 451:
-            return {"status": "greylisted", "reason": "451 Greylisted/Server Error"}
+            if "grey" in msg or "greylist" in msg or "try again" in msg:
+                return {"status": "greylisted", "reason": "451 Greylisted (Retry Later)"}
+            return {"status": "greylisted", "reason": "451 Server Error"}
 
         if code == 452:
-            if "full" in msg or "quota" in msg:
+            if "full" in msg or "quota" in msg or "over" in msg:
                 # Ящик существует, просто сервер занят!
-                return {"status": "valid", "reason": "452 OK (Server Full)"}
+                return {"status": "valid", "reason": "452 OK (Mailbox Full)"}
+            if "too many" in msg or "recipients" in msg:
+                return {"status": "greylisted", "reason": "452 Too Many Recipients"}
             return {"status": "greylisted", "reason": "452 Temp Error"}
+
+        # 421 — сервер перегружен или нас выкидывает (adaptive rate limiting)
+        if code == 421:
+            return {"status": "unknown", "reason": "421 Service Busy (Rate Limit)"}
 
         if code >= 500 and code < 600:
             return {"status": "invalid", "reason": f"{code} Permanent Error"}
@@ -348,13 +453,14 @@ class NetworkValidator:
 
     def _do_single_ping(self, email, mx_record, proxy=None, from_email=None):
         """
-        Делает один SMTP-пинг к серверу с Rate Limiting (п.3.3).
+        Делает один SMTP-пинг к серверу с Rate Limiting + adaptive (п.3.3+п.5).
         Возвращает {'status': ..., 'reason': ...}
         """
         # Ротация MAIL FROM (п.3.2)
         from_addr = from_email or random.choice(MAIL_FROM_POOL)
         domain = email.split("@")[1].lower() if "@" in email else ""
         server = None
+        ping_success = False
 
         # Rate Limiting: ждём своей очереди к этому MX-серверу (п.3.3)
         sem = self._get_mx_semaphore(mx_record)
@@ -381,19 +487,32 @@ class NetworkValidator:
             code, message = server.rcpt(email)
 
             result = self._parse_smtp_response(code, message, email, domain)
+
+            # Adaptive Rate Limiting (п.5): если 421 — записываем ошибку для этого MX
+            if code == 421:
+                self._record_mx_error(mx_record)
+
+            ping_success = True  # Соединение прошло (даже если ответ отрицательный)
+            self._update_proxy_score(proxy, True)  # Прокси жив
             return result
 
         except smtplib.SMTPServerDisconnected:
+            self._update_proxy_score(proxy, False)
             return {"status": "unknown", "reason": "Server Disconnected"}
         except socket.timeout:
+            self._update_proxy_score(proxy, False)
             return {"status": "unknown", "reason": "Timeout"}
         except socks.ProxyConnectionError:
+            self._update_proxy_score(proxy, False)
             return {"status": "unknown", "reason": "Proxy Dead"}
         except smtplib.SMTPConnectError:
+            self._update_proxy_score(proxy, False)
             return {"status": "unknown", "reason": "SMTP Connect Error"}
         except smtplib.SMTPException as e:
+            self._update_proxy_score(proxy, False)
             return {"status": "unknown", "reason": f"SMTP Error: {str(e)[:50]}"}
         except Exception as e:
+            self._update_proxy_score(proxy, False)
             return {"status": "unknown", "reason": f"Error: {str(e)[:50]}"}
         finally:
             sem.release()  # Освобождаем слот для следующего потока
@@ -406,17 +525,17 @@ class NetworkValidator:
     def is_catch_all_domain(self, domain, mx_record) -> bool:
         """
         Проверяет, является ли домен Catch-All (принимает любой адрес).
-        Двойная проверка (п.2.3): отправляем 2 разных несуществующих адреса.
+        Тройная проверка (п.4): 3 разных паттерна — short, short, UUID-style.
         Результат кэшируется.
         """
         with self.catchall_lock:
             if domain in self.catchall_cache:
                 return self.catchall_cache[domain]
 
-        proxy = random.choice(self.proxies) if self.proxies else None
+        proxy = self._pick_best_proxy()
 
-        # Первый случайный несуществующий адрес
-        fake_email_1 = f"{_generate_random_local()}@{domain}"
+        # Первый случайный несуществующий адрес (короткий)
+        fake_email_1 = f"{_generate_random_local('short')}@{domain}"
         result_1 = self._do_single_ping(fake_email_1, mx_record, proxy=proxy)
 
         # Если первый НЕ принят — однозначно не Catch-All
@@ -426,11 +545,20 @@ class NetworkValidator:
             return False
 
         # Первый принят — проверяем вторым (другим случайным адресом)
-        fake_email_2 = f"{_generate_random_local()}@{domain}"
+        fake_email_2 = f"{_generate_random_local('short')}@{domain}"
         result_2 = self._do_single_ping(fake_email_2, mx_record, proxy=proxy)
 
-        # Оба приняты — точно Catch-All
-        is_catchall = result_2["status"] == "valid"
+        if result_2["status"] != "valid":
+            with self.catchall_lock:
+                self.catchall_cache[domain] = False
+            return False
+
+        # Оба приняты — третья проверка с UUID-подобным адресом (совершенно другой паттерн)
+        fake_email_3 = f"{_generate_random_local('uuid')}@{domain}"
+        result_3 = self._do_single_ping(fake_email_3, mx_record, proxy=proxy)
+
+        # Все 3 приняты — точно Catch-All
+        is_catchall = result_3["status"] == "valid"
 
         with self.catchall_lock:
             self.catchall_cache[domain] = is_catchall
@@ -454,10 +582,10 @@ class NetworkValidator:
 
         last_result = {"status": "unknown", "reason": "No Response"}
 
-        # Мульти-MX: пробуем все MX-серверы по очереди (п.3.1)
+        # Мульти-MX: пробуем все MX-серверы по очереди (п.3.1) + smart proxy selection (п.8)
         for mx_record in mx_records:
             for attempt in range(max_retries):
-                proxy = random.choice(self.proxies) if self.proxies else None
+                proxy = self._pick_best_proxy()  # Используем лучший прокси вместо random
                 result = self._do_single_ping(email, mx_record, proxy=proxy)
 
                 # Если получили однозначный ответ — возвращаем сразу
@@ -530,18 +658,19 @@ class NetworkValidator:
         # Шаг 4: Обычный Stealth SMTP Ping (с мульти-MX — п.3.1)
         result = self.stealth_smtp_ping(email, mx_records)
 
-        # Шаг 5: DNS-здоровье как бонус (п.2.2)
+        # Шаг 5: DNS-здоровье как бонус (п.2.2 + DKIM)
         # Если SMTP дал unknown, но DNS показывает здоровый домен — помечаем как Risky (не Unknown)
         if result["status"] in ("unknown", "greylisted"):
             dns_health = self.check_dns_health(domain)
             if dns_health["score"] >= 1:
-                # Домен имеет SPF и/или DMARC — он точно почтовый, просто SMTP не ответил
+                dns_tag = f" [DNS: SPF={'✓' if dns_health['has_spf'] else '✗'}, DMARC={'✓' if dns_health['has_dmarc'] else '✗'}, DKIM={'✓' if dns_health.get('has_dkim') else '✗'}]"
+                # Домен имеет SPF/DMARC/DKIM — он точно почтовый, просто SMTP не ответил
                 if result["status"] == "greylisted":
                     result["status"] = "greylisted"  # Оставляем для retry в pipeline
-                    result["reason"] += f" [DNS: SPF={'✓' if dns_health['has_spf'] else '✗'}, DMARC={'✓' if dns_health['has_dmarc'] else '✗'}]"
+                    result["reason"] += dns_tag
                 else:
                     result["status"] = "risky"
-                    result["reason"] += f" [DNS: SPF={'✓' if dns_health['has_spf'] else '✗'}, DMARC={'✓' if dns_health['has_dmarc'] else '✗'}]"
+                    result["reason"] += dns_tag
 
         # Greylisted без retry оставляем как greylisted — pipeline сделает retry (п.2.4)
         if result["status"] == "greylisted":
