@@ -7,21 +7,56 @@ class EmailCleaner:
         # Самые популярные провайдеры для проверки на опечатки
         self.popular_domains = set(GLOBAL_VERIFIED_DOMAINS)
         
-        # Хеш-таблица опечаток: неправильный домен → правильный
+        # Хеш-таблица опечаток: неправильный домен → правильный (расширенная — п.6)
         self._typo_map = {
+            # Gmail
             'gamil.com': 'gmail.com', 'gmial.com': 'gmail.com', 'gmal.com': 'gmail.com',
             'gmai.com': 'gmail.com', 'gmail.co': 'gmail.com', 'gmail.con': 'gmail.com',
             'gmail.ru': 'gmail.com', 'gnail.com': 'gmail.com', 'gmaill.com': 'gmail.com',
             'g.mail.com': 'gmail.com', 'gmaul.com': 'gmail.com', 'gmqil.com': 'gmail.com',
+            'gmali.com': 'gmail.com', 'gemail.com': 'gmail.com', 'gmsil.com': 'gmail.com',
+            'gmeil.com': 'gmail.com', 'gmaik.com': 'gmail.com', 'gmil.com': 'gmail.com',
+            # Yahoo
             'yaho.com': 'yahoo.com', 'yahoo.co': 'yahoo.com',
             'yahoo.con': 'yahoo.com', 'yaboo.com': 'yahoo.com', 'yahooo.com': 'yahoo.com',
+            'yshoo.com': 'yahoo.com', 'yaoo.com': 'yahoo.com', 'tahoo.com': 'yahoo.com',
+            # Outlook
             'outlok.com': 'outlook.com', 'outook.com': 'outlook.com', 'otlook.com': 'outlook.com',
             'outlool.com': 'outlook.com', 'outloock.com': 'outlook.com',
+            'oultook.com': 'outlook.com', 'outlokk.com': 'outlook.com',
+            # Hotmail
             'hotmal.com': 'hotmail.com', 'hotmai.com': 'hotmail.com', 'hotmail.co': 'hotmail.com',
             'hotmial.com': 'hotmail.com', 'hotmaill.com': 'hotmail.com',
+            'hotmeil.com': 'hotmail.com', 'hotmsil.com': 'hotmail.com',
+            # iCloud
             'iclod.com': 'icloud.com', 'icoud.com': 'icloud.com', 'icloud.co': 'icloud.com',
+            'icloude.com': 'icloud.com',
+            # Mail.ru
             'mail.r': 'mail.ru', 'mai.ru': 'mail.ru', 'maill.ru': 'mail.ru',
+            'mail.rru': 'mail.ru', 'mall.ru': 'mail.ru',
+            # Yandex
             'yandex.r': 'yandex.ru', 'yanex.ru': 'yandex.ru', 'yandx.ru': 'yandex.ru',
+            'yandez.ru': 'yandex.ru', 'yadex.ru': 'yandex.ru',
+            # Protonmail (п.6 +1 балл)
+            'protonmal.com': 'protonmail.com', 'protonmai.com': 'protonmail.com',
+            'protonmial.com': 'protonmail.com', 'protonmaill.com': 'protonmail.com',
+            'protonmail.co': 'protonmail.com', 'protnmail.com': 'protonmail.com',
+            'protonmil.com': 'protonmail.com',
+            # AOL (п.6)
+            'aol.co': 'aol.com', 'aol.con': 'aol.com', 'aool.com': 'aol.com',
+            'ao.com': 'aol.com',
+            # Zoho (п.6)
+            'zoho.co': 'zoho.com', 'zoho.con': 'zoho.com', 'zho.com': 'zoho.com',
+            # GMX (п.6)
+            'gmx.co': 'gmx.com', 'gmx.con': 'gmx.com', 'gmc.com': 'gmx.com',
+            # Rambler (п.6)
+            'rambler.r': 'rambler.ru', 'ramblr.ru': 'rambler.ru', 'ramblerr.ru': 'rambler.ru',
+            # QQ (п.6)
+            'qq.co': 'qq.com', 'qq.con': 'qq.com',
+            # 163.com (п.6)
+            '163.co': '163.com', '163.con': '163.com',
+            # Live
+            'live.co': 'live.com', 'live.con': 'live.com', 'lve.com': 'live.com',
         }
 
     def correct_and_normalize(self, email: str) -> str:
@@ -60,6 +95,14 @@ class EmailCleaner:
             if domain.startswith(pop) and len(domain) > len(pop):
                 domain = pop
                 break
+        
+        # П.7: Глубоко вложенные мусорные поддомены (gmail.com.br.spam.xyz → gmail.com)
+        # Если домен содержит больше 3 точек — ищем совпадение с известным доменом внутри
+        if domain.count('.') > 3:
+            for pop in self.popular_domains:
+                if pop in domain:
+                    domain = pop
+                    break
         
         # Убираем случайные точки в конце
         domain = domain.rstrip('.')
