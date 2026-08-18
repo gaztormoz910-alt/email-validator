@@ -1,16 +1,42 @@
 # ui/colors.py
-# Proxy Hunter Style Color Definitions
+# Minimal Dark Theme — neutral grayscale surfaces, one calm accent, desaturated status colors.
 
-BG_MAIN = "#0B0E14"       # Самый темный фон (внешний)
-BG_SIDEBAR = "#111621"    # Фон сайдбара
-BG_CARD_1 = "#171C26"     # Основной фон карточек и фреймов
-BG_CARD_2 = "#1A202C"     # Чуть светлее для вложенных элементов
-BORDER = "#1E2532"        # Границы
+# --- Surfaces ---
+BG_MAIN = "#09090B"        # Outer window background (near-black, neutral)
+BG_SIDEBAR = "#0D0D0F"     # Sidebar background
+BG_CARD_1 = "#131316"      # Cards / stat tiles
+BG_CARD_2 = "#18181B"      # Inputs, nested elements, terminal
+BG_CARD_HOVER = "#1E1E22"  # Hover state for neutral surfaces
 
-TEXT_MAIN = "#E2E8F0"
-TEXT_MUTED = "#64748B"
+# --- Borders ---
+BORDER = "#212124"         # Default hairline border (subtle, near-invisible at rest)
+BORDER_STRONG = "#2C2C31"  # Hover / active border, secondary button hover
 
-ACCENT_PRIMARY = "#3B82F6"   # Синий (Основной)
-ACCENT_SUCCESS = "#10B981"   # Зеленый (Valid)
-ACCENT_ERROR = "#EF4444"     # Красный (Invalid / Стоп)
-ACCENT_WARNING = "#F59E0B"   # Желтый (Спам / Пауза)
+# --- Text ---
+TEXT_MAIN = "#EDEDEF"
+TEXT_MUTED = "#8B8B93"
+TEXT_DIM = "#59595F"
+
+# --- Accent (single, used sparingly for actions/focus) ---
+ACCENT_PRIMARY = "#6366F1"
+ACCENT_PRIMARY_HOVER = "#4F51D6"
+
+# --- Status accents (desaturated so they sit quietly on the dark surface) ---
+ACCENT_SUCCESS = "#3EB97C"
+ACCENT_SUCCESS_HOVER = "#2F9C67"
+
+ACCENT_ERROR = "#E5484D"
+ACCENT_ERROR_HOVER = "#C93D42"
+
+ACCENT_WARNING = "#D6A24A"
+ACCENT_WARNING_HOVER = "#B98A3B"
+
+ACCENT_PURPLE = "#8D85E8"   # secondary accent for the "Names found" tile
+
+# --- Table-specific tokens ---
+BG_TABLE_HEADER = "#101012"  # Treeview header row
+BG_SELECTED = "#201F2C"      # Selected table row — tinted, not a solid accent block
+
+# --- Text placed directly on a solid accent fill ---
+TEXT_ON_ACCENT = "#FFFFFF"
+TEXT_ON_WARNING = "#15110A"
