@@ -10,6 +10,9 @@ from core.network import NetworkValidator
 from core.ai_engine import EmailAI
 from core.parser.name_extractor import NameExtractor
 from core.parser.ml_predictor import MLPredictor
+from core.disposable import is_disposable
+from core.gravatar import GravatarChecker
+from core.scoring import calculate_engagement_score
 
 class ValidationPipeline:
     def __init__(self, callbacks):
@@ -23,6 +26,7 @@ class ValidationPipeline:
         self.ai = None
         self.name_extractor = None
         self.ml_predictor = None
+        self.gravatar_checker = GravatarChecker(timeout=3)
         
     def setup(self, timeout=5, enable_ai=False, proxies=None, threads=100):
         # Гибридный режим: Whitelist + DNS-проверка неизвестных доменов
@@ -84,9 +88,17 @@ class ValidationPipeline:
                 
             email, data = item
                 
+            # Шаг 1.1: Проверка на одноразовый/временный домен (Disposable)
+            if is_disposable(email):
+                data["engagement_score"] = 0
+                data["engagement_grade"] = "Dead"
+                data["provider_type"] = "Disposable"
+                self.callbacks['on_result'](email, "Trap/Disposable", "Disposable Email Domain", "N/A", data)
+                return
+
             # Шаг 1.2: Проверка на ролевые ящики (Role-based) — п.2.1
             # НЕ убиваем их! Помечаем как отдельную категорию "Role-based".
-            # .gov/.edu/.mil — это легитимные домены, НЕ ловушки (п.1.2)
+            is_role = False
             if "@" in email:
                 local_p, domain_p = email.split("@", 1)
                 roles = {
@@ -99,14 +111,15 @@ class ValidationPipeline:
                     "tech", "unsubscribe", "webmaster", "www", "hello",
                     "press", "legal", "feedback"
                 }
-                if local_p in roles:
-                    # Помечаем как Role-based, но НЕ отбрасываем — пусть пользователь решает
-                    self.callbacks['on_result'](email, "Role-based", "Role-based Account", "N/A", data)
-                    return
+                if local_p.lower() in roles:
+                    is_role = True
 
             # Шаг 1.5: Проверка через ИИ (Машинное обучение)
             if enable_ai and self.ai:
                 if self.ai.predict(email):
+                    data["engagement_score"] = 0
+                    data["engagement_grade"] = "Dead"
+                    data["provider_type"] = "Suspicious"
                     self.callbacks['on_result'](email, "Trap/Disposable", "AI: Bot/Spam Pattern", "N/A", data)
                     return
                 
@@ -117,7 +130,7 @@ class ValidationPipeline:
 
                 # Greylisted — складываем в очередь для повторной проверки (п.2.4)
                 if raw_status == "greylisted":
-                    greylisted_queue.put((email, data))
+                    greylisted_queue.put((email, data, is_role))
                     return  # Не выводим результат сейчас — перепроверим позже
 
                 if raw_status == "valid":
@@ -131,36 +144,76 @@ class ValidationPipeline:
                 else:
                     status_display = "Invalid/Bounce"
                 
-                # Enrichment for valid emails
-                if status_display == "Valid":
-                    name = data.get("name")
-                    gender = data.get("gender")
-                    country = data.get("country")
+                # Если Role-based — перезаписываем статус
+                if is_role:
+                    status_display = "Role-based"
+                
+                # Enrichment для ВСЕХ статусов (не только Valid)
+                # Приоритет: данные из файла > ML-предсказание > пустое поле
+                name = data.get("name", "")
+                gender = data.get("gender", "")
+                country = data.get("country", "")
+                
+                if not name or not gender or not country:
+                    if not name:
+                        name = self.name_extractor.extract_name(email)
+                        
+                    # ML/AI Name Validation (NER)
+                    if name and enable_ai:
+                        is_human = self.ml_predictor.is_person(name)
+                        if not is_human:
+                            name = "" # ИИ понял, что это не человек (например ORG)
                     
-                    if not name or not gender or not country or gender == "":
-                        if not name:
-                            name = self.name_extractor.extract_name(email)
-                            
-                        # ML/AI Name Validation (NER)
-                        if name and enable_ai:
-                            is_human = self.ml_predictor.is_person(name)
-                            if not is_human:
-                                name = "" # ИИ понял, что это не человек (например ORG)
+                    pred_gender, pred_country_from_email = self.ml_predictor.predict(name, email=email)
+                    
+                    pred_country_from_name = ""
+                    if name and enable_ai:
+                        pred_country_from_name = self.ml_predictor.predict_country(name)
+                    
+                    if not gender or gender == "":
+                        gender = pred_gender
+                    if not country or country == "":
+                        country = pred_country_from_name if pred_country_from_name else pred_country_from_email
                         
-                        pred_gender, pred_country_from_email = self.ml_predictor.predict(name, email=email)
-                        
-                        pred_country_from_name = ""
-                        if name and enable_ai:
-                            pred_country_from_name = self.ml_predictor.predict_country(name)
-                        
-                        if not gender or gender == "":
-                            gender = pred_gender
-                        if not country or country == "":
-                            country = pred_country_from_name if pred_country_from_name else pred_country_from_email
-                            
-                    data["name"] = name
-                    data["gender"] = gender
-                    data["country"] = country
+                data["name"] = name
+                data["gender"] = gender
+                data["country"] = country
+
+                # Gravatar-проверка (бонусный сигнал реального человека)
+                has_avatar = False
+                if status_display in ("Valid", "Risky", "Role-based"):
+                    try:
+                        has_avatar = self.gravatar_checker.has_gravatar(email)
+                    except Exception:
+                        pass
+                
+                # DNS Health Score (для Engagement Score)
+                dns_score = 0
+                try:
+                    domain = email.split("@")[1].lower()
+                    dns_info = self.network.check_dns_health(domain)
+                    dns_score = dns_info.get("score", 0)
+                except Exception:
+                    pass
+                
+                # Вычисление Engagement Score
+                score_result = calculate_engagement_score(
+                    email=email,
+                    smtp_status=status_display,
+                    smtp_reason=res.get("reason", ""),
+                    has_gravatar=has_avatar,
+                    is_disposable=False,  # Уже отсеяны выше
+                    dns_health_score=dns_score,
+                    domain_age_days=-1,  # WHOIS опционально
+                    name_extracted=name,
+                    is_role_based=is_role,
+                    server_outdated=res.get("server_outdated", False),
+                )
+                
+                data["engagement_score"] = score_result["score"]
+                data["engagement_grade"] = score_result["grade"]
+                data["provider_type"] = score_result["provider_type"]
+                data["has_gravatar"] = has_avatar
 
                 self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
             else:
@@ -236,7 +289,7 @@ class ValidationPipeline:
                 retry_count = 0
                 while not greylisted_queue.empty() and self.is_running:
                     try:
-                        email, data = greylisted_queue.get_nowait()
+                        email, data, is_role = greylisted_queue.get_nowait()
                     except Exception:
                         break
                     
@@ -256,29 +309,65 @@ class ValidationPipeline:
                     else:
                         status_display = "Invalid/Bounce"
                     
-                    # Enrichment for valid emails (same as above)
-                    if status_display == "Valid":
-                        name = data.get("name")
-                        gender = data.get("gender")
-                        country = data.get("country")
-                        if not name or not gender or not country or gender == "":
-                            if not name:
-                                name = self.name_extractor.extract_name(email)
-                            if name and enable_ai:
-                                is_human = self.ml_predictor.is_person(name)
-                                if not is_human:
-                                    name = ""
-                            pred_gender, pred_country_from_email = self.ml_predictor.predict(name, email=email)
-                            pred_country_from_name = ""
-                            if name and enable_ai:
-                                pred_country_from_name = self.ml_predictor.predict_country(name)
-                            if not gender or gender == "":
-                                gender = pred_gender
-                            if not country or country == "":
-                                country = pred_country_from_name if pred_country_from_name else pred_country_from_email
-                        data["name"] = name
-                        data["gender"] = gender
-                        data["country"] = country
+                    if is_role:
+                        status_display = "Role-based"
+                    
+                    # Enrichment для ВСЕХ статусов (не только Valid)
+                    name = data.get("name", "")
+                    gender = data.get("gender", "")
+                    country = data.get("country", "")
+                    if not name or not gender or not country:
+                        if not name:
+                            name = self.name_extractor.extract_name(email)
+                        if name and enable_ai:
+                            is_human = self.ml_predictor.is_person(name)
+                            if not is_human:
+                                name = ""
+                        pred_gender, pred_country_from_email = self.ml_predictor.predict(name, email=email)
+                        pred_country_from_name = ""
+                        if name and enable_ai:
+                            pred_country_from_name = self.ml_predictor.predict_country(name)
+                        if not gender or gender == "":
+                            gender = pred_gender
+                        if not country or country == "":
+                            country = pred_country_from_name if pred_country_from_name else pred_country_from_email
+                    data["name"] = name
+                    data["gender"] = gender
+                    data["country"] = country
+                    
+                    # Gravatar + Engagement Score
+                    has_avatar = False
+                    if status_display in ("Valid", "Risky", "Role-based"):
+                        try:
+                            has_avatar = self.gravatar_checker.has_gravatar(email)
+                        except Exception:
+                            pass
+                    
+                    dns_score = 0
+                    try:
+                        domain = email.split("@")[1].lower()
+                        dns_info = self.network.check_dns_health(domain)
+                        dns_score = dns_info.get("score", 0)
+                    except Exception:
+                        pass
+                    
+                    score_result = calculate_engagement_score(
+                        email=email,
+                        smtp_status=status_display,
+                        smtp_reason=res.get("reason", ""),
+                        has_gravatar=has_avatar,
+                        is_disposable=False,
+                        dns_health_score=dns_score,
+                        domain_age_days=-1,
+                        name_extracted=name,
+                        is_role_based=is_role,
+                        server_outdated=res.get("server_outdated", False),
+                    )
+                    
+                    data["engagement_score"] = score_result["score"]
+                    data["engagement_grade"] = score_result["grade"]
+                    data["provider_type"] = score_result["provider_type"]
+                    data["has_gravatar"] = has_avatar
                     
                     self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
                     retry_count += 1

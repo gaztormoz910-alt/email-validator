@@ -30,7 +30,7 @@ class ProxyHunterInputSelector(ctk.CTkFrame):
         self.label = ctk.CTkLabel(self.header_frame, text=label_text, text_color=TEXT_MUTED, font=ctk.CTkFont(size=12))
         self.label.pack(side="left")
         
-        self.seg_btn = ctk.CTkSegmentedButton(self.header_frame, values=["Файл", "Текст"], command=self._switch_mode, height=22, fg_color=BG_CARD_2, selected_color=ACCENT_PRIMARY, selected_hover_color="#60A5FA", unselected_color=BG_CARD_2, unselected_hover_color=BORDER, text_color=TEXT_MAIN, font=ctk.CTkFont(size=11))
+        self.seg_btn = ctk.CTkSegmentedButton(self.header_frame, values=["Файл", "Текст"], command=self._switch_mode, height=22, fg_color=BG_CARD_2, selected_color=ACCENT_PRIMARY, selected_hover_color=ACCENT_PRIMARY_HOVER, unselected_color=BG_CARD_2, unselected_hover_color=BORDER, text_color=TEXT_MAIN, font=ctk.CTkFont(size=11))
         self.seg_btn.pack(side="right")
         self.seg_btn.set("Файл")
         
@@ -43,7 +43,7 @@ class ProxyHunterInputSelector(ctk.CTkFrame):
         self.entry = ctk.CTkEntry(self.file_frame, fg_color=BG_CARD_2, border_color=BORDER, text_color=TEXT_MAIN, state="disabled", height=30)
         self.entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
         
-        self.btn = ctk.CTkButton(self.file_frame, text=button_text, command=self._browse_file, fg_color=ACCENT_PRIMARY, hover_color="#2563EB", text_color="#FFFFFF", width=70, height=30, corner_radius=6)
+        self.btn = ctk.CTkButton(self.file_frame, text=button_text, command=self._browse_file, fg_color=ACCENT_PRIMARY, hover_color=ACCENT_PRIMARY_HOVER, text_color=TEXT_ON_ACCENT, width=70, height=30, corner_radius=6)
         self.btn.pack(side="right")
         
         self.text_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -216,7 +216,7 @@ class ProxyHunterSlider(ctk.CTkFrame):
         self.btn_plus = ctk.CTkButton(self.controls_frame, text="+", width=26, height=26, corner_radius=6, fg_color=BG_CARD_2, hover_color=BORDER, text_color=TEXT_MAIN, font=ctk.CTkFont(weight="bold", size=14), command=self._plus)
         self.btn_plus.pack(side="left", padx=(4, 0))
         
-        self.slider = ctk.CTkSlider(self, from_=from_, to=to, height=12, fg_color=BG_CARD_2, progress_color=ACCENT_PRIMARY, button_color=ACCENT_PRIMARY, button_hover_color="#60A5FA", command=self._slider_moved)
+        self.slider = ctk.CTkSlider(self, from_=from_, to=to, height=12, fg_color=BG_CARD_2, progress_color=ACCENT_PRIMARY, button_color=ACCENT_PRIMARY, button_hover_color=ACCENT_PRIMARY_HOVER, command=self._slider_moved)
         self.slider.set(initial)
         self.slider.pack(fill="x")
         
@@ -384,7 +384,7 @@ class ValidatorApp(ctk.CTk):
             command=self._switch_app_mode,
             fg_color=BG_CARD_2, 
             selected_color=ACCENT_PRIMARY, 
-            selected_hover_color="#60A5FA", 
+            selected_hover_color=ACCENT_PRIMARY_HOVER, 
             unselected_color=BG_CARD_2, 
             unselected_hover_color=BORDER, 
             text_color=TEXT_MAIN,
@@ -422,11 +422,11 @@ class ValidatorApp(ctk.CTk):
         self.timeout_slider = ProxyHunterSlider(self.validator_sidebar_frame, "Таймаут (сек)", 1, 300, 5)
         self.timeout_slider.pack(fill="x", padx=20, pady=(0, 25))
 
-        self.chk_ai = ctk.CTkSwitch(self.validator_sidebar_frame, text="Использовать AI фильтр (ML)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color="#FFFFFF", button_hover_color="#E2E8F0")
+        self.chk_ai = ctk.CTkSwitch(self.validator_sidebar_frame, text="Использовать AI фильтр (ML)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color=TEXT_ON_ACCENT, button_hover_color=TEXT_MAIN)
         self.chk_ai.select()
         self.chk_ai.pack(padx=20, anchor="w", pady=(0, 20))
         
-        self.chk_osint_val = ctk.CTkSwitch(self.validator_sidebar_frame, text="Обогащение данных (OSINT)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color="#FFFFFF", button_hover_color="#E2E8F0")
+        self.chk_osint_val = ctk.CTkSwitch(self.validator_sidebar_frame, text="Обогащение данных (OSINT)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color=TEXT_ON_ACCENT, button_hover_color=TEXT_MAIN)
         self.chk_osint_val.select()
         self.chk_osint_val.pack(padx=20, anchor="w", pady=(0, 20))
         
@@ -654,7 +654,7 @@ class ValidatorApp(ctk.CTk):
         self.shield_frame = ctk.CTkFrame(self.title_frame, fg_color=ACCENT_PRIMARY, corner_radius=10, width=40, height=40)
         self.shield_frame.pack(side="left", padx=(0, 10))
         self.shield_frame.pack_propagate(False)
-        self.shield_lbl = ctk.CTkLabel(self.shield_frame, text="🛡", font=ctk.CTkFont(size=20), text_color="#FFFFFF")
+        self.shield_lbl = ctk.CTkLabel(self.shield_frame, text="🛡", font=ctk.CTkFont(size=20), text_color=TEXT_ON_ACCENT)
         self.shield_lbl.place(relx=0.5, rely=0.5, anchor="center")
         
         self.title_text_frame = ctk.CTkFrame(self.title_frame, fg_color="transparent")
@@ -668,13 +668,13 @@ class ValidatorApp(ctk.CTk):
         self.controls_frame = ctk.CTkFrame(self.header_main, fg_color="transparent")
         self.controls_frame.pack(side="right")
         
-        self.start_btn = ctk.CTkButton(self.controls_frame, text="▶", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_PRIMARY, hover_color="#2563EB", text_color="#FFFFFF", command=self.start_process)
+        self.start_btn = ctk.CTkButton(self.controls_frame, text="▶", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_PRIMARY, hover_color=ACCENT_PRIMARY_HOVER, text_color=TEXT_ON_ACCENT, command=self.start_process)
         self.start_btn.pack(side="left", padx=(0, 8))
         
-        self.pause_btn = ctk.CTkButton(self.controls_frame, text="⏸", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_WARNING, hover_color="#D97706", text_color="#000000", command=self.pause_process, state="disabled")
+        self.pause_btn = ctk.CTkButton(self.controls_frame, text="⏸", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_WARNING, hover_color=ACCENT_WARNING_HOVER, text_color=TEXT_ON_WARNING, command=self.pause_process, state="disabled")
         self.pause_btn.pack(side="left", padx=(0, 8))
         
-        self.stop_btn = ctk.CTkButton(self.controls_frame, text="⏹", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_ERROR, hover_color="#DC2626", text_color="#FFFFFF", command=self.stop_process, state="disabled")
+        self.stop_btn = ctk.CTkButton(self.controls_frame, text="⏹", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_ERROR, hover_color=ACCENT_ERROR_HOVER, text_color=TEXT_ON_ACCENT, command=self.stop_process, state="disabled")
         self.stop_btn.pack(side="left")
 
         # --- VALIDATOR WORKSPACE ---
@@ -691,7 +691,7 @@ class ValidatorApp(ctk.CTk):
         self._create_stat_card(self.dashboard_frame, 0, 2, "Невалидные", "0", ACCENT_ERROR, "🗑", "stat_2")
         self._create_stat_card(self.dashboard_frame, 1, 0, "Спам / Ловушки", "0", ACCENT_WARNING, "⚠️", "stat_3")
         self._create_stat_card(self.dashboard_frame, 1, 1, "Неизвестно", "0", TEXT_MUTED, "❓", "stat_4")
-        self._create_stat_card(self.dashboard_frame, 1, 2, "Имена найдены", "0", "#8B5CF6", "👤", "stat_names")
+        self._create_stat_card(self.dashboard_frame, 1, 2, "Имена найдены", "0", ACCENT_PURPLE, "👤", "stat_names")
 
         # Прогресс-бар (Validator)
         self.progress_frame = ctk.CTkFrame(self.validator_workspace, fg_color="transparent")
@@ -717,7 +717,7 @@ class ValidatorApp(ctk.CTk):
         self.tabs_frame = ctk.CTkFrame(self.bottom_container, fg_color="transparent")
         self.tabs_frame.pack(fill="x", pady=(15, 10))
         
-        self.tab_seg = ctk.CTkSegmentedButton(self.tabs_frame, values=["Терминал", "Результаты"], command=self._switch_tab, fg_color=BG_SIDEBAR, selected_color=ACCENT_PRIMARY, selected_hover_color="#60A5FA", unselected_color=BG_SIDEBAR, unselected_hover_color=BG_CARD_2, text_color=TEXT_MAIN)
+        self.tab_seg = ctk.CTkSegmentedButton(self.tabs_frame, values=["Терминал", "Результаты"], command=self._switch_tab, fg_color=BG_SIDEBAR, selected_color=ACCENT_PRIMARY, selected_hover_color=ACCENT_PRIMARY_HOVER, unselected_color=BG_SIDEBAR, unselected_hover_color=BG_CARD_2, text_color=TEXT_MAIN)
         self.tab_seg.set("Терминал")
         self.tab_seg.pack(anchor="center")
         
@@ -729,7 +729,7 @@ class ValidatorApp(ctk.CTk):
         self.terminal_header = ctk.CTkFrame(self.terminal_view, fg_color="transparent")
         self.terminal_header.pack(fill="x", pady=(0, 10))
         
-        self.copy_logs_btn = ctk.CTkButton(self.terminal_header, text="📋 Копировать", width=120, height=28, corner_radius=6, font=ctk.CTkFont(size=12), command=self.copy_terminal_logs, fg_color=ACCENT_PRIMARY, hover_color="#2563EB", text_color="#FFFFFF")
+        self.copy_logs_btn = ctk.CTkButton(self.terminal_header, text="Копировать", width=120, height=28, corner_radius=8, font=ctk.CTkFont(size=12), command=self.copy_terminal_logs, fg_color="transparent", border_width=1, border_color=BORDER_STRONG, hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN)
         self.copy_logs_btn.pack(side="right")
         
         self.terminal_box = ctk.CTkTextbox(self.terminal_view, fg_color=BG_CARD_2, text_color=TEXT_MAIN, font=ctk.CTkFont(family="Consolas", size=12), border_width=0, corner_radius=8, wrap="none")
@@ -742,60 +742,70 @@ class ValidatorApp(ctk.CTk):
         self.terminal_box.configure(state="disabled")
 
         self.table_export_frame = ctk.CTkFrame(self.table_view, fg_color="transparent")
-        self.table_export_frame.pack(fill="x", pady=(0, 10))
-        
-        self.pagination_frame = ctk.CTkFrame(self.table_export_frame, fg_color="transparent")
-        self.pagination_frame.pack(side="left", padx=(0, 20))
-        
-        self.btn_prev_page = ctk.CTkButton(self.pagination_frame, text="<", width=30, height=28, command=self.prev_validator_page, fg_color=BG_SIDEBAR, hover_color=BORDER)
-        self.btn_prev_page.pack(side="left", padx=(0, 5))
-        
-        self.lbl_page = ctk.CTkLabel(self.pagination_frame, text="Стр. 1 / 1", font=ctk.CTkFont(size=12))
-        self.lbl_page.pack(side="left", padx=5)
-        
-        self.btn_next_page = ctk.CTkButton(self.pagination_frame, text=">", width=30, height=28, command=self.next_validator_page, fg_color=BG_SIDEBAR, hover_color=BORDER)
-        self.btn_next_page.pack(side="left", padx=(5, 15))
-        
+        self.table_export_frame.pack(fill="x", pady=(0, 12))
+
+        # Left zone: pagination, grouped in its own pill
+        self.pagination_frame = ctk.CTkFrame(self.table_export_frame, fg_color=BG_CARD_1, corner_radius=8)
+        self.pagination_frame.pack(side="left")
+
+        self.btn_prev_page = ctk.CTkButton(self.pagination_frame, text="‹", width=28, height=28, corner_radius=6, fg_color="transparent", hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN, command=self.prev_validator_page)
+        self.btn_prev_page.pack(side="left", padx=(4, 0), pady=4)
+
+        self.lbl_page = ctk.CTkLabel(self.pagination_frame, text="Стр. 1 / 1", text_color=TEXT_MUTED, font=ctk.CTkFont(size=12), width=64)
+        self.lbl_page.pack(side="left", padx=2)
+
+        self.btn_next_page = ctk.CTkButton(self.pagination_frame, text="›", width=28, height=28, corner_radius=6, fg_color="transparent", hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN, command=self.next_validator_page)
+        self.btn_next_page.pack(side="left", padx=(0, 4), pady=4)
+
+        # Center zone: status filter chips, grouped in their own pill
+        self.filter_frame = ctk.CTkFrame(self.table_export_frame, fg_color=BG_CARD_1, corner_radius=8)
+        self.filter_frame.pack(side="left", padx=(10, 0))
+
         self.chk_valid_var = ctk.BooleanVar(value=True)
         self.chk_invalid_var = ctk.BooleanVar(value=False)
         self.chk_spam_var = ctk.BooleanVar(value=False)
         self.chk_unknown_var = ctk.BooleanVar(value=False)
-        
-        self.chk_valid = ctk.CTkCheckBox(self.table_export_frame, text="Valid", variable=self.chk_valid_var, command=self._on_filter_change, fg_color=ACCENT_SUCCESS, hover_color="#22C55E", text_color=TEXT_MAIN, font=ctk.CTkFont(size=12))
-        self.chk_valid.pack(side="left", padx=(0, 10))
-        
-        self.chk_invalid = ctk.CTkCheckBox(self.table_export_frame, text="Invalid", variable=self.chk_invalid_var, command=self._on_filter_change, fg_color=ACCENT_ERROR, hover_color="#EF4444", text_color=TEXT_MAIN, font=ctk.CTkFont(size=12))
-        self.chk_invalid.pack(side="left", padx=(0, 10))
-        
-        self.chk_spam = ctk.CTkCheckBox(self.table_export_frame, text="Spam/Trap", variable=self.chk_spam_var, command=self._on_filter_change, fg_color=ACCENT_WARNING, hover_color="#F59E0B", text_color=TEXT_MAIN, font=ctk.CTkFont(size=12))
-        self.chk_spam.pack(side="left", padx=(0, 10))
-        
-        self.chk_unknown = ctk.CTkCheckBox(self.table_export_frame, text="Unknown", variable=self.chk_unknown_var, command=self._on_filter_change, fg_color=BORDER, hover_color="#4B5563", text_color=TEXT_MAIN, font=ctk.CTkFont(size=12))
-        self.chk_unknown.pack(side="left", padx=(0, 15))
-        
-        self.export_btn = ctk.CTkButton(self.table_export_frame, text="💾 Сохранить", command=self.export_results, width=100, height=28, fg_color=ACCENT_SUCCESS, hover_color="#22C55E", corner_radius=6)
-        self.export_btn.pack(side="left", padx=(0, 5))
-        
-        self.copy_btn = ctk.CTkButton(self.table_export_frame, text="📋 Копировать", command=self.copy_results, width=110, height=28, fg_color=ACCENT_PRIMARY, hover_color="#2563EB", corner_radius=6)
-        self.copy_btn.pack(side="left")
-        
+
+        self.chk_valid = ctk.CTkCheckBox(self.filter_frame, text="Valid", variable=self.chk_valid_var, command=self._on_filter_change, fg_color=ACCENT_SUCCESS, hover_color=ACCENT_SUCCESS_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
+        self.chk_valid.pack(side="left", padx=(12, 10), pady=8)
+
+        self.chk_invalid = ctk.CTkCheckBox(self.filter_frame, text="Invalid", variable=self.chk_invalid_var, command=self._on_filter_change, fg_color=ACCENT_ERROR, hover_color=ACCENT_ERROR_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
+        self.chk_invalid.pack(side="left", padx=(0, 10), pady=8)
+
+        self.chk_spam = ctk.CTkCheckBox(self.filter_frame, text="Spam/Trap", variable=self.chk_spam_var, command=self._on_filter_change, fg_color=ACCENT_WARNING, hover_color=ACCENT_WARNING_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
+        self.chk_spam.pack(side="left", padx=(0, 10), pady=8)
+
+        self.chk_unknown = ctk.CTkCheckBox(self.filter_frame, text="Unknown", variable=self.chk_unknown_var, command=self._on_filter_change, fg_color=TEXT_MUTED, hover_color=BORDER_STRONG, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
+        self.chk_unknown.pack(side="left", padx=(0, 12), pady=8)
+
+        # Right zone: actions, anchored to the right edge instead of trailing after the filters
+        self.actions_frame = ctk.CTkFrame(self.table_export_frame, fg_color="transparent")
+        self.actions_frame.pack(side="right")
+
+        self.copy_btn = ctk.CTkButton(self.actions_frame, text="Копировать", command=self.copy_results, width=110, height=32, corner_radius=8, fg_color="transparent", border_width=1, border_color=BORDER_STRONG, hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN)
+        self.copy_btn.pack(side="left", padx=(0, 8))
+
+        self.export_btn = ctk.CTkButton(self.actions_frame, text="Сохранить", command=self.export_results, width=110, height=32, corner_radius=8, fg_color=ACCENT_SUCCESS, hover_color=ACCENT_SUCCESS_HOVER, text_color=TEXT_ON_ACCENT)
+        self.export_btn.pack(side="left")
+
         style = ttk.Style()
         style.theme_use("default")
-        style.configure("Treeview", 
-                        background=BG_CARD_2, 
-                        foreground=TEXT_MAIN, 
-                        rowheight=28, 
-                        fieldbackground=BG_CARD_2, 
-                        borderwidth=0, 
-                        font=("Inter", 10))
-        style.configure("Treeview.Heading", 
-                        background=BG_SIDEBAR, 
-                        foreground="#FFFFFF", 
-                        font=("Inter", 10, "bold"),
-                        borderwidth=1,
+        style.configure("Treeview",
+                        background=BG_CARD_1,
+                        foreground=TEXT_MAIN,
+                        rowheight=32,
+                        fieldbackground=BG_CARD_1,
+                        borderwidth=0,
+                        relief="flat",
+                        font=("Segoe UI", 10))
+        style.configure("Treeview.Heading",
+                        background=BG_TABLE_HEADER,
+                        foreground=TEXT_MUTED,
+                        font=("Segoe UI", 10, "bold"),
+                        borderwidth=0,
                         relief="flat")
-        style.map("Treeview.Heading", background=[('active', BORDER)])
-        style.map('Treeview', background=[('selected', ACCENT_PRIMARY)])
+        style.map("Treeview.Heading", background=[('active', BG_TABLE_HEADER)], foreground=[('active', TEXT_MAIN)])
+        style.map('Treeview', background=[('selected', BG_SELECTED)], foreground=[('selected', TEXT_MAIN)])
 
         self.table_frame = ctk.CTkFrame(self.table_view, fg_color="transparent")
         self.table_frame.pack(fill="both", expand=True)
@@ -821,7 +831,12 @@ class ValidatorApp(ctk.CTk):
         self.tree.column("country", width=100, minwidth=60, stretch=True, anchor="w")
         self.tree.grid(row=0, column=0, sticky="nsew")
 
-        self.scrollbar = ctk.CTkScrollbar(self.table_frame, orientation="vertical", command=self.tree.yview, fg_color="transparent", button_color=ACCENT_PRIMARY, button_hover_color="#60A5FA")
+        self.tree.tag_configure("valid", foreground=ACCENT_SUCCESS)
+        self.tree.tag_configure("trap", foreground=ACCENT_WARNING)
+        self.tree.tag_configure("unknown", foreground=TEXT_MUTED)
+        self.tree.tag_configure("dead", foreground=ACCENT_ERROR)
+
+        self.scrollbar = ctk.CTkScrollbar(self.table_frame, orientation="vertical", command=self.tree.yview, fg_color="transparent", button_color=ACCENT_PRIMARY, button_hover_color=ACCENT_PRIMARY_HOVER)
         self.tree.configure(yscrollcommand=self.scrollbar.set)
         self.scrollbar.grid(row=0, column=1, sticky="ns")
 
@@ -862,7 +877,7 @@ class ValidatorApp(ctk.CTk):
         self.parser_tabs_frame = ctk.CTkFrame(self.parser_bottom_container, fg_color="transparent")
         self.parser_tabs_frame.pack(fill="x", pady=(15, 10))
         
-        self.parser_tab_seg = ctk.CTkSegmentedButton(self.parser_tabs_frame, values=["Терминал", "Собранные Email"], command=self._switch_parser_tab, fg_color=BG_SIDEBAR, selected_color=ACCENT_PRIMARY, selected_hover_color="#60A5FA", unselected_color=BG_SIDEBAR, unselected_hover_color=BG_CARD_2, text_color=TEXT_MAIN)
+        self.parser_tab_seg = ctk.CTkSegmentedButton(self.parser_tabs_frame, values=["Терминал", "Собранные Email"], command=self._switch_parser_tab, fg_color=BG_SIDEBAR, selected_color=ACCENT_PRIMARY, selected_hover_color=ACCENT_PRIMARY_HOVER, unselected_color=BG_SIDEBAR, unselected_hover_color=BG_CARD_2, text_color=TEXT_MAIN)
         self.parser_tab_seg.set("Терминал")
         self.parser_tab_seg.pack(anchor="center")
         
@@ -874,7 +889,7 @@ class ValidatorApp(ctk.CTk):
         self.parser_terminal_header = ctk.CTkFrame(self.parser_terminal_view, fg_color="transparent")
         self.parser_terminal_header.pack(fill="x", pady=(0, 10))
         
-        self.parser_copy_logs_btn = ctk.CTkButton(self.parser_terminal_header, text="📋 Копировать", width=120, height=28, corner_radius=6, font=ctk.CTkFont(size=12), command=self.copy_parser_logs, fg_color=ACCENT_PRIMARY, hover_color="#2563EB", text_color="#FFFFFF")
+        self.parser_copy_logs_btn = ctk.CTkButton(self.parser_terminal_header, text="Копировать", width=120, height=28, corner_radius=8, font=ctk.CTkFont(size=12), command=self.copy_parser_logs, fg_color="transparent", border_width=1, border_color=BORDER_STRONG, hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN)
         self.parser_copy_logs_btn.pack(side="right")
         
         self.parser_terminal_box = ctk.CTkTextbox(self.parser_terminal_view, fg_color=BG_CARD_2, text_color=TEXT_MAIN, font=ctk.CTkFont(family="Consolas", size=12), border_width=0, corner_radius=8)
@@ -882,13 +897,16 @@ class ValidatorApp(ctk.CTk):
         self.parser_terminal_box.configure(state="disabled")
 
         self.parser_table_export_frame = ctk.CTkFrame(self.parser_table_view, fg_color="transparent")
-        self.parser_table_export_frame.pack(fill="x", pady=(0, 10))
-        
-        self.parser_export_btn = ctk.CTkButton(self.parser_table_export_frame, text="💾 Сохранить", command=self.export_parser_results, width=100, height=28, fg_color=ACCENT_SUCCESS, hover_color="#22C55E", corner_radius=6)
-        self.parser_export_btn.pack(side="left", padx=(0, 5))
-        
-        self.parser_copy_btn = ctk.CTkButton(self.parser_table_export_frame, text="📋 Копировать", command=self.copy_parser_results, width=110, height=28, fg_color=ACCENT_PRIMARY, hover_color="#2563EB", corner_radius=6)
-        self.parser_copy_btn.pack(side="left")
+        self.parser_table_export_frame.pack(fill="x", pady=(0, 12))
+
+        self.parser_actions_frame = ctk.CTkFrame(self.parser_table_export_frame, fg_color="transparent")
+        self.parser_actions_frame.pack(side="right")
+
+        self.parser_copy_btn = ctk.CTkButton(self.parser_actions_frame, text="Копировать", command=self.copy_parser_results, width=110, height=32, corner_radius=8, fg_color="transparent", border_width=1, border_color=BORDER_STRONG, hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN)
+        self.parser_copy_btn.pack(side="left", padx=(0, 8))
+
+        self.parser_export_btn = ctk.CTkButton(self.parser_actions_frame, text="Сохранить", command=self.export_parser_results, width=110, height=32, corner_radius=8, fg_color=ACCENT_SUCCESS, hover_color=ACCENT_SUCCESS_HOVER, text_color=TEXT_ON_ACCENT)
+        self.parser_export_btn.pack(side="left")
 
         self.parser_table_frame = ctk.CTkFrame(self.parser_table_view, fg_color="transparent")
         self.parser_table_frame.pack(fill="both", expand=True)
@@ -904,7 +922,7 @@ class ValidatorApp(ctk.CTk):
         self.parser_tree.column("dork", width=400, minwidth=250, stretch=True, anchor="w")
         self.parser_tree.grid(row=0, column=0, sticky="nsew")
 
-        self.parser_scrollbar = ctk.CTkScrollbar(self.parser_table_frame, orientation="vertical", command=self.parser_tree.yview, fg_color="transparent", button_color=ACCENT_PRIMARY, button_hover_color="#60A5FA")
+        self.parser_scrollbar = ctk.CTkScrollbar(self.parser_table_frame, orientation="vertical", command=self.parser_tree.yview, fg_color="transparent", button_color=ACCENT_PRIMARY, button_hover_color=ACCENT_PRIMARY_HOVER)
         self.parser_tree.configure(yscrollcommand=self.parser_scrollbar.set)
         self.parser_scrollbar.grid(row=0, column=1, sticky="ns")
 
@@ -1356,7 +1374,8 @@ class ValidatorApp(ctk.CTk):
             elif status == "Unknown": tag = "unknown"
             else: tag = "dead"
             
-            self.tree.insert("", "end", values=(email, status, reason, mx, data.get("name", ""), data.get("gender", ""), data.get("country", "")), tags=(tag,))
+            status_display = f"● {status}"
+            self.tree.insert("", "end", values=(email, status_display, reason, mx, data.get("name", ""), data.get("gender", ""), data.get("country", "")), tags=(tag,))
 
     def start_parsing(self):
         if hasattr(self, 'parser_pipeline') and self.parser_pipeline and self.parser_pipeline.is_alive():
