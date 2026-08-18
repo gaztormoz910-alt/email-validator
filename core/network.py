@@ -356,6 +356,47 @@ class NetworkValidator:
 
         return result
 
+    def _is_server_outdated(self, banner_text: str) -> bool:
+        """
+        Анализирует SMTP-баннер и определяет, устарел ли почтовый сервер.
+        Устаревшие серверы (Postfix 2.x, Exim 4.6x, Sendmail 8.13 и т.д.)
+        часто означают заброшенную инфраструктуру → меньше шансов на живого пользователя.
+        """
+        if not banner_text:
+            return False
+        b = banner_text.lower()
+        
+        import re
+        
+        # Postfix 2.x (вышел ~2005-2012, давно не поддерживается)
+        if re.search(r'postfix\s*2\.\d', b):
+            return True
+        # Postfix 3.0-3.2 (2015-2017, устарели)
+        if re.search(r'postfix\s*3\.[012]\b', b):
+            return True
+        
+        # Exim 4.6x-4.7x (2006-2012)
+        if re.search(r'exim\s*4\.[67]\d', b):
+            return True
+        
+        # Sendmail 8.1x (2005-2010)
+        if re.search(r'sendmail\s*8\.1[0-4]', b):
+            return True
+        
+        # Courier MTA (очень старый)
+        if 'courier' in b and re.search(r'courier\s*0\.\d', b):
+            return True
+        
+        # hMailServer (популярный на Windows, часто необновляемый)
+        if re.search(r'hmailserver\s*[0-4]\.', b):
+            return True
+        
+        # Qmail (не обновляется с 2007 года)
+        if 'qmail' in b:
+            return True
+            
+        return False
+
     def _make_smtp_connection(self, proxy=None):
         """Создает SMTP соединение — либо через прокси, либо напрямую."""
         if proxy:
@@ -384,23 +425,26 @@ class NetworkValidator:
 
         # 550 — самый информативный код, парсим текст детально
         if code == 550:
-            # Однозначно мёртв
+            # Сначала проверяем: наш IP/домен заблокирован? (НЕ значит что почта мёртва!)
+            if any(x in msg for x in ["spam", "policy", "blocked", "denied",
+                                       "blacklist", "rbl", "dnsbl", "spamhaus",
+                                       "barracuda", "listed", "reputation", "client host"]):
+                return {"status": "unknown", "reason": "550 Our IP Blocked (Email May Exist)"}
+            # Однозначно мёртв — ящик не существует
             if any(x in msg for x in ["does not exist", "not exist", "no such user",
                                        "invalid address", "user unknown", "unknown user",
                                        "bad destination", "no mailbox", "mailbox not found",
                                        "recipient rejected", "address rejected",
                                        "undeliverable", "unknown recipient",
-                                       "inactive", "no account", "not available"]):
+                                       "no account", "not available"]):
                 return {"status": "invalid", "reason": "550 User Does Not Exist"}
             # Аккаунт заморожен — физически есть, но недоступен
             if any(x in msg for x in ["disabled", "deactivated", "suspended", "frozen",
                                        "locked", "closed", "inactive account"]):
                 return {"status": "risky", "reason": "550 Account Disabled/Suspended"}
-            # Наш IP или домен заблокирован — почта может быть живой!
-            if any(x in msg for x in ["spam", "policy", "blocked", "denied", "rejected",
-                                       "blacklist", "rbl", "dnsbl", "spamhaus",
-                                       "barracuda", "listed", "reputation", "client host"]):
-                return {"status": "unknown", "reason": "550 Our IP Blocked (Email May Exist)"}
+            # Мягкий reject без объяснений
+            if "rejected" in msg:
+                return {"status": "invalid", "reason": "550 Rejected"}
             return {"status": "invalid", "reason": "550 Rejected"}
 
         if code == 551:
@@ -471,7 +515,10 @@ class NetworkValidator:
             time.sleep(random.uniform(0.1, 0.4))
 
             server = self._make_smtp_connection(proxy)
-            server.connect(mx_record, 25)
+            banner_code, banner_msg = server.connect(mx_record, 25)
+            
+            # Сохраняем SMTP-баннер для анализа версии сервера
+            banner_text = banner_msg.decode('utf-8', 'ignore') if isinstance(banner_msg, bytes) else str(banner_msg)
 
             # Используем правдоподобное HELO имя вместо имени ПК
             server.helo(self.helo_name)
@@ -487,6 +534,10 @@ class NetworkValidator:
             code, message = server.rcpt(email)
 
             result = self._parse_smtp_response(code, message, email, domain)
+            
+            # Добавляем информацию о баннере для Engagement Score
+            result["smtp_banner"] = banner_text
+            result["server_outdated"] = self._is_server_outdated(banner_text)
 
             # Adaptive Rate Limiting (п.5): если 421 — записываем ошибку для этого MX
             if code == 421:
