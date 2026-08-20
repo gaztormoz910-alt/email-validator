@@ -142,6 +142,16 @@ class ValidationPipeline:
         except Exception:
             self.filter = None
         
+        # Высокий таймаут вместе с повторами через прокси даёт огромное время на
+        # один адрес: до 10 попыток * таймаут. Ползунок не трогаем (это осознанная
+        # настройка), но предупреждаем, иначе прогон выглядит как зависание.
+        if timeout > 30:
+            worst = timeout * 10
+            self.callbacks['on_log'](
+                f"[DEAD] Таймаут {timeout}с очень большой. Через прокси один адрес "
+                f"может проверяться до {worst // 60} мин ({worst}с) — прогон будет "
+                "крайне медленным. Обычно хватает 10-20с.", "dead")
+
         if proxies:
             from core.network import filter_live_proxies
             self.callbacks['on_log'](f"[INFO] Тестирование {len(proxies)} прокси-серверов (потоков: {threads}, таймаут: {timeout}с)...", "info")
@@ -188,9 +198,12 @@ class ValidationPipeline:
         self.is_paused = False
         
         from core.streamer import StreamLoader
+        # Стартовая оценка по сырым строкам. Реальное число уникальных адресов
+        # известно только фидеру (дедуп ленивый), поэтому ниже он уточнит total,
+        # иначе прогресс-бар застревает и выглядит как зависание.
         total_emails = StreamLoader(email_sources).count_total_lines()
         self.callbacks['on_log'](f"[INFO] Запуск обработки {total_emails} сырых email...", "info")
-        
+
         if 'on_unique_count' in self.callbacks:
             self.callbacks['on_unique_count'](total_emails) # Approximate since dedup is lazy
             
@@ -441,9 +454,10 @@ class ValidationPipeline:
         task_queue = queue.Queue(maxsize=safe_threads * 2)
         seen_emails = set()
         duplicates_skipped = 0
+        queued_count = 0
 
         def feeder_thread():
-            nonlocal duplicates_skipped
+            nonlocal duplicates_skipped, queued_count
             from core.streamer import StreamLoader
             for email, data in StreamLoader(email_sources).stream_emails():
                 if not self.is_running:
@@ -464,15 +478,25 @@ class ValidationPipeline:
                     continue
 
                 seen_emails.add(dedup_key)
+                queued_count += 1
                 task_queue.put((email, data))
                 
             for _ in range(safe_threads):
                 task_queue.put(None)
 
+            # Уточняем знаменатель прогресса: в очередь попали только уникальные
+            # адреса, а стартовая оценка считалась по сырым строкам. Без этого
+            # бар застревает (например на 5/17) и выглядит как зависание.
+            nonlocal total_emails
+            total_emails = queued_count
+            if 'on_unique_count' in self.callbacks:
+                self.callbacks['on_unique_count'](queued_count)
+
             if duplicates_skipped:
                 self.callbacks['on_log'](
                     f"[INFO] Схлопнуто дублей: {duplicates_skipped} "
-                    "(один ящик записан по-разному — двойная отправка предотвращена).", "info")
+                    "(один ящик записан по-разному — двойная отправка предотвращена). "
+                    f"К проверке: {queued_count}.", "info")
 
         t_feeder = threading.Thread(target=feeder_thread, daemon=True)
         t_feeder.start()
