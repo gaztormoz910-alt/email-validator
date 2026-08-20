@@ -10,16 +10,19 @@ class SpamFilter:
     def _load_blacklists(self):
         """Загружает все скачанные .txt файлы в массив для мгновенного поиска."""
         if not os.path.exists(self.data_dir):
-            return
-
-        for filename in os.listdir(self.data_dir):
-            if filename.endswith(".txt"):
-                filepath = os.path.join(self.data_dir, filename)
-                with open(filepath, "r", encoding="utf-8") as f:
-                    for line in f:
-                        domain = line.strip().lower()
-                        if domain and not domain.startswith("#"):
-                            self.blacklist_domains.add(domain)
+            pass
+        else:
+            for filename in os.listdir(self.data_dir):
+                if filename.endswith(".txt"):
+                    filepath = os.path.join(self.data_dir, filename)
+                    try:
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            for line in f:
+                                domain = line.strip().lower()
+                                if domain and not domain.startswith("#"):
+                                    self.blacklist_domains.add(domain)
+                    except Exception:
+                        pass
                             
         # Жестко заданный список популярных одноразовых доменов (на случай, если их нет на GitHub)
         hardcoded_disposables = [
@@ -29,8 +32,10 @@ class SpamFilter:
         ]
         for d in hardcoded_disposables:
             self.blacklist_domains.add(d)
-                            
-        print(f"[Filter] Успешно загружено {len(self.blacklist_domains)} мусорных доменов.")
+
+    def get_count(self):
+        """Количество доменов в чёрном списке."""
+        return len(self.blacklist_domains)
 
     def is_spam_or_disposable(self, email: str) -> bool:
         """Возвращает True, если домен находится в черном списке."""

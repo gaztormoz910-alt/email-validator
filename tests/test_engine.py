@@ -34,11 +34,10 @@ class TestProxyManager(unittest.TestCase):
 
     def test_proxy_dead_marking(self):
         proxy1 = self.manager.get_proxy()
-        # Mark it dead 3 times
-        self.manager.mark_dead(proxy1)
-        self.manager.mark_dead(proxy1)
-        self.manager.mark_dead(proxy1)
-        
+        # Proxy only dies after 10 fails (bumped from 3 for resilience against transient errors)
+        for _ in range(10):
+            self.manager.mark_fail(proxy1)
+
         # Now there should be only 2 live proxies
         self.assertEqual(self.manager.get_live_count(), 2)
         
