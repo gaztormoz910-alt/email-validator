@@ -7,6 +7,7 @@ import string
 import socks
 import threading
 import re
+from concurrent.futures import ThreadPoolExecutor
 import time
 
 # Список доменов, известных как трудные для валидации или требующие специальной обработки
@@ -36,14 +37,18 @@ LEGIT_HELO_NAMES = [
     "mx01.emailgateway.net",
 ]
 
+# Сколько сбоев ПОДРЯД должен дать прокси, чтобы вылететь из ротации навсегда.
+# Один-два сбоя бывают случайными (таймаут, занятый MX), три подряд — прокси мёртв.
+PROXY_MAX_CONSECUTIVE_FAILS = 3
+
 # Пул правдоподобных адресов для ротации MAIL FROM (п.3.2)
 MAIL_FROM_POOL = [
-    "check@example.com",
-    "verify@mailcheck.net",
-    "postmaster@validation-service.com",
-    "noreply@mx-verify.org",
-    "test@mail-validator.net",
-    "bounce@delivery-check.com",
+    'check@example.com',       # RFC 2606 — зарезервирован, нет SPF
+    'verify@example.net',      # RFC 2606 — зарезервирован, нет SPF
+    'test@example.org',        # RFC 2606 — зарезервирован, нет SPF
+    'noreply@mail.com',        # Минимальный SPF (~all)
+    'check@email.com',         # Минимальный SPF (~all)
+    'verify@usa.com',          # Минимальный SPF (~all)
 ]
 
 # RFC 5322 — строгая проверка синтаксиса email (п.1.3)
@@ -128,6 +133,39 @@ def check_single_proxy(proxy, timeout):
         return None
 
 
+def survey_fcrdns_proxies(proxies, sample_size=30, timeout=4):
+    """Оценивает, сколько прокси имеют обратный DNS (FCrDNS).
+
+    Без FCrDNS прокси не пройдёт Yahoo/AOL — они отшивают такие IP на MAIL FROM.
+    Проверяем выборку, а не весь список: на тысячах прокси это заняло бы вечность.
+
+    Возвращает (сколько_годных, сколько_проверено).
+    """
+    if not proxies:
+        return (0, 0)
+
+    sample = proxies[:sample_size]
+    validator = NetworkValidator(timeout=timeout)
+    capable = 0
+    checked = 0
+
+    def check_one(p):
+        parsed = _parse_proxy(p)
+        if not parsed:
+            return None
+        return validator.check_fcrdns(parsed[0])
+
+    with ThreadPoolExecutor(max_workers=min(20, len(sample))) as pool:
+        for res in pool.map(check_one, sample):
+            if res is None:
+                continue
+            checked += 1
+            if res:
+                capable += 1
+
+    return (capable, checked)
+
+
 def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None, log_callback=None):
     """Тестирует список прокси и возвращает только рабочие (у которых открыт 25 порт)."""
     from core.async_proxy import run_async_checker
@@ -183,8 +221,17 @@ class NetworkValidator:
         self.catchall_lock = threading.Lock()
 
         # Кэш DNS-здоровья (SPF/DMARC/DKIM) — п.2.2+
-        self.dns_health_cache = {}
-        self.dns_health_lock = threading.Lock()
+        self._dns_health_cache = {}
+        self._dns_health_lock = threading.Lock()
+
+        # Дополнительные кэши (п.1.2, п.1.3)
+        self._dnsbl_cache = {}
+        self._dnsbl_lock = threading.Lock()
+        self._ptr_cache = {}
+        self._ptr_lock = threading.Lock()
+        # FCrDNS исходящих IP (наших/прокси) — от него зависит доступ к Yahoo/AOL
+        self._fcrdns_cache = {}
+        self._fcrdns_lock = threading.Lock()
 
         # Rate Limiting: семафоры для ограничения одновременных соединений к одному MX (п.3.3)
         self._mx_semaphores = {}
@@ -198,9 +245,14 @@ class NetworkValidator:
         # Proxy Health Scoring (п.8): score каждого прокси
         self._proxy_scores = {}
         self._proxy_score_lock = threading.Lock()
+        # Прокси, севший MAX_CONSECUTIVE_FAILS раз ПОДРЯД, выбывает из ротации навсегда.
+        # Иначе мёртвый прокси бесконечно тормозит прогон (10 повторов × таймаут на адрес).
+        self._proxy_consecutive_fails = {}
+        self._proxy_banned = set()
         if self.proxies:
             for p in self.proxies:
                 self._proxy_scores[p] = 0  # Начальный score = 0
+                self._proxy_consecutive_fails[p] = 0
 
         # Случайный HELO-хост для этой сессии (выглядит как настоящий почтовый сервер)
         self.helo_name = random.choice(LEGIT_HELO_NAMES)
@@ -228,34 +280,136 @@ class NetworkValidator:
                 self._mx_semaphores[mx_key] = threading.Semaphore(1)  # Снижаем до 1
 
     def _pick_best_proxy(self):
-        """Выбирает прокси с наивысшим health score (п.8)."""
+        """Выбирает живой прокси с наивысшим health score (п.8).
+
+        Возвращает None, если прокси не заданы вообще ИЛИ все забанены.
+        Вызывающий код обязан различать эти случаи через has_proxies_configured().
+        """
         if not self.proxies:
             return None
         with self._proxy_score_lock:
-            # Отфильтровываем мёртвые прокси (score < -5)
-            alive = [p for p in self.proxies if self._proxy_scores.get(p, 0) > -5]
+            # Забаненные прокси не воскрешаем — они выбыли навсегда
+            alive = [p for p in self.proxies if p not in self._proxy_banned]
             if not alive:
-                # Все прокси мёртвые — берём случайный из оригинального списка
-                return random.choice(self.proxies)
+                return None
             # Сортируем по score (лучшие сверху) и берём из топ-5 случайный
             alive_sorted = sorted(alive, key=lambda p: self._proxy_scores.get(p, 0), reverse=True)
             top = alive_sorted[:max(5, len(alive_sorted) // 3)]
             return random.choice(top)
 
+    def has_proxies_configured(self):
+        """True, если пользователь загрузил прокси (независимо от того, живы ли они)."""
+        return bool(self.proxies)
+
+    def get_live_proxy_count(self):
+        with self._proxy_score_lock:
+            return len([p for p in self.proxies if p not in self._proxy_banned])
+
+    def all_proxies_dead(self):
+        return bool(self.proxies) and self.get_live_proxy_count() == 0
+
     def _update_proxy_score(self, proxy, success: bool):
-        """Обновляет health score прокси (п.8)."""
+        """Обновляет health score прокси и банит его после N сбоев подряд (п.8)."""
         if not proxy:
             return
         with self._proxy_score_lock:
             if proxy not in self._proxy_scores:
                 self._proxy_scores[proxy] = 0
+                self._proxy_consecutive_fails[proxy] = 0
             if success:
                 self._proxy_scores[proxy] += 1
+                self._proxy_consecutive_fails[proxy] = 0  # Ожил — счётчик подряд сбрасываем
             else:
                 self._proxy_scores[proxy] -= 3  # Штраф за неудачу в 3 раза больше
+                self._proxy_consecutive_fails[proxy] = self._proxy_consecutive_fails.get(proxy, 0) + 1
+                if self._proxy_consecutive_fails[proxy] >= PROXY_MAX_CONSECUTIVE_FAILS:
+                    self._proxy_banned.add(proxy)
+
+    def check_dnsbl(self, mx_host):
+        with self._dnsbl_lock:
+            if mx_host in self._dnsbl_cache:
+                return self._dnsbl_cache[mx_host]
+        try:
+            ip_answers = self.resolver.resolve(mx_host, 'A')
+            ip = str(ip_answers[0])
+            reversed_ip = '.'.join(reversed(ip.split('.')))
+            self.resolver.resolve(f"{reversed_ip}.zen.spamhaus.org", 'A')
+            result = True
+        except Exception:
+            result = False
+        with self._dnsbl_lock:
+            self._dnsbl_cache[mx_host] = result
+        return result
+
+    def check_fcrdns(self, ip):
+        """Forward-Confirmed reverse DNS для IP-адреса.
+
+        Yahoo и AOL отшивают на MAIL FROM ошибкой 5.7.25 любой IP, у которого:
+          - нет PTR-записи, ЛИБО
+          - имя из PTR не резолвится обратно на этот же IP.
+        Без FCrDNS проверить почту на Yahoo/AOL физически нельзя — нас не пускают
+        до этапа RCPT. С FCrDNS всё работает как у остальных провайдеров.
+
+        True  = FCrDNS в порядке, Yahoo/AOL пустят
+        False = FCrDNS нет, Yahoo/AOL отошьют
+        None  = проверить не удалось
+        """
+        if not ip:
+            return None
+        with self._fcrdns_lock:
+            if ip in self._fcrdns_cache:
+                return self._fcrdns_cache[ip]
+
+        result = None
+        try:
+            import dns.reversename
+            rev_name = dns.reversename.from_address(ip)
+            ptr_answers = self.resolver.resolve(rev_name, 'PTR')
+            hostname = str(ptr_answers[0]).rstrip('.')
+
+            # Ключевой шаг: имя из PTR должно резолвиться ОБРАТНО на тот же IP
+            forward = self.resolver.resolve(hostname, 'A')
+            result = any(str(a) == ip for a in forward)
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            result = False  # PTR нет вовсе, либо имя никуда не резолвится
+        except Exception:
+            result = None   # DNS не ответил — вывода сделать нельзя
+
+        with self._fcrdns_lock:
+            self._fcrdns_cache[ip] = result
+        return result
+
+    def check_ptr(self, mx_host):
+        """True = PTR есть, False = PTR точно нет, None = проверить не удалось.
+
+        None важен: раньше любой сбой DNS выглядел как "PTR отсутствует"
+        и почта незаслуженно получала штраф в скоринге.
+        """
+        with self._ptr_lock:
+            if mx_host in self._ptr_cache:
+                return self._ptr_cache[mx_host]
+        try:
+            ip_answers = self.resolver.resolve(mx_host, 'A')
+            ip = str(ip_answers[0])
+            import dns.reversename
+            rev_name = dns.reversename.from_address(ip)
+            self.resolver.resolve(rev_name, 'PTR')
+            result = True
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            result = False
+        except Exception:
+            result = None
+        with self._ptr_lock:
+            self._ptr_cache[mx_host] = result
+        return result
 
     def get_mx_records(self, domain: str) -> list:
         """Ищет MX-записи для домена. Если MX нет — фоллбэк на A-запись (RFC 5321, п.1.4)."""
+        try:
+            domain = domain.encode('idna').decode('ascii')
+        except Exception:
+            return []
+
         with self.mx_lock:
             if domain in self.mx_cache:
                 return self.mx_cache[domain]
@@ -263,6 +417,13 @@ class NetworkValidator:
         try:
             answers = self.resolver.resolve(domain, 'MX')
             records = sorted(answers, key=lambda x: x.preference)
+            
+            # 1.1 Null MX Check (RFC 7505)
+            if len(records) == 1 and records[0].preference == 0 and str(records[0].exchange) in ['.', '']:
+                with self.mx_lock:
+                    self.mx_cache[domain] = []
+                return []
+                
             result = [str(record.exchange).rstrip('.') for record in records]
             if result:
                 with self.mx_lock:
@@ -303,9 +464,9 @@ class NetworkValidator:
         Возвращает {'has_spf': bool, 'has_dmarc': bool, 'has_dkim': bool, 'score': int}
         score: 0 = ничего, 1 = один из трёх, 2 = два из трёх, 3 = все три
         """
-        with self.dns_health_lock:
-            if domain in self.dns_health_cache:
-                return self.dns_health_cache[domain]
+        with self._dns_health_lock:
+            if domain in self._dns_health_cache:
+                return self._dns_health_cache[domain]
 
         has_spf = False
         has_dmarc = False
@@ -351,8 +512,8 @@ class NetworkValidator:
         score = int(has_spf) + int(has_dmarc) + int(has_dkim)
         result = {'has_spf': has_spf, 'has_dmarc': has_dmarc, 'has_dkim': has_dkim, 'score': score}
 
-        with self.dns_health_lock:
-            self.dns_health_cache[domain] = result
+        with self._dns_health_lock:
+            self._dns_health_cache[domain] = result
 
         return result
 
@@ -416,12 +577,18 @@ class NetworkValidator:
         """
         msg = message.decode('utf-8', 'ignore').lower() if isinstance(message, bytes) else str(message).lower()
 
+        enhanced_match = re.search(r'(\d\.\d+\.\d+)\s', msg)
+        enhanced_prefix = f"{enhanced_match.group(1)} " if enhanced_match else ""
+
+        def make_result(st, reason):
+            return {"status": st, "reason": enhanced_prefix + reason}
+
         if code == 250:
-            return {"status": "valid", "reason": "250 OK"}
+            return make_result("valid", "250 OK")
 
         # Ящик существует, но переполнен — всё равно валидный!
         if code == 552 or "over quota" in msg or "storage" in msg or "mailbox full" in msg:
-            return {"status": "valid", "reason": "250 OK (Full Inbox)"}
+            return make_result("valid", "250 OK (Full Inbox)")
 
         # 550 — самый информативный код, парсим текст детально
         if code == 550:
@@ -429,77 +596,102 @@ class NetworkValidator:
             if any(x in msg for x in ["spam", "policy", "blocked", "denied",
                                        "blacklist", "rbl", "dnsbl", "spamhaus",
                                        "barracuda", "listed", "reputation", "client host"]):
-                return {"status": "unknown", "reason": "550 Our IP Blocked (Email May Exist)"}
+                return make_result("unknown", "550 Our IP Blocked (Email May Exist)")
+            # Отвергнут ОТПРАВИТЕЛЬ (наш MAIL FROM / прокси), а не получатель.
+            # О существовании ящика это не говорит ничего.
+            if any(x in msg for x in ["sender", "relay", "relaying", "not permitted",
+                                       "unable to relay", "sender verify", "spf",
+                                       "dmarc", "dkim", "helo", "ehlo", "authentication",
+                                       "not authorized", "access denied"]):
+                return make_result("unknown", "550 Sender/Relay Rejected (Email May Exist)")
             # Однозначно мёртв — ящик не существует
             if any(x in msg for x in ["does not exist", "not exist", "no such user",
                                        "invalid address", "user unknown", "unknown user",
                                        "bad destination", "no mailbox", "mailbox not found",
                                        "recipient rejected", "address rejected",
                                        "undeliverable", "unknown recipient",
-                                       "no account", "not available"]):
-                return {"status": "invalid", "reason": "550 User Does Not Exist"}
+                                       "no account", "mailbox unavailable",
+                                       "mailbox not available", "no such recipient",
+                                       "invalid recipient", "invalid mailbox",
+                                       "user not found", "account has been disabled or discontinued"]):
+                return make_result("invalid", "550 User Does Not Exist")
             # Аккаунт заморожен — физически есть, но недоступен
             if any(x in msg for x in ["disabled", "deactivated", "suspended", "frozen",
                                        "locked", "closed", "inactive account"]):
-                return {"status": "risky", "reason": "550 Account Disabled/Suspended"}
-            # Мягкий reject без объяснений
-            if "rejected" in msg:
-                return {"status": "invalid", "reason": "550 Rejected"}
-            return {"status": "invalid", "reason": "550 Rejected"}
+                return make_result("risky", "550 Account Disabled/Suspended")
+            # Явно про получателя, но без узнаваемой формулировки — считаем мёртвым
+            if any(x in msg for x in ["recipient", "mailbox", "user", "address"]):
+                return make_result("invalid", "550 Recipient Rejected")
+            # Голый "550 Rejected" без объяснений — НЕ доказательство смерти ящика.
+            # Через прокси это чаще всего отказ по IP/отправителю, поэтому не хороним лид.
+            return make_result("risky", "550 Rejected (Ambiguous)")
 
         if code == 551:
-            return {"status": "invalid", "reason": "551 User Not Local"}
+            return make_result("invalid", "551 User Not Local")
 
         if code == 553:
-            return {"status": "invalid", "reason": "553 Bad Address Format"}
+            return make_result("invalid", "553 Bad Address Format")
 
         if code == 554:
             if any(x in msg for x in ["spam", "blacklist", "blocked", "rbl", "dnsbl",
                                        "reputation", "not allowed"]):
                 # Наш IP заблокирован — НЕ значит что почта мертва
-                return {"status": "unknown", "reason": "554 Our IP Blacklisted (Email May Exist)"}
-            return {"status": "invalid", "reason": "554 Transaction Failed"}
+                return make_result("unknown", "554 Our IP Blacklisted (Email May Exist)")
+            return make_result("unknown", "554 Transaction Failed")
 
         # Временные ошибки (Greylisting / Server Busy) — email МОЖЕТ быть валидным
         if code == 450:
             if "grey" in msg or "greylist" in msg:
-                return {"status": "greylisted", "reason": "450 Greylisted (Retry Later)"}
+                return make_result("greylisted", "450 Greylisted (Retry Later)")
             if "try again" in msg or "later" in msg or "busy" in msg or "temporarily" in msg:
-                return {"status": "greylisted", "reason": "450 Greylisted (Retry Later)"}
+                return make_result("greylisted", "450 Greylisted (Retry Later)")
             if "rate" in msg or "too many" in msg or "throttl" in msg:
-                return {"status": "greylisted", "reason": "450 Rate Limited (Retry Later)"}
-            return {"status": "unknown", "reason": "450 Temp Unavailable"}
+                return make_result("unknown", "450 Rate Limited (Retry Later)")
+            return make_result("unknown", "450 Temp Unavailable")
 
         if code == 451:
             if "grey" in msg or "greylist" in msg or "try again" in msg:
-                return {"status": "greylisted", "reason": "451 Greylisted (Retry Later)"}
-            return {"status": "greylisted", "reason": "451 Server Error"}
+                return make_result("greylisted", "451 Greylisted (Retry Later)")
+            return make_result("greylisted", "451 Server Error")
 
         if code == 452:
             if "full" in msg or "quota" in msg or "over" in msg:
                 # Ящик существует, просто сервер занят!
-                return {"status": "valid", "reason": "452 OK (Mailbox Full)"}
+                return make_result("valid", "452 OK (Mailbox Full)")
             if "too many" in msg or "recipients" in msg:
-                return {"status": "greylisted", "reason": "452 Too Many Recipients"}
-            return {"status": "greylisted", "reason": "452 Temp Error"}
+                return make_result("unknown", "452 Too Many Recipients")
+            return make_result("unknown", "452 Temp Error")
 
         # 421 — сервер перегружен или нас выкидывает (adaptive rate limiting)
         if code == 421:
-            return {"status": "unknown", "reason": "421 Service Busy (Rate Limit)"}
+            return make_result("unknown", "421 Service Busy (Rate Limit)")
+
+        # Протокольные/серверные 5xx — это НЕ приговор ящику.
+        # 500-504: сервер не понял нашу команду. 521: сервер вообще не принимает почту.
+        # 530/535: требуется/провалена авторизация. 571: доставка не разрешена (блок по IP).
+        # Ни один из них не означает "получателя не существует".
+        if code in (500, 501, 502, 503, 504, 521, 530, 535, 571):
+            return make_result("unknown", f"{code} Server/Auth Error (Email May Exist)")
 
         if code >= 500 and code < 600:
-            return {"status": "invalid", "reason": f"{code} Permanent Error"}
+            # Неизвестный 5xx: постоянная ошибка, но без доказательства отсутствия ящика.
+            return make_result("risky", f"{code} Permanent Error (Unverified)")
 
         if code >= 400 and code < 500:
-            return {"status": "unknown", "reason": f"{code} Temp Error"}
+            return make_result("unknown", f"{code} Temp Error")
 
-        return {"status": "unknown", "reason": f"{code} Unknown Response"}
+        return make_result("unknown", f"{code} Unknown Response")
 
     def _do_single_ping(self, email, mx_record, proxy=None, from_email=None):
         """
         Делает один SMTP-пинг к серверу с Rate Limiting + adaptive (п.3.3+п.5).
         Возвращает {'status': ..., 'reason': ...}
         """
+        # ЗАЩИТА ОТ УТЕЧКИ IP: если пользователь загрузил прокси, но все они выбыли,
+        # НЕЛЬЗЯ молча ходить напрямую — это раскроет реальный IP. Честно сообщаем.
+        if proxy is None and self.has_proxies_configured():
+            return {"status": "unknown", "reason": "All Proxies Dead (прямое соединение запрещено)"}
+
         # Ротация MAIL FROM (п.3.2)
         from_addr = from_email or random.choice(MAIL_FROM_POOL)
         domain = email.split("@")[1].lower() if "@" in email else ""
@@ -520,17 +712,51 @@ class NetworkValidator:
             # Сохраняем SMTP-баннер для анализа версии сервера
             banner_text = banner_msg.decode('utf-8', 'ignore') if isinstance(banner_msg, bytes) else str(banner_msg)
 
-            # Используем правдоподобное HELO имя вместо имени ПК
-            server.helo(self.helo_name)
+            # Сначала EHLO, если ошибка - фоллбэк на HELO
+            try:
+                ehlo_code, ehlo_msg = server.ehlo(self.helo_name)
+                if ehlo_code >= 500:
+                    server.helo(self.helo_name)
+            except Exception:
+                ehlo_msg = b""
+                server.helo(self.helo_name)
 
-            # Для Yahoo и AOL используем специальный EHLO (они его лучше принимают)
-            if domain in YAHOO_DOMAINS or domain in AOL_DOMAINS:
-                try:
-                    server.ehlo(self.helo_name)
-                except Exception:
-                    pass
+            # Проверка STARTTLS
+            has_starttls = False
+            try:
+                if server.has_extn('starttls'):
+                    has_starttls = True
+            except Exception:
+                ehlo_str = ehlo_msg.decode('utf-8', 'ignore').lower() if isinstance(ehlo_msg, bytes) else str(ehlo_msg).lower()
+                if 'starttls' in ehlo_str:
+                    has_starttls = True
 
-            server.mail(from_addr)
+            # Если сервер отверг САМ MAIL FROM (репутация прокси, SPF, требование авторизации),
+            # то последующий RCPT вернёт вводящий в заблуждение код вроде "503 Bad sequence",
+            # который раньше молча превращался в "невалидный ящик". Проверяем явно.
+            mail_code, mail_msg = server.mail(from_addr)
+            if mail_code >= 400:
+                mail_text = mail_msg.decode('utf-8', 'ignore') if isinstance(mail_msg, bytes) else str(mail_msg)
+                low = mail_text.lower()
+
+                # Отдельно распознаём FCrDNS: это НЕ проблема почты и не проблема
+                # прокси-соединения — у исходящего IP просто нет обратного DNS.
+                # Так Yahoo/AOL отшивают всех до этапа RCPT.
+                if "5.7.25" in mail_text or "reverse dns" in low or "forward-confirmed" in low:
+                    reason = ("550 Нет обратного DNS у нашего IP (FCrDNS) — "
+                              "Yahoo/AOL не пускают. Нужен прокси с PTR-записью.")
+                else:
+                    reason = f"{mail_code} MAIL FROM Rejected (Email May Exist): {mail_text[:40]}"
+                    self._update_proxy_score(proxy, False)  # Похоже на проблему прокси/IP
+
+                return {
+                    "status": "unknown",
+                    "reason": reason,
+                    "smtp_banner": banner_text,
+                    "server_outdated": self._is_server_outdated(banner_text),
+                    "has_starttls": has_starttls,
+                }
+
             code, message = server.rcpt(email)
 
             result = self._parse_smtp_response(code, message, email, domain)
@@ -538,6 +764,7 @@ class NetworkValidator:
             # Добавляем информацию о баннере для Engagement Score
             result["smtp_banner"] = banner_text
             result["server_outdated"] = self._is_server_outdated(banner_text)
+            result["has_starttls"] = has_starttls
 
             # Adaptive Rate Limiting (п.5): если 421 — записываем ошибку для этого MX
             if code == 421:
@@ -583,11 +810,14 @@ class NetworkValidator:
             if domain in self.catchall_cache:
                 return self.catchall_cache[domain]
 
-        proxy = self._pick_best_proxy()
-
         # Первый случайный несуществующий адрес (короткий)
         fake_email_1 = f"{_generate_random_local('short')}@{domain}"
-        result_1 = self._do_single_ping(fake_email_1, mx_record, proxy=proxy)
+        result_1 = self._do_single_ping(fake_email_1, mx_record, proxy=self._pick_best_proxy())
+
+        # Проба не удалась (мёртвый прокси, таймаут) — вывода сделать нельзя.
+        # НЕ кэшируем: иначе catch-all домен потом молча выдаст "Valid" на любой адрес.
+        if result_1["status"] == "unknown":
+            return False
 
         # Если первый НЕ принят — однозначно не Catch-All
         if result_1["status"] != "valid":
@@ -597,7 +827,10 @@ class NetworkValidator:
 
         # Первый принят — проверяем вторым (другим случайным адресом)
         fake_email_2 = f"{_generate_random_local('short')}@{domain}"
-        result_2 = self._do_single_ping(fake_email_2, mx_record, proxy=proxy)
+        result_2 = self._do_single_ping(fake_email_2, mx_record, proxy=self._pick_best_proxy())
+
+        if result_2["status"] == "unknown":
+            return False  # Проба сорвалась — не кэшируем вывод
 
         if result_2["status"] != "valid":
             with self.catchall_lock:
@@ -606,7 +839,10 @@ class NetworkValidator:
 
         # Оба приняты — третья проверка с UUID-подобным адресом (совершенно другой паттерн)
         fake_email_3 = f"{_generate_random_local('uuid')}@{domain}"
-        result_3 = self._do_single_ping(fake_email_3, mx_record, proxy=proxy)
+        result_3 = self._do_single_ping(fake_email_3, mx_record, proxy=self._pick_best_proxy())
+
+        if result_3["status"] == "unknown":
+            return False  # Проба сорвалась — не кэшируем вывод
 
         # Все 3 приняты — точно Catch-All
         is_catchall = result_3["status"] == "valid"
@@ -636,6 +872,10 @@ class NetworkValidator:
         # Мульти-MX: пробуем все MX-серверы по очереди (п.3.1) + smart proxy selection (п.8)
         for mx_record in mx_records:
             for attempt in range(max_retries):
+                # Прокси кончились — повторять бессмысленно, только время тратить
+                if self.all_proxies_dead():
+                    return {"status": "unknown", "reason": "All Proxies Dead (прямое соединение запрещено)"}
+
                 proxy = self._pick_best_proxy()  # Используем лучший прокси вместо random
                 result = self._do_single_ping(email, mx_record, proxy=proxy)
 
@@ -666,6 +906,10 @@ class NetworkValidator:
             return {"status": "invalid", "reason": "Bad Syntax (RFC 5322)", "mx_record": "N/A"}
 
         domain = email.rsplit("@", 1)[1].lower()
+        try:
+            domain = domain.encode('idna').decode('ascii')
+        except Exception:
+            return {"status": "invalid", "reason": "Invalid Domain (IDNA Error)", "mx_record": "N/A"}
 
         # Шаг 1: DNS / MX Check (с A-фоллбэком — п.1.4)
         mx_records = self.get_mx_records(domain)
@@ -674,8 +918,8 @@ class NetworkValidator:
 
         # Шаг 2: Защита от попадания в Blacklist (AV Honeypot-ловушки)
         av_vendors = [
-            "proofpoint.com", "mimecast.com", "fireeye.com",
-            "barracudanetworks.com", "phishline.com", "perimeterwatch.com",
+            "fireeye.com",
+            "phishline.com", "perimeterwatch.com",
             "agari.com", "emailsecurity.trendmicro.com"
         ]
         for mx in mx_records:
@@ -690,8 +934,11 @@ class NetworkValidator:
             domain in YAHOO_DOMAINS or
             domain in MICROSOFT_DOMAINS or
             domain in AOL_DOMAINS or
-            domain in {"gmail.com", "googlemail.com", "mail.ru", "bk.ru", "inbox.ru",
-                       "list.ru", "yandex.ru", "ya.ru", "icloud.com", "me.com", "mac.com"}
+            # ВАЖНО: mail.ru/bk.ru/inbox.ru/list.ru отсюда УБРАНЫ. Проверено вживую:
+            # они отвечают 250 на любой случайный адрес, то есть являются catch-all.
+            # Пока они были в этом списке, их несуществующие ящики шли как Valid.
+            domain in {"gmail.com", "googlemail.com", "yandex.ru", "ya.ru",
+                       "icloud.com", "me.com", "mac.com"}
         )
 
         if not skip_catchall:

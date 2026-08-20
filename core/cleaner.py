@@ -2,6 +2,60 @@
 
 from .parser_pipeline import GLOBAL_VERIFIED_DOMAINS
 
+# --- Нормализация адресов для дедупликации (п.28 чек-листа) ---
+#
+# Разные записи могут вести в ОДИН И ТОТ ЖЕ ящик. Если их не схлопнуть,
+# один человек получит письмо дважды -> жалобы на спам.
+#
+# ВАЖНО: канонический вид используется ТОЛЬКО как ключ дедупа.
+# Наружу (в результат и экспорт) всегда уходит оригинальный адрес.
+
+# Gmail: точки в локальной части игнорируются, домены-синонимы ведут в тот же ящик.
+_GMAIL_DOMAINS = {"gmail.com", "googlemail.com", "google.com"}
+
+# Провайдеры, у которых "+тег" отбрасывается почтовиком (john+news@ == john@).
+# Только те, где это гарантированно так. Для корпоративных доменов НЕ трогаем:
+# там "+" может быть обычным символом логина, и мы склеим разных людей.
+_PLUS_TAG_DOMAINS = {
+    "gmail.com", "googlemail.com", "google.com",
+    "outlook.com", "hotmail.com", "live.com", "msn.com", "hotmail.co.uk",
+    "yahoo.com", "ymail.com", "rocketmail.com",
+    "icloud.com", "me.com", "mac.com",
+    "protonmail.com", "proton.me", "pm.me",
+    "fastmail.com", "zoho.com", "yandex.ru", "ya.ru",
+}
+
+
+def normalize_for_dedup(email: str) -> str:
+    """Приводит адрес к каноническому виду для сравнения дублей.
+
+    Схлопывает:
+      john.doe@gmail.com  ==  johndoe@gmail.com   (Gmail игнорирует точки)
+      john+news@gmail.com ==  john@gmail.com      (плюс-тег отбрасывается)
+      j@googlemail.com    ==  j@gmail.com         (домен-синоним)
+
+    Возвращает ключ для дедупа, а НЕ адрес для отправки.
+    """
+    if not email or "@" not in email:
+        return (email or "").strip().lower()
+
+    email = email.strip().lower()
+    local, domain = email.rsplit("@", 1)
+
+    # Плюс-тег отбрасываем только у провайдеров, где это реально работает
+    if domain in _PLUS_TAG_DOMAINS and "+" in local:
+        local = local.split("+", 1)[0]
+
+    # У Gmail точки в локальной части не значат ничего
+    if domain in _GMAIL_DOMAINS:
+        local = local.replace(".", "")
+        domain = "gmail.com"
+
+    if not local:
+        return email  # Защита от вырожденного случая вроде "+tag@gmail.com"
+
+    return f"{local}@{domain}"
+
 class EmailCleaner:
     def __init__(self):
         # Самые популярные провайдеры для проверки на опечатки
