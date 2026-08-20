@@ -19,6 +19,13 @@ def calculate_engagement_score(
     name_extracted: str = "",
     is_role_based: bool = False,
     server_outdated: bool = False,
+    has_ptr: bool = None,
+    has_starttls: bool = None,
+    in_dnsbl: bool = False,
+    has_live_website: bool = True,
+    original_smtp_status: str = None,
+    machine_generated: bool = False,
+    is_parked_domain: bool = False,
 ) -> dict:
     """
     Вычисляет композитный скор живости email.
@@ -33,35 +40,50 @@ def calculate_engagement_score(
     score = 0
     signals = []
     
+    scoring_status = original_smtp_status if original_smtp_status is not None else smtp_status
+
+    domain = email.rsplit("@", 1)[1].lower() if "@" in email else ""
+    is_free_provider = domain in GLOBAL_VERIFIED_DOMAINS
+
+    # Сервер прямо ответил, что ящика нет (550) или домен мёртв.
+    # Здоровье домена (SPF/DMARC, возраст) тут ничего не значит: живой gmail.com
+    # не делает несуществующий ящик на нём хоть сколько-нибудь живым.
+    if scoring_status == "Invalid/Bounce":
+        return {
+            "score": 0,
+            "grade": "Dead",
+            "signals": ["0: SMTP подтвердил, что ящик не существует"],
+            "provider_type": "Free" if is_free_provider else "Corporate",
+        }
+
     # === ПОЗИТИВНЫЕ СИГНАЛЫ ===
     
     # 1. SMTP статус
-    if smtp_status == "Valid":
+    if scoring_status == "Valid":
         if "Full Inbox" in smtp_reason or "Mailbox Full" in smtp_reason or "Over Quota" in smtp_reason:
             score += 40
             signals.append("+40: Полный ящик (активно используется)")
         else:
             score += 30
             signals.append("+30: SMTP 250 OK (почта жива)")
-    elif smtp_status == "Risky":
+    elif scoring_status == "Risky":
         score += 10
         signals.append("+10: Risky (возможно жива)")
-    elif smtp_status == "Unknown":
+    elif scoring_status == "Unknown":
         score += 5
         signals.append("+5: Unknown (неопределённо)")
     # Invalid/Bounce = 0 баллов
     
     # 2. Gravatar (бонус, только в плюс)
     if has_gravatar:
-        score += 20
-        signals.append("+20: Есть Gravatar (реальный человек)")
+        score += 10
+        signals.append("+10: Есть Gravatar (реальный человек)")
     
     # 3. Корпоративный домен
-    domain = email.rsplit("@", 1)[1].lower() if "@" in email else ""
-    is_free_provider = domain in GLOBAL_VERIFIED_DOMAINS
-    if not is_free_provider and domain and smtp_status in ("Valid", "Risky"):
-        score += 10
-        signals.append("+10: Корпоративный домен")
+    if not is_free_provider and domain and scoring_status in ("Valid", "Risky"):
+        if has_ptr or has_starttls or domain_age_days > 365:
+            score += 5
+            signals.append("+5: Корпоративный домен")
     
     # 4. DNS здоровье (SPF + DMARC + DKIM)
     if dns_health_score >= 3:
@@ -111,6 +133,36 @@ def calculate_engagement_score(
     if server_outdated:
         score -= 10
         signals.append("-10: Устаревший почтовый сервер")
+        
+    if in_dnsbl:
+        score -= 40
+        signals.append("-40: IP сервера в блэклисте Spamhaus")
+        
+    # PTR и STARTTLS — гигиена почтового СЕРВЕРА, а не доказательство мёртвого ящика.
+    # Штрафуем только при подтверждённом отсутствии (False), но не при None ("не проверено"),
+    # и мягко: подтверждённый SMTP 250 OK не должен обнуляться из-за них.
+    if has_ptr is False and scoring_status in ('Valid', 'Risky'):
+        score -= 10
+        signals.append("-10: Нет PTR-записи (подозрительный сервер)")
+
+    if has_starttls is False and scoring_status in ('Valid', 'Risky'):
+        score -= 5
+        signals.append("-5: Нет шифрования STARTTLS")
+        
+    if not has_live_website and not is_free_provider:
+        score -= 5
+        signals.append("-5: Нет живого сайта (корпоративный домен)")
+
+    # Локальная часть похожа на машинную генерацию ('xk3n9fj2q@') — за такими
+    # адресами почти никогда нет живого человека, даже если ящик существует.
+    if machine_generated:
+        score -= 20
+        signals.append("-20: Адрес похож на сгенерированный машиной")
+
+    # Домен припаркован (MX ведёт на парковочный сервис) — живых ящиков там нет
+    if is_parked_domain:
+        score -= 30
+        signals.append("-30: Домен припаркован (продаётся, почты нет)")
     
     # Ограничиваем скор в диапазоне 0-100
     score = max(0, min(100, score))

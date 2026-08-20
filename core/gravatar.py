@@ -9,6 +9,7 @@ import hashlib
 import urllib.request
 import urllib.error
 import threading
+from collections import OrderedDict
 
 
 class GravatarChecker:
@@ -16,7 +17,7 @@ class GravatarChecker:
     
     def __init__(self, timeout=3):
         self.timeout = timeout
-        self._cache = {}
+        self._cache = OrderedDict()
         self._cache_lock = threading.Lock()
     
     def has_gravatar(self, email: str) -> bool:
@@ -29,9 +30,16 @@ class GravatarChecker:
         """
         email = email.strip().lower()
         
+        if '@' in email:
+            local, domain = email.split('@', 1)
+            if '+' in local:
+                local = local.split('+', 1)[0]
+            email = f"{local}@{domain}"
+        
         # Проверяем кэш
         with self._cache_lock:
             if email in self._cache:
+                self._cache.move_to_end(email)  # LRU: помечаем как недавно использованный
                 return self._cache[email]
         
         try:
@@ -57,6 +65,8 @@ class GravatarChecker:
         
         # Сохраняем в кэш
         with self._cache_lock:
+            if len(self._cache) >= 50000:
+                self._cache.popitem(last=False)
             self._cache[email] = result
         
         return result

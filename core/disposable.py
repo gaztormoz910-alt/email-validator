@@ -427,7 +427,17 @@ def is_disposable(email: str) -> bool:
     if "@" not in email:
         return False
     domain = email.rsplit("@", 1)[1].lower().strip()
-    return domain in DISPOSABLE_DOMAINS
+    
+    if domain in DISPOSABLE_DOMAINS:
+        return True
+        
+    parts = domain.split('.')
+    for i in range(len(parts) - 1):
+        parent = '.'.join(parts[i+1:])
+        if parent in DISPOSABLE_DOMAINS:
+            return True
+            
+    return False
 
 
 def get_disposable_count() -> int:
