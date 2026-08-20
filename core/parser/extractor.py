@@ -22,16 +22,23 @@ class EmailExtractor:
             
         import html
         text = html.unescape(text)
+
+        # Pull mailto: hrefs first - they live inside tag attributes and would
+        # otherwise be lost once the tag itself gets stripped below.
+        mailto_matches = re.findall(r'mailto:([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)', text, flags=re.IGNORECASE)
+
         # Strip inline tags that might break emails apart in search snippets (like <b>email@...</b>)
         text = re.sub(r'</?(b|i|em|strong|span|u|a)[^>]*>', '', text, flags=re.IGNORECASE)
         # DuckDuckGo often highlights search terms including quotes, e.g. tom.hovey"@gmail.com"
         # We must remove quotes so they don't split the email prefix from the domain
         text = text.replace('"', '').replace("'", '')
-        # Replace other formatting/layout tags with spaces to prevent merging unrelated words
-        text = re.sub(r'<[^>]+>', ' ', text)
-            
+        # Replace other formatting/layout tags with spaces to prevent merging unrelated words.
+        # Only matches real tags (name starts with a letter, then whitespace/attrs or '>')
+        # so plain text incidentally wrapped in <angle brackets>, like <foo@bar.com>, survives.
+        text = re.sub(r'</?[a-zA-Z][a-zA-Z0-9]*(?:\s[^<>]*)?>', ' ', text)
+
         found_emails = set()
-        raw_matches = self.pattern.findall(text)
+        raw_matches = self.pattern.findall(text) + mailto_matches
         
         for email in raw_matches:
             email = email.lower().strip()

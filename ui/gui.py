@@ -5,6 +5,7 @@ import psutil
 import socket
 import os
 import re
+import threading
 from ui.colors import *
 from core.pipeline import ValidationPipeline
 from core.streamer import StreamLoader
@@ -778,6 +779,23 @@ class ValidatorApp(ctk.CTk):
         self.chk_unknown = ctk.CTkCheckBox(self.filter_frame, text="Unknown", variable=self.chk_unknown_var, command=self._on_filter_change, fg_color=TEXT_MUTED, hover_color=BORDER_STRONG, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
         self.chk_unknown.pack(side="left", padx=(0, 12), pady=8)
 
+        # Порог Engagement Score (п.37): отсекает слабые адреса при показе и экспорте
+        self.score_filter_frame = ctk.CTkFrame(self.table_export_frame, fg_color=BG_CARD_1, corner_radius=8)
+        self.score_filter_frame.pack(side="left", padx=(8, 0))
+
+        ctk.CTkLabel(self.score_filter_frame, text="Score ≥", text_color=TEXT_MAIN,
+                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(12, 6), pady=8)
+
+        self.min_score_var = ctk.StringVar(value="0")
+        self.min_score_entry = ctk.CTkEntry(self.score_filter_frame, textvariable=self.min_score_var,
+                                            width=48, height=26, corner_radius=6,
+                                            fg_color=BG_CARD_2, border_color=BORDER_STRONG,
+                                            text_color=TEXT_MAIN, font=ctk.CTkFont(size=12),
+                                            justify="center")
+        self.min_score_entry.pack(side="left", padx=(0, 12), pady=8)
+        self.min_score_entry.bind("<Return>", lambda e: self._on_filter_change())
+        self.min_score_entry.bind("<FocusOut>", lambda e: self._on_filter_change())
+
         # Right zone: actions, anchored to the right edge instead of trailing after the filters
         self.actions_frame = ctk.CTkFrame(self.table_export_frame, fg_color="transparent")
         self.actions_frame.pack(side="right")
@@ -812,23 +830,32 @@ class ValidatorApp(ctk.CTk):
         self.table_frame.grid_rowconfigure(0, weight=1)
         self.table_frame.grid_columnconfigure(0, weight=1)
 
-        columns = ("email", "status", "reason", "mx", "name", "gender", "country")
+        columns = ("email", "status", "score", "provider", "domain_type", "reason", "mx",
+                   "name", "gender", "country", "validated")
         self.tree = ttk.Treeview(self.table_frame, columns=columns, show="headings")
         self.tree.heading("email", text="Email", anchor="w")
         self.tree.heading("status", text="Status", anchor="center")
+        self.tree.heading("score", text="Score", anchor="center")
+        self.tree.heading("provider", text="Provider", anchor="w")
+        self.tree.heading("domain_type", text="Тип домена", anchor="w")
         self.tree.heading("reason", text="Reason", anchor="w")
         self.tree.heading("mx", text="MX-Record", anchor="w")
         self.tree.heading("name", text="Name", anchor="w")
         self.tree.heading("gender", text="Gender", anchor="w")
         self.tree.heading("country", text="Country", anchor="w")
+        self.tree.heading("validated", text="Проверено", anchor="w")
         
-        self.tree.column("email", width=220, minwidth=150, stretch=True, anchor="w")
-        self.tree.column("status", width=100, minwidth=80, stretch=False, anchor="center")
-        self.tree.column("reason", width=200, minwidth=150, stretch=True, anchor="w")
-        self.tree.column("mx", width=200, minwidth=150, stretch=True, anchor="w")
-        self.tree.column("name", width=120, minwidth=80, stretch=True, anchor="w")
-        self.tree.column("gender", width=80, minwidth=60, stretch=True, anchor="w")
-        self.tree.column("country", width=100, minwidth=60, stretch=True, anchor="w")
+        self.tree.column("email", width=210, minwidth=150, stretch=True, anchor="w")
+        self.tree.column("status", width=95, minwidth=80, stretch=False, anchor="center")
+        self.tree.column("score", width=55, minwidth=45, stretch=False, anchor="center")
+        self.tree.column("provider", width=115, minwidth=80, stretch=False, anchor="w")
+        self.tree.column("domain_type", width=95, minwidth=70, stretch=False, anchor="w")
+        self.tree.column("reason", width=190, minwidth=140, stretch=True, anchor="w")
+        self.tree.column("mx", width=180, minwidth=130, stretch=True, anchor="w")
+        self.tree.column("name", width=110, minwidth=80, stretch=True, anchor="w")
+        self.tree.column("gender", width=70, minwidth=55, stretch=False, anchor="w")
+        self.tree.column("country", width=85, minwidth=55, stretch=False, anchor="w")
+        self.tree.column("validated", width=110, minwidth=90, stretch=False, anchor="w")
         self.tree.grid(row=0, column=0, sticky="nsew")
 
         self.tree.tag_configure("valid", foreground=ACCENT_SUCCESS)
@@ -1049,14 +1076,33 @@ class ValidatorApp(ctk.CTk):
                 total_count = total_loader.count_total_lines()
                 self.loaded_lbl.configure(text=f"Загружено строк: {total_count}")
                 self.safe_log(f"[INFO] Файлы добавлены. Всего строк: {total_count}", "info")
-            
+
             self.db_selector.set_text("Несколько файлов" if len(filepaths) > 1 else filepaths[0])
+            self._scan_base_composition()
+
+    def _scan_base_composition(self):
+        """Показывает состав базы по провайдерам. Без сети — только чтение файла."""
+        if not self.email_sources:
+            return
+
+        def worker():
+            try:
+                from core.provider import scan_base_providers, format_base_scan
+                scan = scan_base_providers(self.email_sources)
+                for line in format_base_scan(scan):
+                    self.safe_log(line, "info")
+            except Exception as e:
+                self.safe_log(f"[DEAD] Скан состава базы не удался: {type(e).__name__}", "dead")
+
+        # В отдельном потоке: на большом файле чтение займёт время, а UI морозить нельзя
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_emails_pasted(self, text):
         self.email_sources.append({"type": "text", "content": text})
         total_loader = StreamLoader(self.email_sources)
         total_count = total_loader.count_total_lines()
         self.loaded_lbl.configure(text=f"Загружено строк: {total_count}")
+        self._scan_base_composition()
 
     def load_proxies(self):
         filepaths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
@@ -1375,7 +1421,22 @@ class ValidatorApp(ctk.CTk):
             else: tag = "dead"
             
             status_display = f"● {status}"
-            self.tree.insert("", "end", values=(email, status_display, reason, mx, data.get("name", ""), data.get("gender", ""), data.get("country", "")), tags=(tag,))
+            score = data.get("engagement_score", "")
+            grade = data.get("engagement_grade", "")
+            score_display = f"{score} {grade}".strip() if score != "" else ""
+            self.tree.insert("", "end", values=(
+                email,
+                status_display,
+                score_display,
+                data.get("provider_name", ""),
+                data.get("domain_type", ""),
+                reason,
+                mx,
+                data.get("name", ""),
+                data.get("gender", ""),
+                data.get("country", ""),
+                data.get("validated_at", ""),
+            ), tags=(tag,))
 
     def start_parsing(self):
         if hasattr(self, 'parser_pipeline') and self.parser_pipeline and self.parser_pipeline.is_alive():
@@ -1590,18 +1651,40 @@ class ValidatorApp(ctk.CTk):
         self.clipboard_append(text)
         messagebox.showinfo("Скопировано", "Логи терминала скопированы в буфер обмена.")
 
+    def _get_min_score(self):
+        """Порог Engagement Score из поля ввода. Мусор во вводе трактуем как 0."""
+        try:
+            return max(0, min(100, int(self.min_score_var.get().strip() or 0)))
+        except (ValueError, AttributeError):
+            return 0
+
     def _get_filtered_results(self):
         export_data = []
+        min_score = self._get_min_score()
         for r in self.results_data:
             st = r["status"]
+            matched = False
             if self.chk_valid_var.get() and st == "Valid":
-                export_data.append(r)
+                matched = True
             elif self.chk_invalid_var.get() and "Invalid" in st:
-                export_data.append(r)
+                matched = True
             elif self.chk_spam_var.get() and ("Trap" in st or "Disposable" in st or "Risky" in st or st == "Role-based"):
-                export_data.append(r)
+                matched = True
             elif self.chk_unknown_var.get() and st == "Unknown":
-                export_data.append(r)
+                matched = True
+
+            if not matched:
+                continue
+
+            # Отсекаем слабые адреса по порогу скора (п.37)
+            if min_score > 0:
+                try:
+                    if int(r.get("data", {}).get("engagement_score", 0) or 0) < min_score:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+
+            export_data.append(r)
         return export_data
 
     def export_results(self):
@@ -1621,16 +1704,25 @@ class ValidatorApp(ctk.CTk):
         
         if filepath:
             try:
-                with open(filepath, "w", encoding="utf-8") as f:
-                    if filepath.endswith(".csv"):
-                        f.write("Email,Status,Reason,MX-Record,Name,Gender,Country\n")
+                if filepath.endswith(".csv"):
+                    import csv
+                    # csv.writer обязателен: reason содержит запятые (напр. "[DNS: SPF=..., DMARC=...]"),
+                    # из-за чего ручная склейка через "," разъезжала колонки в Excel.
+                    with open(filepath, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["Email", "Status", "Reason", "MX-Record", "Name", "Gender", "Country",
+                                         "Score", "Grade", "Provider", "DomainType", "ValidatedAt"])
                         for r in export_data:
                             data = r.get("data", {})
-                            name = data.get("name", "")
-                            gender = data.get("gender", "")
-                            country = data.get("country", "")
-                            f.write(f"{r['email']},{r['status']},{r['reason']},{r['mx']},{name},{gender},{country}\n")
-                    else:
+                            writer.writerow([
+                                r["email"], r["status"], r["reason"], r["mx"],
+                                data.get("name", ""), data.get("gender", ""), data.get("country", ""),
+                                data.get("engagement_score", ""), data.get("engagement_grade", ""),
+                                data.get("provider_name", ""), data.get("domain_type", ""),
+                                data.get("validated_at", ""),
+                            ])
+                else:
+                    with open(filepath, "w", encoding="utf-8") as f:
                         for r in export_data:
                             data = r.get("data", {})
                             name = data.get("name", "")

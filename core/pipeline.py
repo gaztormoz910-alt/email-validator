@@ -1,18 +1,38 @@
 # core/pipeline.py
 import threading
 import time
+import json
+import datetime
+import urllib.request
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from core.cleaner import EmailCleaner
+from core.cleaner import EmailCleaner, normalize_for_dedup
 from core.filters import SpamFilter
 from core.github_parser import BlacklistDownloader
-from core.network import NetworkValidator
+from core.network import NetworkValidator, PROXY_MAX_CONSECUTIVE_FAILS
 from core.ai_engine import EmailAI
 from core.parser.name_extractor import NameExtractor
 from core.parser.ml_predictor import MLPredictor
 from core.disposable import is_disposable
 from core.gravatar import GravatarChecker
 from core.scoring import calculate_engagement_score
+from core.provider import classify_domain
+from core.heuristics import looks_machine_generated, is_parked_domain
+from core.parser_pipeline import GLOBAL_VERIFIED_DOMAINS
+
+
+def _utc_now():
+    """Текущее время как aware-datetime в UTC."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _as_utc(dt):
+    """Приводит datetime к aware-UTC. Naive-даты считаем уже записанными в UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
 
 class ValidationPipeline:
     def __init__(self, callbacks):
@@ -27,11 +47,100 @@ class ValidationPipeline:
         self.name_extractor = None
         self.ml_predictor = None
         self.gravatar_checker = GravatarChecker(timeout=3)
+        self._domain_age_cache = {}
+        self._domain_age_lock = threading.Lock()
+        self._http_alive_cache = {}
+        self._http_alive_lock = threading.Lock()
         
+    def _get_domain_age_days(self, domain):
+        """Получить возраст домена в днях через WHOIS/RDAP. Кэшируется."""
+        with self._domain_age_lock:
+            if domain in self._domain_age_cache:
+                return self._domain_age_cache[domain]
+        try:
+            import whois
+            w = whois.whois(domain)
+            creation = w.creation_date
+            if isinstance(creation, list):
+                creation = creation[0]
+            if creation:
+                # WHOIS часто возвращает datetime С таймзоной, а datetime.now() — без неё.
+                # Раньше вычитание падало с TypeError, WHOIS-путь был мёртв и каждый
+                # домен уходил в медленный RDAP-фоллбэк.
+                age = (_utc_now() - _as_utc(creation)).days
+                with self._domain_age_lock:
+                    self._domain_age_cache[domain] = age
+                return age
+        except Exception:
+            pass
+        # Фоллбэк: RDAP через rdap.org
+        try:
+            req = urllib.request.Request(f"https://rdap.org/domain/{domain}", method="GET")
+            req.add_header("User-Agent", "Mozilla/5.0")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+                for event in data.get("events", []):
+                    if event.get("eventAction") == "registration":
+                        dt = datetime.datetime.fromisoformat(event["eventDate"].replace("Z", "+00:00"))
+                        age = (_utc_now() - _as_utc(dt)).days
+                        with self._domain_age_lock:
+                            self._domain_age_cache[domain] = age
+                        return age
+        except Exception:
+            pass
+        with self._domain_age_lock:
+            self._domain_age_cache[domain] = -1
+        return -1
+
+    def _check_http_alive(self, domain):
+        """Проверить, есть ли живой сайт на домене (HEAD запрос). Кэшируется."""
+        with self._http_alive_lock:
+            if domain in self._http_alive_cache:
+                return self._http_alive_cache[domain]
+        try:
+            req = urllib.request.Request(f"https://{domain}", method="HEAD")
+            req.add_header("User-Agent", "Mozilla/5.0")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                alive = resp.status < 400
+                with self._http_alive_lock:
+                    self._http_alive_cache[domain] = alive
+                return alive
+        except Exception:
+            pass
+        # Попробовать HTTP если HTTPS не работает
+        try:
+            req = urllib.request.Request(f"http://{domain}", method="HEAD")
+            req.add_header("User-Agent", "Mozilla/5.0")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                alive = resp.status < 400
+                with self._http_alive_lock:
+                    self._http_alive_cache[domain] = alive
+                return alive
+        except Exception:
+            pass
+        with self._http_alive_lock:
+            self._http_alive_cache[domain] = False
+        return False
+
     def setup(self, timeout=5, enable_ai=False, proxies=None, threads=100):
         # Гибридный режим: Whitelist + DNS-проверка неизвестных доменов
         self.callbacks['on_log']("[INFO] Подготовка валидатора (гибридный режим: Whitelist + DNS)...", "info")
-        self.filter = None
+        
+        # Обновляем disposable/spam-списки ДО загрузки SpamFilter, чтобы он
+        # сразу подхватил свежие данные. Списки переустанавливаются (замена, не
+        # накопление), а качаются только если на сервере реально есть новое.
+        try:
+            self.callbacks['on_log']("[INFO] Проверка обновлений disposable-списков...", "info")
+            BlacklistDownloader().download_all(log_callback=self.callbacks['on_log'])
+        except Exception as e:
+            self.callbacks['on_log'](f"[DEAD] Обновление списков не удалось ({type(e).__name__}), использую локальные.", "dead")
+
+        # Подключаем SpamFilter из внешних файлов
+        try:
+            self.filter = SpamFilter()
+            self.callbacks['on_log'](f"[INFO] SpamFilter загружен ({self.filter.get_count() if hasattr(self.filter, 'get_count') else '?'} доменов).", "info")
+        except Exception:
+            self.filter = None
         
         if proxies:
             from core.network import filter_live_proxies
@@ -44,6 +153,27 @@ class ValidationPipeline:
             if not live_proxies:
                 self.callbacks['on_log']("[DEAD] Внимание: Ни один из загруженных прокси не работает. Валидация скорее всего завершится с ошибками.", "dead")
             proxies = live_proxies
+
+            # Заранее говорим, потянут ли прокси Yahoo/AOL. Они требуют обратный DNS
+            # (FCrDNS) у исходящего IP и отшивают остальных ещё на MAIL FROM.
+            if live_proxies:
+                try:
+                    from core.network import survey_fcrdns_proxies
+                    capable, checked = survey_fcrdns_proxies(live_proxies)
+                    if checked:
+                        pct = round(capable * 100 / checked)
+                        if capable == 0:
+                            self.callbacks['on_log'](
+                                f"[DEAD] Обратный DNS (FCrDNS) есть у 0 из {checked} проверенных прокси. "
+                                "Yahoo, AOL и Verizon проверить НЕ получится — они отшивают такие IP "
+                                "до проверки адреса. Для них нужны прокси с PTR-записью (обычно "
+                                "датацентровые или свой VPS с настроенным reverse DNS).", "dead")
+                        else:
+                            self.callbacks['on_log'](
+                                f"[INFO] Обратный DNS (FCrDNS) есть у {capable} из {checked} прокси ({pct}%). "
+                                "Эти пройдут Yahoo/AOL.", "info")
+                except Exception:
+                    pass
             
         self.network = NetworkValidator(timeout=timeout, proxies=proxies)
         
@@ -80,21 +210,57 @@ class ValidationPipeline:
             self.callbacks['on_log']("[INFO] Загрузка предиктора пола/страны...", "info")
             self.ml_predictor = MLPredictor(enable_ml=enable_ai)
 
+        # Предупреждаем один раз, когда прокси закончились посреди прогона
+        proxies_dead_warned = threading.Event()
+
+        def warn_if_proxies_dead():
+            if (self.network and self.network.all_proxies_dead()
+                    and not proxies_dead_warned.is_set()):
+                proxies_dead_warned.set()
+                self.callbacks['on_log'](
+                    "[DEAD] Все прокси выбыли из ротации (каждый сдох "
+                    f"{PROXY_MAX_CONSECUTIVE_FAILS} раза подряд). Прямое соединение НЕ используется, "
+                    "чтобы не раскрыть твой реальный IP. Загрузи свежие прокси и запусти заново.",
+                    "dead")
+
         def process_single(item):
             if not self.is_running:
                 return
             while self.is_paused:
                 time.sleep(0.5)
-                
+
             email, data = item
-                
-            # Шаг 1.1: Проверка на одноразовый/временный домен (Disposable)
+
+            # Дата последней валидации (п.30 чек-листа). Ставим в начале, чтобы она
+            # попала ВО ВСЕ результаты, включая ранние выходы ниже. Без неё нельзя
+            # понять, когда адрес проверяли, и решить, пора ли перепроверять (п.21, п.43).
+            data["validated_at"] = _utc_now().strftime("%Y-%m-%d %H:%M")
+
+            # Классификация провайдера и типа домена (п.34, п.35, п.38)
+            prov_name, dom_type = classify_domain(email)
+            data["provider_name"] = prov_name
+            data["domain_type"] = dom_type
+
+            # Шаг 1.1: Проверка на одноразовый/временный домен (Disposable + SpamFilter)
             if is_disposable(email):
                 data["engagement_score"] = 0
                 data["engagement_grade"] = "Dead"
                 data["provider_type"] = "Disposable"
+                data["provider_name"] = "Disposable"
+                data["domain_type"] = "Disposable"
                 self.callbacks['on_result'](email, "Trap/Disposable", "Disposable Email Domain", "N/A", data)
                 return
+
+            # Шаг 1.1b: Дополнительная проверка через SpamFilter (внешние чёрные списки)
+            if self.filter and hasattr(self.filter, 'is_spam_or_disposable'):
+                if self.filter.is_spam_or_disposable(email):
+                    data["engagement_score"] = 0
+                    data["engagement_grade"] = "Dead"
+                    data["provider_type"] = "Spam Trap"
+                    data["provider_name"] = "Spam Trap"
+                    data["domain_type"] = "Spam Trap"
+                    self.callbacks['on_result'](email, "Trap/Disposable", "External Blacklist Match", "N/A", data)
+                    return
 
             # Шаг 1.2: Проверка на ролевые ящики (Role-based) — п.2.1
             # НЕ убиваем их! Помечаем как отдельную категорию "Role-based".
@@ -127,6 +293,7 @@ class ValidationPipeline:
             if deep_ping:
                 res = self.network.check_email(email)
                 raw_status = res["status"]
+                warn_if_proxies_dead()
 
                 # Greylisted — складываем в очередь для повторной проверки (п.2.4)
                 if raw_status == "greylisted":
@@ -144,7 +311,10 @@ class ValidationPipeline:
                 else:
                     status_display = "Invalid/Bounce"
                 
-                # Если Role-based — перезаписываем статус
+                # Сохраняем оригинальный SMTP-статус для скоринга (фикс бага Role-based)
+                original_smtp_status = status_display
+                
+                # Если Role-based — перезаписываем отображаемый статус
                 if is_role:
                     status_display = "Role-based"
                 
@@ -196,7 +366,39 @@ class ValidationPipeline:
                 except Exception:
                     pass
                 
-                # Вычисление Engagement Score
+                # Новые сигналы: DNSBL, PTR, STARTTLS
+                in_dnsbl = False
+                has_ptr = None  # None = не проверено, чтобы скоринг не штрафовал вслепую
+                has_starttls = res.get("has_starttls", None)
+                mx_host = res.get("mx_record", "")
+                if mx_host and mx_host != "N/A":
+                    try:
+                        in_dnsbl = self.network.check_dnsbl(mx_host)
+                    except Exception:
+                        pass
+                    try:
+                        has_ptr = self.network.check_ptr(mx_host)
+                    except Exception:
+                        pass
+                
+                # WHOIS: возраст домена
+                domain_age = -1
+                try:
+                    domain = email.split("@")[1].lower()
+                    domain_age = self._get_domain_age_days(domain)
+                except Exception:
+                    pass
+                
+                # HTTP-пинг: живой ли сайт (только для корпоративных доменов)
+                has_live_site = True
+                try:
+                    domain = email.split("@")[1].lower()
+                    if domain not in GLOBAL_VERIFIED_DOMAINS:
+                        has_live_site = self._check_http_alive(domain)
+                except Exception:
+                    pass
+                
+                # Вычисление Engagement Score (с ВСЕМИ новыми сигналами)
                 score_result = calculate_engagement_score(
                     email=email,
                     smtp_status=status_display,
@@ -204,16 +406,29 @@ class ValidationPipeline:
                     has_gravatar=has_avatar,
                     is_disposable=False,  # Уже отсеяны выше
                     dns_health_score=dns_score,
-                    domain_age_days=-1,  # WHOIS опционально
+                    domain_age_days=domain_age,
                     name_extracted=name,
                     is_role_based=is_role,
                     server_outdated=res.get("server_outdated", False),
+                    has_ptr=has_ptr,
+                    has_starttls=has_starttls,
+                    in_dnsbl=in_dnsbl,
+                    has_live_website=has_live_site,
+                    original_smtp_status=original_smtp_status,
+                    machine_generated=looks_machine_generated(email),
+                    is_parked_domain=is_parked_domain(res.get("mx_record", "")),
                 )
                 
                 data["engagement_score"] = score_result["score"]
                 data["engagement_grade"] = score_result["grade"]
                 data["provider_type"] = score_result["provider_type"]
                 data["has_gravatar"] = has_avatar
+
+                # Уточняем провайдера теперь, когда известна MX-запись:
+                # по ней видно, сидит ли свой домен на Google Workspace / Microsoft 365.
+                prov_name, dom_type = classify_domain(email, res.get("mx_record", ""))
+                data["provider_name"] = prov_name
+                data["domain_type"] = dom_type
 
                 self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
             else:
@@ -225,28 +440,40 @@ class ValidationPipeline:
         import queue
         task_queue = queue.Queue(maxsize=safe_threads * 2)
         seen_emails = set()
-        
+        duplicates_skipped = 0
+
         def feeder_thread():
+            nonlocal duplicates_skipped
             from core.streamer import StreamLoader
             for email, data in StreamLoader(email_sources).stream_emails():
                 if not self.is_running:
                     break
-                    
+
                 if fix_typos:
                     email = self.cleaner.clean_email(email)
-                    
+
                 if not email:
                     continue
-                    
-                if email in seen_emails:
+
+                # Дедуп по КАНОНИЧЕСКОМУ виду: john.doe@gmail.com и johndoe@gmail.com —
+                # один и тот же ящик, и слать туда дважды нельзя (жалобы на спам).
+                # В обработку при этом уходит оригинальный адрес.
+                dedup_key = normalize_for_dedup(email)
+                if dedup_key in seen_emails:
+                    duplicates_skipped += 1
                     continue
-                
-                seen_emails.add(email)
+
+                seen_emails.add(dedup_key)
                 task_queue.put((email, data))
                 
             for _ in range(safe_threads):
                 task_queue.put(None)
-                
+
+            if duplicates_skipped:
+                self.callbacks['on_log'](
+                    f"[INFO] Схлопнуто дублей: {duplicates_skipped} "
+                    "(один ящик записан по-разному — двойная отправка предотвращена).", "info")
+
         t_feeder = threading.Thread(target=feeder_thread, daemon=True)
         t_feeder.start()
         
@@ -258,7 +485,17 @@ class ValidationPipeline:
                 item = task_queue.get()
                 if item is None:
                     break
-                process_single(item)
+                try:
+                    process_single(item)
+                except Exception as e:
+                    # Without this the whole worker thread would die and silently
+                    # drop every remaining email it was going to handle.
+                    email = item[0] if item else "?"
+                    self.callbacks['on_log'](f"[DEAD] Ошибка обработки {email}: {type(e).__name__}: {e}", "dead")
+                    try:
+                        self.callbacks['on_result'](email, "Unknown", f"Processing error: {type(e).__name__}", "N/A", item[1])
+                    except Exception:
+                        pass
                 with progress_lock:
                     processed_count += 1
                     current = processed_count
@@ -309,6 +546,9 @@ class ValidationPipeline:
                     else:
                         status_display = "Invalid/Bounce"
                     
+                    # Сохраняем оригинальный SMTP-статус для скоринга (фикс бага Role-based)
+                    original_smtp_status = status_display
+                    
                     if is_role:
                         status_display = "Role-based"
                     
@@ -351,6 +591,36 @@ class ValidationPipeline:
                     except Exception:
                         pass
                     
+                    # Новые сигналы для retry
+                    in_dnsbl = False
+                    has_ptr = None  # None = не проверено, чтобы скоринг не штрафовал вслепую
+                    has_starttls = res.get("has_starttls", None)
+                    mx_host = res.get("mx_record", "")
+                    if mx_host and mx_host != "N/A":
+                        try:
+                            in_dnsbl = self.network.check_dnsbl(mx_host)
+                        except Exception:
+                            pass
+                        try:
+                            has_ptr = self.network.check_ptr(mx_host)
+                        except Exception:
+                            pass
+                    
+                    domain_age = -1
+                    try:
+                        domain = email.split("@")[1].lower()
+                        domain_age = self._get_domain_age_days(domain)
+                    except Exception:
+                        pass
+                    
+                    has_live_site = True
+                    try:
+                        domain = email.split("@")[1].lower()
+                        if domain not in GLOBAL_VERIFIED_DOMAINS:
+                            has_live_site = self._check_http_alive(domain)
+                    except Exception:
+                        pass
+                    
                     score_result = calculate_engagement_score(
                         email=email,
                         smtp_status=status_display,
@@ -358,16 +628,28 @@ class ValidationPipeline:
                         has_gravatar=has_avatar,
                         is_disposable=False,
                         dns_health_score=dns_score,
-                        domain_age_days=-1,
+                        domain_age_days=domain_age,
                         name_extracted=name,
                         is_role_based=is_role,
                         server_outdated=res.get("server_outdated", False),
+                        has_ptr=has_ptr,
+                        has_starttls=has_starttls,
+                        in_dnsbl=in_dnsbl,
+                        has_live_website=has_live_site,
+                        original_smtp_status=original_smtp_status,
+                        machine_generated=looks_machine_generated(email),
+                        is_parked_domain=is_parked_domain(res.get("mx_record", "")),
                     )
                     
                     data["engagement_score"] = score_result["score"]
                     data["engagement_grade"] = score_result["grade"]
                     data["provider_type"] = score_result["provider_type"]
                     data["has_gravatar"] = has_avatar
+
+                    prov_name, dom_type = classify_domain(email, res.get("mx_record", ""))
+                    data["provider_name"] = prov_name
+                    data["domain_type"] = dom_type
+                    data["validated_at"] = _utc_now().strftime("%Y-%m-%d %H:%M")
                     
                     self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
                     retry_count += 1
