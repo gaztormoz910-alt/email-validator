@@ -66,18 +66,46 @@ class AsyncProxyChecker:
         else:
             return await self._check_smtp(reader, writer)
 
-    async def _check_socks5(self, reader, writer):
-        writer.write(b"\x05\x01\x00")
+    async def _socks5_authenticate(self, reader, writer, user, password):
+        """Авторизация логином/паролем по RFC 1929."""
+        u = user.encode("utf-8")
+        pw = password.encode("utf-8")
+        if len(u) > 255 or len(pw) > 255:
+            return False
+        writer.write(b"\x01" + bytes([len(u)]) + u + bytes([len(pw)]) + pw)
         await asyncio.wait_for(writer.drain(), timeout=self.timeout)
-        
         try:
             resp = await asyncio.wait_for(reader.readexactly(2), timeout=self.timeout)
         except asyncio.IncompleteReadError:
             return False
-            
-        if resp[0] != 0x05 or resp[1] != 0x00:
+        return resp[1] == 0x00
+
+    async def _check_socks5(self, reader, writer, user=None, password=None):
+        # Раньше предлагался только метод 0x00 ("без авторизации"), поэтому платные
+        # прокси с логином/паролем всегда объявлялись мёртвыми. Теперь предлагаем оба
+        # метода и проходим авторизацию, если сервер её требует.
+        if user and password:
+            writer.write(b"\x05\x02\x00\x02")
+        else:
+            writer.write(b"\x05\x01\x00")
+        await asyncio.wait_for(writer.drain(), timeout=self.timeout)
+
+        try:
+            resp = await asyncio.wait_for(reader.readexactly(2), timeout=self.timeout)
+        except asyncio.IncompleteReadError:
             return False
-            
+
+        if resp[0] != 0x05:
+            return False
+
+        chosen = resp[1]
+        if chosen == 0x02:
+            if not (user and password):
+                return False  # Сервер требует авторизацию, а учётных данных нет
+            if not await self._socks5_authenticate(reader, writer, user, password):
+                return False
+        elif chosen != 0x00:
+            return False
         domain_bytes = self.target_host.encode('utf-8')
         req = b"\x05\x01\x00\x03" + bytes([len(domain_bytes)]) + domain_bytes + struct.pack(">H", self.target_port)
         
@@ -118,17 +146,18 @@ class AsyncProxyChecker:
             ip = ""
             port = 0
             
+            user = None
+            password = None
             try:
                 if "://" in proxy:
-                    protocol, addr = proxy.lower().split("://", 1)
-                else:
-                    addr = proxy
-                    
-                if "@" in addr:
-                    addr = addr.split("@")[1]
-                    
-                ip, port_str = addr.split(":")
-                port = int(port_str)
+                    # .lower() applies to the scheme only: credentials are case-sensitive
+                    protocol = proxy.split("://", 1)[0].lower()
+
+                from core.network import _parse_proxy
+                parsed = _parse_proxy(proxy)
+                if not parsed:
+                    raise ValueError("bad proxy format")
+                ip, port, user, password = parsed
             except Exception:
                 self.checked_count += 1
                 if self.progress_callback:
@@ -146,7 +175,7 @@ class AsyncProxyChecker:
                 if protocol == "socks4":
                     is_live = await self._check_socks4(reader, writer)
                 elif protocol == "socks5":
-                    is_live = await self._check_socks5(reader, writer)
+                    is_live = await self._check_socks5(reader, writer, user, password)
                 else:
                     if self.mode == "http":
                         is_live = await self._check_http(reader, writer)
