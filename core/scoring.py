@@ -59,19 +59,24 @@ def calculate_engagement_score(
     # === ПОЗИТИВНЫЕ СИГНАЛЫ ===
     
     # 1. SMTP статус
+    # Вердикт SMTP — самое сильное доказательство, которое вообще можно получить,
+    # поэтому он и весит больше всего. Остальные баллы — про ДОМЕН и СЕРВЕР
+    # (SPF, PTR, возраст), а у бесплатных провайдеров их набрать неоткуда:
+    # с прежним весом +30 подтверждённый живой Gmail упирался в потолок 50/100
+    # и вечно показывался как "Neutral".
     if scoring_status == "Valid":
         if "Full Inbox" in smtp_reason or "Mailbox Full" in smtp_reason or "Over Quota" in smtp_reason:
-            score += 40
-            signals.append("+40: Полный ящик (активно используется)")
+            score += 70
+            signals.append("+70: Полный ящик (активно используется)")
         else:
-            score += 30
-            signals.append("+30: SMTP 250 OK (почта жива)")
+            score += 55
+            signals.append("+55: SMTP 250 OK (почта жива)")
     elif scoring_status == "Risky":
-        score += 10
-        signals.append("+10: Risky (возможно жива)")
+        score += 20
+        signals.append("+20: Risky (возможно жива)")
     elif scoring_status == "Unknown":
-        score += 5
-        signals.append("+5: Unknown (неопределённо)")
+        score += 10
+        signals.append("+10: Unknown (неопределённо)")
     # Invalid/Bounce = 0 баллов
     
     # 2. Gravatar (бонус, только в плюс)
