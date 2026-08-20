@@ -58,10 +58,44 @@ class TestEngagementScore(unittest.TestCase):
         self.assertIn('+10', ' '.join(r['signals']))
 
     def test_role_based_preserves_smtp_score(self):
+        # Смысл: пометка Role-based не отменяет подтверждение SMTP, что ящик жив.
+        # Проверяем именно это, а не конкретный вес — вес может меняться.
         r = self.score(email='info@corp.com', smtp_status='Role-based', is_role_based=True, original_smtp_status='Valid')
         signals = ' '.join(r['signals'])
-        self.assertIn('+30', signals)
-        self.assertIn('-15', signals)
+        self.assertIn('SMTP 250 OK', signals)
+        self.assertIn('Role-based', signals)
+
+    def test_alive_free_provider_can_reach_hot(self):
+        # Регресс: раньше SMTP весил +30, и подтверждённый живой Gmail упирался
+        # в потолок 50/100 — вечный "Neutral". Баллы за домен/сервер (PTR, корп.
+        # бонус) бесплатному провайдеру набрать неоткуда, поэтому вердикт SMTP
+        # обязан сам по себе вытягивать адрес в верхнюю половину шкалы.
+        r = self.score(email='ivan.petrov@gmail.com', smtp_status='Valid',
+                       smtp_reason='250 OK', dns_health_score=3,
+                       domain_age_days=11330, name_extracted='Ivan')
+        self.assertGreaterEqual(r['score'], 70)
+        self.assertEqual(r['grade'], 'Hot')
+
+    def test_bare_alive_gmail_is_at_least_warm(self):
+        # Голый живой Gmail без имени и без Gravatar — всё равно не "Neutral"
+        r = self.score(email='gaztormoz910@gmail.com', smtp_status='Valid',
+                       smtp_reason='250 OK', dns_health_score=3)
+        self.assertGreaterEqual(r['score'], 50)
+
+    def test_full_inbox_outranks_plain_ok(self):
+        # Полный ящик — доказательство активного использования, должен быть выше
+        full = self.score(email='a@gmail.com', smtp_status='Valid',
+                          smtp_reason='452 OK (Mailbox Full)', dns_health_score=3)
+        plain = self.score(email='a@gmail.com', smtp_status='Valid',
+                           smtp_reason='250 OK', dns_health_score=3)
+        self.assertGreater(full['score'], plain['score'])
+
+    def test_machine_generated_alive_stays_below_warm(self):
+        # Ящик жив, но адрес машинный — доверия меньше, чем к человеческому
+        r = self.score(email='xk3n9fj2q4@gmail.com', smtp_status='Valid',
+                       smtp_reason='250 OK', dns_health_score=3,
+                       machine_generated=True)
+        self.assertLess(r['score'], 50)
 
     def test_confirmed_bounce_is_dead_despite_healthy_domain(self):
         # 550 на живом gmail.com: домен здоров, но ящика не существует.
