@@ -106,9 +106,34 @@ class SocksSMTP(smtplib.SMTP):
 
 
 def _parse_proxy(proxy):
-    """Парсит строку прокси в компоненты. Возвращает (ip, port, user, password) или None."""
+    """Парсит строку прокси в компоненты. Возвращает (ip, port, user, password) или None.
+
+    Поддерживаемые форматы (с любым префиксом схемы или без него):
+        host:port
+        host:port:user:pass
+        user:pass@host:port      <- этот отдают многие продавцы
+    """
     try:
-        proxy_clean = proxy.replace("socks5://", "").replace("socks4://", "").replace("http://", "").replace("https://", "")
+        if not proxy:
+            return None
+
+        proxy_clean = proxy.strip()
+        for scheme in ("socks5://", "socks4://", "https://", "http://"):
+            if proxy_clean.lower().startswith(scheme):
+                proxy_clean = proxy_clean[len(scheme):]
+                break
+
+        # Формат с авторизацией через "@": user:pass@host:port
+        if "@" in proxy_clean:
+            creds, _, addr = proxy_clean.rpartition("@")
+            host_parts = addr.split(":")
+            if len(host_parts) != 2:
+                return None
+            user, sep, password = creds.partition(":")
+            if not sep:
+                return None
+            return host_parts[0], int(host_parts[1]), user, password
+
         parts = proxy_clean.split(":")
         if len(parts) == 4:
             return parts[0], int(parts[1]), parts[2], parts[3]
