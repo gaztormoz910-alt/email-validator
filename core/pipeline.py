@@ -152,6 +152,7 @@ class ValidationPipeline:
                 f"может проверяться до {worst // 60} мин ({worst}с) — прогон будет "
                 "крайне медленным. Обычно хватает 10-20с.", "dead")
 
+        ptr_proxies = []
         if proxies:
             from core.network import filter_live_proxies
             self.callbacks['on_log'](f"[INFO] Тестирование {len(proxies)} прокси-серверов (потоков: {threads}, таймаут: {timeout}с)...", "info")
@@ -164,28 +165,40 @@ class ValidationPipeline:
                 self.callbacks['on_log']("[DEAD] Внимание: Ни один из загруженных прокси не работает. Валидация скорее всего завершится с ошибками.", "dead")
             proxies = live_proxies
 
-            # Заранее говорим, потянут ли прокси Yahoo/AOL. Они требуют обратный DNS
-            # (FCrDNS) у исходящего IP и отшивают остальных ещё на MAIL FROM.
+            # Делим прокси на два пула по наличию обратного DNS. Yahoo/AOL/Verizon
+            # пойдут только через PTR-прокси, всё остальное — через обычные, чтобы
+            # не расходовать дефицитные PTR там, где они не нужны.
             if live_proxies:
                 try:
-                    from core.network import survey_fcrdns_proxies
-                    capable, checked = survey_fcrdns_proxies(live_proxies)
-                    if checked:
-                        pct = round(capable * 100 / checked)
-                        if capable == 0:
-                            self.callbacks['on_log'](
-                                f"[DEAD] Обратный DNS (FCrDNS) есть у 0 из {checked} проверенных прокси. "
-                                "Yahoo, AOL и Verizon проверить НЕ получится — они отшивают такие IP "
-                                "до проверки адреса. Для них нужны прокси с PTR-записью (обычно "
-                                "датацентровые или свой VPS с настроенным reverse DNS).", "dead")
-                        else:
-                            self.callbacks['on_log'](
-                                f"[INFO] Обратный DNS (FCrDNS) есть у {capable} из {checked} прокси ({pct}%). "
-                                "Эти пройдут Yahoo/AOL.", "info")
-                except Exception:
-                    pass
-            
+                    from core.network import split_proxies_by_fcrdns
+                    self.callbacks['on_log'](
+                        f"[INFO] Проверка обратного DNS (PTR) у {len(live_proxies)} прокси...", "info")
+
+                    def on_ptr_prog(done, total, found):
+                        self.callbacks['on_log'](
+                            f"[PROXY] PTR... {done}/{total} | С обратным DNS: {found}", "info")
+
+                    ptr_proxies, plain_proxies = split_proxies_by_fcrdns(
+                        live_proxies, timeout=timeout, progress_callback=on_ptr_prog)
+
+                    if ptr_proxies:
+                        pct = round(len(ptr_proxies) * 100 / len(live_proxies))
+                        self.callbacks['on_log'](
+                            f"[INFO] PTR есть у {len(ptr_proxies)} из {len(live_proxies)} прокси ({pct}%). "
+                            f"Yahoo/AOL пойдут через них, остальные домены — через оставшиеся "
+                            f"{len(plain_proxies)}.", "info")
+                    else:
+                        self.callbacks['on_log'](
+                            "[DEAD] Обратного DNS (PTR) нет ни у одного прокси. Yahoo, AOL и Verizon "
+                            "проверить НЕ получится — они отшивают такие IP до проверки адреса. "
+                            "Остальные домены проверятся нормально.", "dead")
+                except Exception as e:
+                    self.callbacks['on_log'](
+                        f"[DEAD] Проверка PTR не удалась ({type(e).__name__}), пулы не разделены.", "dead")
+
         self.network = NetworkValidator(timeout=timeout, proxies=proxies)
+        if ptr_proxies:
+            self.network.set_ptr_proxies(ptr_proxies)
         
         if enable_ai:
             self.callbacks['on_log']("[INFO] Прогрев и обучение Нейросети (TensorFlow + NaiveBayes)...", "info")

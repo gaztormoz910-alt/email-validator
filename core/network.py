@@ -37,6 +37,17 @@ LEGIT_HELO_NAMES = [
     "mx01.emailgateway.net",
 ]
 
+# Чёрные списки почтовых серверов. Один Spamhaus ненадёжен: он отклоняет
+# запросы с публичных DNS, поэтому опрашиваем несколько независимых списков.
+DNSBL_ZONES = [
+    'zen.spamhaus.org',
+    'b.barracudacentral.org',
+    'bl.spamcop.net',
+    'cbl.abuseat.org',
+    'psbl.surriel.com',
+    'dnsbl.sorbs.net',
+]
+
 # Сколько сбоев ПОДРЯД должен дать прокси, чтобы вылететь из ротации навсегда.
 # Один-два сбоя бывают случайными (таймаут, занятый MX), три подряд — прокси мёртв.
 PROXY_MAX_CONSECUTIVE_FAILS = 3
@@ -178,37 +189,40 @@ def check_single_proxy(proxy, timeout):
         return None
 
 
-def survey_fcrdns_proxies(proxies, sample_size=30, timeout=4):
-    """Оценивает, сколько прокси имеют обратный DNS (FCrDNS).
+def split_proxies_by_fcrdns(proxies, timeout=4, workers=40, progress_callback=None):
+    """Делит прокси на два пула: с обратным DNS (FCrDNS) и без него.
 
-    Без FCrDNS прокси не пройдёт Yahoo/AOL — они отшивают такие IP на MAIL FROM.
-    Проверяем выборку, а не весь список: на тысячах прокси это заняло бы вечность.
+    Через прокси без PTR нельзя проверить Yahoo/AOL/Verizon — они отшивают такой
+    IP на MAIL FROM ошибкой 5.7.25. Остальным провайдерам PTR не нужен, поэтому
+    дефицитные PTR-прокси приберегаем для Yahoo.
 
-    Возвращает (сколько_годных, сколько_проверено).
+    Возвращает (список_с_ptr, список_без_ptr).
     """
     if not proxies:
-        return (0, 0)
+        return ([], [])
 
-    sample = proxies[:sample_size]
     validator = NetworkValidator(timeout=timeout)
-    capable = 0
-    checked = 0
+    with_ptr = []
+    without_ptr = []
+    done = 0
 
     def check_one(p):
         parsed = _parse_proxy(p)
         if not parsed:
-            return None
-        return validator.check_fcrdns(parsed[0])
+            return (p, False)
+        return (p, validator.check_fcrdns(parsed[0]) is True)
 
-    with ThreadPoolExecutor(max_workers=min(20, len(sample))) as pool:
-        for res in pool.map(check_one, sample):
-            if res is None:
-                continue
-            checked += 1
-            if res:
-                capable += 1
+    with ThreadPoolExecutor(max_workers=min(workers, max(1, len(proxies)))) as pool:
+        for proxy, ok in pool.map(check_one, proxies):
+            if ok:
+                with_ptr.append(proxy)
+            else:
+                without_ptr.append(proxy)
+            done += 1
+            if progress_callback and (done % 100 == 0 or done == len(proxies)):
+                progress_callback(done, len(proxies), len(with_ptr))
 
-    return (capable, checked)
+    return (with_ptr, without_ptr)
 
 
 def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None, log_callback=None):
@@ -294,6 +308,8 @@ class NetworkValidator:
         # Иначе мёртвый прокси бесконечно тормозит прогон (10 повторов × таймаут на адрес).
         self._proxy_consecutive_fails = {}
         self._proxy_banned = set()
+        # Прокси с обратным DNS — единственные, через кого проверяется Yahoo/AOL
+        self._ptr_proxies = set()
         if self.proxies:
             for p in self.proxies:
                 self._proxy_scores[p] = 0  # Начальный score = 0
@@ -324,8 +340,33 @@ class NetworkValidator:
             with self._mx_sem_lock:
                 self._mx_semaphores[mx_key] = threading.Semaphore(1)  # Снижаем до 1
 
-    def _pick_best_proxy(self):
+    def set_ptr_proxies(self, ptr_proxies):
+        """Задаёт подмножество прокси, у которых есть обратный DNS (FCrDNS).
+
+        Только через них можно проверять Yahoo/AOL/Verizon — остальные они
+        отшивают на MAIL FROM ошибкой 5.7.25, не дойдя до проверки адреса.
+        """
+        with self._proxy_score_lock:
+            self._ptr_proxies = set(ptr_proxies or [])
+
+    def has_ptr_proxies(self):
+        with self._proxy_score_lock:
+            return bool(self._ptr_proxies - self._proxy_banned)
+
+    def _choose_from(self, candidates):
+        """Берёт случайный из топа по health score."""
+        ranked = sorted(candidates, key=lambda p: self._proxy_scores.get(p, 0), reverse=True)
+        top = ranked[:max(5, len(ranked) // 3)]
+        return random.choice(top)
+
+    def _pick_best_proxy(self, need_ptr=False):
         """Выбирает живой прокси с наивысшим health score (п.8).
+
+        need_ptr=True  — только прокси с обратным DNS (для Yahoo/AOL/Verizon).
+                         Если таких нет, возвращает None: идти без PTR бессмысленно.
+        need_ptr=False — предпочитает прокси БЕЗ PTR, чтобы не расходовать
+                         дефицитные PTR-прокси там, где они не нужны.
+                         Если остались только PTR-прокси, берёт их.
 
         Возвращает None, если прокси не заданы вообще ИЛИ все забанены.
         Вызывающий код обязан различать эти случаи через has_proxies_configured().
@@ -337,10 +378,18 @@ class NetworkValidator:
             alive = [p for p in self.proxies if p not in self._proxy_banned]
             if not alive:
                 return None
-            # Сортируем по score (лучшие сверху) и берём из топ-5 случайный
-            alive_sorted = sorted(alive, key=lambda p: self._proxy_scores.get(p, 0), reverse=True)
-            top = alive_sorted[:max(5, len(alive_sorted) // 3)]
-            return random.choice(top)
+
+            if not self._ptr_proxies:
+                return self._choose_from(alive)
+
+            with_ptr = [p for p in alive if p in self._ptr_proxies]
+            without_ptr = [p for p in alive if p not in self._ptr_proxies]
+
+            if need_ptr:
+                return self._choose_from(with_ptr) if with_ptr else None
+
+            # Бережём PTR-прокси: для обычных доменов они не нужны
+            return self._choose_from(without_ptr or with_ptr)
 
     def has_proxies_configured(self):
         """True, если пользователь загрузил прокси (независимо от того, живы ли они)."""
@@ -371,17 +420,37 @@ class NetworkValidator:
                     self._proxy_banned.add(proxy)
 
     def check_dnsbl(self, mx_host):
+        """True = IP сервера реально в чёрном списке.
+
+        ВАЖНО про коды ответов: листингом считается только 127.0.0.x / 127.0.1.x.
+        Ответы вида 127.255.255.x — это НЕ листинг, а отказ самого блэклиста
+        ("запрос с публичного DNS отклонён", "превышен лимит"). Раньше любой
+        ответ трактовался как листинг, и при некоторых DNS каждый почтовый
+        сервер получал -40 баллов ни за что.
+        """
         with self._dnsbl_lock:
             if mx_host in self._dnsbl_cache:
                 return self._dnsbl_cache[mx_host]
+
+        result = False
         try:
-            ip_answers = self.resolver.resolve(mx_host, 'A')
-            ip = str(ip_answers[0])
+            ip = str(self.resolver.resolve(mx_host, 'A')[0])
             reversed_ip = '.'.join(reversed(ip.split('.')))
-            self.resolver.resolve(f"{reversed_ip}.zen.spamhaus.org", 'A')
-            result = True
+            for bl in DNSBL_ZONES:
+                try:
+                    answers = self.resolver.resolve(f"{reversed_ip}.{bl}", 'A')
+                    for rdata in answers:
+                        code = rdata.to_text()
+                        if code.startswith('127.0.0.') or code.startswith('127.0.1.'):
+                            result = True
+                            break
+                    if result:
+                        break
+                except Exception:
+                    continue  # Не в этом списке либо список не ответил
         except Exception:
             result = False
+
         with self._dnsbl_lock:
             self._dnsbl_cache[mx_host] = result
         return result
@@ -906,6 +975,17 @@ class NetworkValidator:
         """
         domain = email.split("@")[1].lower() if "@" in email else ""
 
+        # Yahoo/AOL/Verizon требуют обратный DNS у исходящего IP. Прокси без PTR
+        # они отшивают на MAIL FROM, до проверки адреса дело не доходит — поэтому
+        # для них берём только PTR-прокси, а остальным доменам PTR не нужен.
+        needs_ptr = domain in YAHOO_DOMAINS or domain in AOL_DOMAINS
+        if needs_ptr and self.proxies and self._ptr_proxies and not self.has_ptr_proxies():
+            return {
+                "status": "unknown",
+                "reason": ("Нет прокси с обратным DNS (PTR) — Yahoo/AOL проверить нечем. "
+                           "Нужен прокси или VPS с PTR-записью."),
+            }
+
         # Yahoo/AOL: увеличиваем лимит попыток, они часто сбрасывают соединение
         if domain in YAHOO_DOMAINS or domain in AOL_DOMAINS:
             max_retries = 15 if self.proxies else 3
@@ -923,7 +1003,7 @@ class NetworkValidator:
                 if self.all_proxies_dead():
                     return {"status": "unknown", "reason": "All Proxies Dead (прямое соединение запрещено)"}
 
-                proxy = self._pick_best_proxy()  # Используем лучший прокси вместо random
+                proxy = self._pick_best_proxy(need_ptr=needs_ptr)
                 result = self._do_single_ping(email, mx_record, proxy=proxy)
 
                 # Если получили однозначный ответ — возвращаем сразу
