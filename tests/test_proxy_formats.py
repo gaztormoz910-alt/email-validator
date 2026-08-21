@@ -135,3 +135,39 @@ class TestSocks5Auth(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestProxySchemeRouting(unittest.TestCase):
+    """Подключаться надо тем же протоколом, которым прокси проверяли.
+
+    Раньше тип соединения был жёстко зашит на SOCKS5, поэтому socks4/http
+    прокси проходили проверку как рабочие, а на валидации отваливались.
+    """
+
+    def test_scheme_detection(self):
+        from core.network import _proxy_scheme
+        self.assertEqual(_proxy_scheme("1.2.3.4:1080"), "socks5")  # по умолчанию
+        self.assertEqual(_proxy_scheme("socks5://1.2.3.4:1080"), "socks5")
+        self.assertEqual(_proxy_scheme("socks4://1.2.3.4:1080"), "socks4")
+        self.assertEqual(_proxy_scheme("http://1.2.3.4:8080"), "http")
+        self.assertEqual(_proxy_scheme("HTTPS://1.2.3.4:8080"), "https")
+
+    def test_scheme_maps_to_proxy_type(self):
+        import socks
+        from core.network import _PROXY_TYPES
+        self.assertEqual(_PROXY_TYPES["socks5"], socks.SOCKS5)
+        self.assertEqual(_PROXY_TYPES["socks4"], socks.SOCKS4)
+        self.assertEqual(_PROXY_TYPES["http"], socks.HTTP)
+        self.assertEqual(_PROXY_TYPES["https"], socks.HTTP)
+
+    def test_socks_smtp_defaults_to_socks5(self):
+        import socks
+        from core.network import SocksSMTP
+        s = SocksSMTP("1.2.3.4", 1080)
+        self.assertEqual(s.proxy_type, socks.SOCKS5)
+
+    def test_socks_smtp_honours_explicit_type(self):
+        import socks
+        from core.network import SocksSMTP
+        s = SocksSMTP("1.2.3.4", 1080, proxy_type=socks.SOCKS4)
+        self.assertEqual(s.proxy_type, socks.SOCKS4)

@@ -82,22 +82,41 @@ def validate_email_syntax(email: str) -> bool:
     return bool(_RFC5322_REGEX.match(email))
 
 
+# Схема прокси -> тип соединения PySocks. Чекер умеет проверять socks4 и HTTP,
+# поэтому и подключаться надо тем же протоколом: иначе прокси проходит проверку
+# как рабочий, а при валидации отваливается.
+_PROXY_TYPES = {
+    "socks5": socks.SOCKS5,
+    "socks4": socks.SOCKS4,
+    "http": socks.HTTP,
+    "https": socks.HTTP,
+}
+
+
+def _proxy_scheme(proxy):
+    """Возвращает схему прокси ('socks5' по умолчанию, если не указана)."""
+    if proxy and "://" in proxy:
+        return proxy.split("://", 1)[0].strip().lower()
+    return "socks5"
+
+
 class SocksSMTP(smtplib.SMTP):
-    """Custom SMTP class that routes traffic through a SOCKS5 proxy."""
+    """SMTP поверх прокси (SOCKS5 по умолчанию, также SOCKS4 и HTTP CONNECT)."""
     def __init__(self, proxy_ip, proxy_port, proxy_user=None, proxy_pass=None,
                  host='', port=0, local_hostname=None,
-                 timeout=socket._GLOBAL_DEFAULT_TIMEOUT):
+                 timeout=socket._GLOBAL_DEFAULT_TIMEOUT, proxy_type=None):
         self.proxy_ip = proxy_ip
         self.proxy_port = proxy_port
         self.proxy_user = proxy_user
         self.proxy_pass = proxy_pass
+        self.proxy_type = proxy_type if proxy_type is not None else socks.SOCKS5
         super().__init__(host, port, local_hostname, timeout)
 
     def _get_socket(self, host, port, timeout):
         return socks.create_connection(
             (host, port),
             timeout=timeout,
-            proxy_type=socks.SOCKS5,
+            proxy_type=self.proxy_type,
             proxy_addr=self.proxy_ip,
             proxy_port=self.proxy_port,
             proxy_username=self.proxy_user,
@@ -150,7 +169,8 @@ def check_single_proxy(proxy, timeout):
         if not parsed:
             return None
         ip, port, user, password = parsed
-        server = SocksSMTP(ip, port, proxy_user=user, proxy_pass=password, timeout=timeout)
+        server = SocksSMTP(ip, port, proxy_user=user, proxy_pass=password, timeout=timeout,
+                           proxy_type=_PROXY_TYPES.get(_proxy_scheme(proxy), socks.SOCKS5))
         server.connect("gmail-smtp-in.l.google.com", 25)
         server.quit()
         return proxy
@@ -590,7 +610,9 @@ class NetworkValidator:
             if not parsed:
                 raise ValueError("Неверный формат прокси")
             ip, port, user, password = parsed
-            return SocksSMTP(ip, port, proxy_user=user, proxy_pass=password, timeout=self.timeout)
+            # Подключаемся тем же протоколом, которым прокси был проверен
+            return SocksSMTP(ip, port, proxy_user=user, proxy_pass=password, timeout=self.timeout,
+                             proxy_type=_PROXY_TYPES.get(_proxy_scheme(proxy), socks.SOCKS5))
         else:
             return smtplib.SMTP(timeout=self.timeout)
 
