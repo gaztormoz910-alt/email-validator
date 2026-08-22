@@ -440,6 +440,26 @@ def is_disposable(email: str) -> bool:
     return False
 
 
+def extend_disposable_domains(domains) -> int:
+    """Добавляет домены из авто-обновляемых списков к встроенной базе.
+
+    Встроенный набор захардкожен и не обновляется никогда. SpamFilter грузит
+    свежие списки из data/*.txt, но умеет только точное совпадение домена.
+    Слив их сюда, мы получаем и свежесть, и проверку ПОДДОМЕНОВ:
+    foo.mailinator.com ловится, только если mailinator.com есть в этой базе.
+
+    Возвращает, сколько доменов реально добавилось.
+    """
+    if not domains:
+        return 0
+    before = len(DISPOSABLE_DOMAINS)
+    for d in domains:
+        d = (d or "").strip().lower()
+        if d and "." in d:
+            DISPOSABLE_DOMAINS.add(d)
+    return len(DISPOSABLE_DOMAINS) - before
+
+
 def get_disposable_count() -> int:
     """Возвращает количество доменов в базе."""
     return len(DISPOSABLE_DOMAINS)
