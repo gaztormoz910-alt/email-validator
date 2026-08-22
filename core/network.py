@@ -38,15 +38,22 @@ LEGIT_HELO_NAMES = [
     "mx01.emailgateway.net",
 ]
 
-# Чёрные списки почтовых серверов. Один Spamhaus ненадёжен: он отклоняет
-# запросы с публичных DNS, поэтому опрашиваем несколько независимых списков.
+# Чёрные списки почтовых серверов.
+#
+# Состав проверен санити-контрактом 2026-08-23: у каждой зоны запрошены
+# обязательная тестовая запись 127.0.0.2 (должна числиться) и 127.0.0.1
+# (не должна). Отсеяны нерабочие: zen.spamhaus.org отклоняет запросы с
+# публичных DNS, cbl.abuseat.org влит в Spamhaus XBL, dnsbl.sorbs.net
+# выведен из эксплуатации — все три давали NXDOMAIN даже на 127.0.0.2,
+# то есть числились в коде, но не работали.
 DNSBL_ZONES = [
-    'zen.spamhaus.org',
     'b.barracudacentral.org',
     'bl.spamcop.net',
-    'cbl.abuseat.org',
     'psbl.surriel.com',
-    'dnsbl.sorbs.net',
+    'truncate.gbudb.net',
+    'all.s5h.net',
+    'bl.mailspike.net',
+    'dnsbl.dronebl.org',
 ]
 
 # Сколько сбоев ПОДРЯД должен дать прокси, чтобы вылететь из ротации навсегда.
@@ -631,7 +638,20 @@ class NetworkValidator:
             pass
 
         # Проверяем DKIM (п.2 DNS-здоровье +1 балл) — пробуем популярные селекторы
-        dkim_selectors = ['google', 'default', 'selector1', 'selector2', 'k1', 'mail', 'dkim', 's1', 's2']
+        # Селекторы DKIM. Универсального способа их узнать нет — имя выбирает
+        # владелец домена, в DNS оно не перечислено. Раньше список был короче,
+        # и крупнейшие провайдеры давали ложное "DKIM нет": у Gmail селектор
+        # 20230601, у Mail.ru — mailru, ни того ни другого в списке не было,
+        # поэтому Gmail и Mail.ru никогда не получали +10 за полный DNS.
+        dkim_selectors = [
+            'google', '20230601', '20221208', '20210112', '20161025',   # Gmail
+            'mailru', 'mail', 'dkim', 'default',                        # Mail.ru и общие
+            'selector1', 'selector2',                                   # Microsoft 365
+            'mx', 'yandex',                                             # Yandex
+            'protonmail', 'protonmail2', 'protonmail3',                 # Proton
+            'zoho', 'zmail',                                            # Zoho
+            'k1', 'k2', 's1', 's2', 'sig1', 'smtp', 'key1', 'dkim1',    # прочие частые
+        ]
         for selector in dkim_selectors:
             try:
                 dkim_answers = self.resolver.resolve(f'{selector}._domainkey.{domain}', 'TXT')

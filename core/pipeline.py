@@ -18,7 +18,7 @@ from core.disposable import is_disposable
 from core.gravatar import GravatarChecker
 from core.scoring import calculate_engagement_score
 from core.provider import classify_domain
-from core.heuristics import looks_machine_generated, is_parked_domain
+from core.heuristics import looks_machine_generated, is_parked_domain, is_role_based
 from core.parser_pipeline import GLOBAL_VERIFIED_DOMAINS
 
 
@@ -168,6 +168,18 @@ class ValidationPipeline:
         try:
             self.filter = SpamFilter()
             self.callbacks['on_log'](f"[INFO] SpamFilter загружен ({self.filter.get_count() if hasattr(self.filter, 'get_count') else '?'} доменов).", "info")
+            # Сливаем свежие списки во встроенную базу: она захардкожена и сама
+            # не обновляется, зато умеет проверять ПОДДОМЕНЫ (foo.mailinator.com),
+            # чего SpamFilter не делает — он сверяет только точное имя домена.
+            try:
+                from core.disposable import extend_disposable_domains, get_disposable_count
+                added = extend_disposable_domains(self.filter.blacklist_domains)
+                if added:
+                    self.callbacks['on_log'](
+                        f"[INFO] В базу одноразовых добавлено {added} доменов "
+                        f"(всего {get_disposable_count()}), поддомены тоже ловятся.", "info")
+            except Exception:
+                pass
         except Exception:
             self.filter = None
         
@@ -255,6 +267,14 @@ class ValidationPipeline:
         import queue as queue_module
         greylisted_queue = queue_module.Queue()
         greylisted_lock = threading.Lock()
+
+        # Статистика вердиктов по домену. Если у домена МНОГО адресов и ВСЕ до
+        # единого ответили 250 OK — это почти наверняка catch-all, даже когда
+        # тройная проба сказала обратное (она могла сорваться на прокси).
+        # Тройная проба смотрит 3 выдуманных адреса, а здесь мы видим реальную
+        # выборку из самой базы — сигнал сильнее.
+        domain_stats = {}
+        domain_stats_lock = threading.Lock()
         
         # Предзагрузка тяжелых модулей один раз (O(1) вместо O(N) в потоках)
         if not self.name_extractor:
@@ -318,21 +338,9 @@ class ValidationPipeline:
 
             # Шаг 1.2: Проверка на ролевые ящики (Role-based) — п.2.1
             # НЕ убиваем их! Помечаем как отдельную категорию "Role-based".
-            is_role = False
-            if "@" in email:
-                local_p, domain_p = email.split("@", 1)
-                roles = {
-                    "abuse", "admin", "billing", "compliance", "contact", "devnull",
-                    "dns", "ftp", "help", "hostmaster", "hr", "info", "jobs",
-                    "list", "maildaemon", "marketing", "media", "noc",
-                    "no-reply", "noreply", "null", "office", "postmaster",
-                    "privacy", "registrar", "root", "sales", "security",
-                    "spam", "staff", "subscribe", "support", "sysadmin",
-                    "tech", "unsubscribe", "webmaster", "www", "hello",
-                    "press", "legal", "feedback"
-                }
-                if local_p.lower() in roles:
-                    is_role = True
+            # Общая функция ловит не только точные совпадения (info@), но и
+            # sales-team@, info.desk@, noreply2@, do-not-reply@, mailer-daemon@
+            is_role = is_role_based(email)
 
             # Шаг 1.5: Проверка через ИИ (Машинное обучение)
             if enable_ai and self.ai:
@@ -365,6 +373,17 @@ class ValidationPipeline:
                 else:
                     status_display = "Invalid/Bounce"
                 
+                # Копим статистику по домену для пост-анализа catch-all
+                try:
+                    dom_key = email.rsplit("@", 1)[1].lower()
+                    with domain_stats_lock:
+                        st = domain_stats.setdefault(dom_key, {"total": 0, "valid": 0})
+                        st["total"] += 1
+                        if raw_status == "valid":
+                            st["valid"] += 1
+                except Exception:
+                    pass
+
                 # Сохраняем оригинальный SMTP-статус для скоринга (фикс бага Role-based)
                 original_smtp_status = status_display
                 
@@ -742,6 +761,27 @@ class ValidationPipeline:
             self.callbacks['on_log'](
                 f"[INFO] {leftover} greylisted-адресов возвращены как Unknown "
                 "(перепроверка не выполнена) — потеряться они не могут.", "info")
+
+        # Пост-анализ: домены, где ВСЕ адреса ответили 250 OK, почти наверняка
+        # catch-all — они принимают что угодно, и их Valid ничего не доказывает.
+        # Тройная проба смотрит 3 выдуманных адреса и могла сорваться; здесь же
+        # выборка из реальной базы, поэтому сигнал надёжнее.
+        try:
+            suspicious = []
+            with domain_stats_lock:
+                for dom, st in domain_stats.items():
+                    if st["total"] >= 5 and st["valid"] == st["total"]:
+                        suspicious.append((dom, st["total"]))
+            if suspicious:
+                suspicious.sort(key=lambda x: -x[1])
+                self.callbacks['on_log'](
+                    "[DEAD] Подозрение на catch-all: у этих доменов ВСЕ проверенные "
+                    "адреса ответили 250 OK. Их Valid не доказывает существование "
+                    "ящика — сегментируйте отдельно:", "dead")
+                for dom, cnt in suspicious[:15]:
+                    self.callbacks['on_log'](f"[DEAD]    {dom} — {cnt} из {cnt} valid", "dead")
+        except Exception:
+            pass
 
         self.is_running = False
         self.callbacks['on_complete']()
