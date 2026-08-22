@@ -22,6 +22,32 @@ from core.heuristics import looks_machine_generated, is_parked_domain, is_role_b
 from core.parser_pipeline import GLOBAL_VERIFIED_DOMAINS
 
 
+# Причины Unknown, которые стоит перепроверить: они говорят о сбое НАШЕЙ стороны
+# (прокси, сеть, лимит скорости), а не о ящике. Повтор другим прокси часто
+# превращает их в однозначный вердикт.
+_TRANSIENT_MARKERS = (
+    "timeout", "proxy dead", "server disconnected", "smtp connect error",
+    "rate limit", "service busy", "all proxies dead", "temp unavailable",
+    "temp error", "our ip blocked", "our ip blacklisted", "transaction failed",
+    "mail from rejected", "too many recipients",
+)
+
+# Эти Unknown повторять бессмысленно — ответ не изменится от смены прокси
+_PERMANENT_UNKNOWN_MARKERS = (
+    "catch-all", "catchall", "fcrdns", "обратного dns", "не проверяется",
+)
+
+
+def _is_transient_failure(raw_status: str, reason: str) -> bool:
+    """True, если Unknown вызван временным сбоем и заслуживает повтора."""
+    if raw_status != "unknown":
+        return False
+    low = (reason or "").lower()
+    if any(m in low for m in _PERMANENT_UNKNOWN_MARKERS):
+        return False
+    return any(m in low for m in _TRANSIENT_MARKERS)
+
+
 def _utc_now():
     """Текущее время как aware-datetime в UTC."""
     return datetime.datetime.now(datetime.timezone.utc)
@@ -362,6 +388,14 @@ class ValidationPipeline:
                     greylisted_queue.put((email, data, is_role))
                     return  # Не выводим результат сейчас — перепроверим позже
 
+                # Временный отказ (таймаут, сдохший прокси, лимит скорости, блок по
+                # IP) — это НЕ вердикт о ящике, а сбой нашей стороны. Отправляем в ту
+                # же очередь: через паузу лимиты отпускают, прокси восстанавливаются,
+                # и повтор другим прокси часто даёт однозначный ответ вместо Unknown.
+                if _is_transient_failure(raw_status, res.get("reason", "")):
+                    greylisted_queue.put((email, data, is_role))
+                    return
+
                 if raw_status == "valid":
                     status_display = "Valid"
                 elif raw_status == "catchall":
@@ -594,10 +628,14 @@ class ValidationPipeline:
         for wt in worker_threads:
             wt.join()
         
-        # === Greylisting Auto-Retry (п.2.4) ===
+        # === Повторная проверка: greylisted + временные отказы (п.2.4) ===
+        # Сюда попадают адреса, по которым НЕТ вердикта о ящике: сервер попросил
+        # прийти позже (greylisting) либо сбой был на нашей стороне (таймаут,
+        # прокси, лимит скорости). Пауза даёт лимитам отпустить, а повтор идёт
+        # другим прокси — значительная часть превращается в однозначный ответ.
         greylisted_count = greylisted_queue.qsize()
         if greylisted_count > 0 and self.is_running and deep_ping:
-            self.callbacks['on_log'](f"[INFO] Перепроверка {greylisted_count} Greylisted почт, ожидание 90 сек...", "info")
+            self.callbacks['on_log'](f"[INFO] Отложено на перепроверку: {greylisted_count} адресов (greylisting и временные сбои). Ожидание 90 сек...", "info")
             
             # Ждём 90 секунд (серверы с greylisting ожидают повторной попытки через 1-5 мин)
             for i in range(90):
@@ -606,13 +644,16 @@ class ValidationPipeline:
                 time.sleep(1)
             
             if self.is_running:
-                self.callbacks['on_log'](f"[INFO] Начинаю перепроверку {greylisted_count} Greylisted почт...", "info")
+                self.callbacks['on_log'](f"[INFO] Начинаю перепроверку {greylisted_count} адресов...", "info")
                 retry_count = 0
-                while not greylisted_queue.empty() and self.is_running:
-                    try:
-                        email, data, is_role = greylisted_queue.get_nowait()
-                    except Exception:
-                        break
+                retry_lock = threading.Lock()
+
+                def retry_one(entry):
+                    """Обрабатывает один отложенный адрес. Вызывается из пула потоков."""
+                    nonlocal retry_count
+                    email, data, is_role = entry
+                    if not self.is_running:
+                        return
                     
                     res = self.network.check_email(email)
                     raw_status = res["status"]
@@ -736,9 +777,32 @@ class ValidationPipeline:
                     data["validated_at"] = _utc_now().strftime("%Y-%m-%d %H:%M")
                     
                     self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
-                    retry_count += 1
-                
-                self.callbacks['on_log'](f"[INFO] Перепроверка Greylisted завершена: {retry_count} почт обработано.", "info")
+                    with retry_lock:
+                        retry_count += 1
+
+                # Забираем всё из очереди и обрабатываем ПАРАЛЛЕЛЬНО. Раньше повтор
+                # шёл в один поток: на тысячах отложенных адресов это растягивалось
+                # на часы, в течение которых их не было в выдаче.
+                pending = []
+                while True:
+                    try:
+                        pending.append(greylisted_queue.get_nowait())
+                    except Exception:
+                        break
+
+                retry_workers = max(1, min(safe_threads, len(pending)))
+                with ThreadPoolExecutor(max_workers=retry_workers) as retry_pool:
+                    futures = [retry_pool.submit(retry_one, entry) for entry in pending]
+                    for fut in as_completed(futures):
+                        try:
+                            fut.result()
+                        except Exception as e:
+                            self.callbacks['on_log'](
+                                f"[DEAD] Ошибка перепроверки: {type(e).__name__}: {e}", "dead")
+
+                self.callbacks['on_log'](
+                    f"[INFO] Перепроверка завершена: {retry_count} из {len(pending)} адресов "
+                    "получили окончательный вердикт.", "info")
 
         # Страховка: всё, что осталось в очереди — не перепроверено (нажали «Стоп»,
         # выключен deep_ping, или прогон прервался). Раньше такие адреса молча
