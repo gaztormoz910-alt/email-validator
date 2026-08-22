@@ -46,18 +46,41 @@ class ValidationPipeline:
         self.ai = None
         self.name_extractor = None
         self.ml_predictor = None
-        self.gravatar_checker = GravatarChecker(timeout=3)
+        self.gravatar_checker = GravatarChecker(timeout=3, proxy_provider=self._http_proxies)
         self._domain_age_cache = {}
         self._domain_age_lock = threading.Lock()
         self._http_alive_cache = {}
         self._http_alive_lock = threading.Lock()
         
+    def _http_proxies(self):
+        """Прокси для HTTP-проверок (Gravatar, RDAP, HEAD).
+
+        Возвращает None, если прокси не заданы — тогда идём напрямую, как раньше.
+        Если заданы, все HTTP-каналы идут через них: иначе реальный IP утекает
+        и на gravatar.com, и в WHOIS, и на сайт самой проверяемой компании.
+        """
+        try:
+            if self.network and self.network.has_proxies_configured():
+                from core.network import build_proxy_dict
+                proxy = self.network._pick_best_proxy()
+                if proxy:
+                    return build_proxy_dict(proxy)
+        except Exception:
+            pass
+        return None
+
     def _get_domain_age_days(self, domain):
         """Получить возраст домена в днях через WHOIS/RDAP. Кэшируется."""
         with self._domain_age_lock:
             if domain in self._domain_age_cache:
                 return self._domain_age_cache[domain]
+        proxies = self._http_proxies()
         try:
+            # Библиотека whois ходит по 43 порту напрямую и прокси не умеет.
+            # Когда прокси заданы, пропускаем её и идём сразу в RDAP по HTTPS,
+            # который проксируется. Иначе IP утекает регистратору домена.
+            if proxies:
+                raise RuntimeError("whois не проксируется — используем RDAP")
             import whois
             w = whois.whois(domain)
             creation = w.creation_date
@@ -75,17 +98,23 @@ class ValidationPipeline:
             pass
         # Фоллбэк: RDAP через rdap.org
         try:
-            req = urllib.request.Request(f"https://rdap.org/domain/{domain}", method="GET")
-            req.add_header("User-Agent", "Mozilla/5.0")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode())
-                for event in data.get("events", []):
-                    if event.get("eventAction") == "registration":
-                        dt = datetime.datetime.fromisoformat(event["eventDate"].replace("Z", "+00:00"))
-                        age = (_utc_now() - _as_utc(dt)).days
-                        with self._domain_age_lock:
-                            self._domain_age_cache[domain] = age
-                        return age
+            url = f"https://rdap.org/domain/{domain}"
+            if proxies:
+                import requests
+                data = requests.get(url, timeout=8, proxies=proxies,
+                                    headers={"User-Agent": "Mozilla/5.0"}).json()
+            else:
+                req = urllib.request.Request(url, method="GET")
+                req.add_header("User-Agent", "Mozilla/5.0")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    data = json.loads(resp.read().decode())
+            for event in data.get("events", []):
+                if event.get("eventAction") == "registration":
+                    dt = datetime.datetime.fromisoformat(event["eventDate"].replace("Z", "+00:00"))
+                    age = (_utc_now() - _as_utc(dt)).days
+                    with self._domain_age_lock:
+                        self._domain_age_cache[domain] = age
+                    return age
         except Exception:
             pass
         with self._domain_age_lock:
@@ -97,27 +126,27 @@ class ValidationPipeline:
         with self._http_alive_lock:
             if domain in self._http_alive_cache:
                 return self._http_alive_cache[domain]
-        try:
-            req = urllib.request.Request(f"https://{domain}", method="HEAD")
-            req.add_header("User-Agent", "Mozilla/5.0")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                alive = resp.status < 400
+        # Без прокси этот запрос оставляет реальный IP в логах самой проверяемой
+        # компании — поэтому, если прокси заданы, идём через них.
+        proxies = self._http_proxies()
+        for scheme in ("https", "http"):
+            try:
+                url = f"{scheme}://{domain}"
+                if proxies:
+                    import requests
+                    alive = requests.head(url, timeout=6, proxies=proxies,
+                                          headers={"User-Agent": "Mozilla/5.0"},
+                                          allow_redirects=True).status_code < 400
+                else:
+                    req = urllib.request.Request(url, method="HEAD")
+                    req.add_header("User-Agent", "Mozilla/5.0")
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        alive = resp.status < 400
                 with self._http_alive_lock:
                     self._http_alive_cache[domain] = alive
                 return alive
-        except Exception:
-            pass
-        # Попробовать HTTP если HTTPS не работает
-        try:
-            req = urllib.request.Request(f"http://{domain}", method="HEAD")
-            req.add_header("User-Agent", "Mozilla/5.0")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                alive = resp.status < 400
-                with self._http_alive_lock:
-                    self._http_alive_cache[domain] = alive
-                return alive
-        except Exception:
-            pass
+            except Exception:
+                continue
         with self._http_alive_lock:
             self._http_alive_cache[domain] = False
         return False
@@ -146,11 +175,10 @@ class ValidationPipeline:
         # один адрес: до 10 попыток * таймаут. Ползунок не трогаем (это осознанная
         # настройка), но предупреждаем, иначе прогон выглядит как зависание.
         if timeout > 30:
-            worst = timeout * 10
             self.callbacks['on_log'](
-                f"[DEAD] Таймаут {timeout}с очень большой. Через прокси один адрес "
-                f"может проверяться до {worst // 60} мин ({worst}с) — прогон будет "
-                "крайне медленным. Обычно хватает 10-20с.", "dead")
+                f"[DEAD] Таймаут {timeout}с очень большой — прогон будет медленным. "
+                "Обычно хватает 10-20с. (Зависнуть на одном адресе валидатор не даст: "
+                "есть общий дедлайн, максимум 180с на адрес.)", "dead")
 
         ptr_proxies = []
         if proxies:
@@ -692,7 +720,29 @@ class ValidationPipeline:
                     retry_count += 1
                 
                 self.callbacks['on_log'](f"[INFO] Перепроверка Greylisted завершена: {retry_count} почт обработано.", "info")
-                
+
+        # Страховка: всё, что осталось в очереди — не перепроверено (нажали «Стоп»,
+        # выключен deep_ping, или прогон прервался). Раньше такие адреса молча
+        # исчезали: в выдачу они не попадали ни на первом проходе, ни на втором,
+        # а прогресс-бар уже считал их обработанными. Отдаём их как Unknown.
+        leftover = 0
+        while True:
+            try:
+                email, data, is_role = greylisted_queue.get_nowait()
+            except Exception:
+                break
+            leftover += 1
+            data["validated_at"] = _utc_now().strftime("%Y-%m-%d %H:%M")
+            try:
+                self.callbacks['on_result'](
+                    email, "Unknown", "Greylisted (перепроверка не выполнена)", "N/A", data)
+            except Exception:
+                pass
+        if leftover:
+            self.callbacks['on_log'](
+                f"[INFO] {leftover} greylisted-адресов возвращены как Unknown "
+                "(перепроверка не выполнена) — потеряться они не могут.", "info")
+
         self.is_running = False
         self.callbacks['on_complete']()
 

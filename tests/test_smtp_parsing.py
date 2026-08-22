@@ -85,5 +85,40 @@ class TestSMTPResponseParsing(unittest.TestCase):
         self.assertEqual(self.parse(550, b"550 Account disabled")["status"], "risky")
 
 
+
+class TestServerVsMailboxFull(unittest.TestCase):
+    """Переполненный СЕРВЕР — это не переполненный ЯЩИК.
+
+    "452 4.3.1 Insufficient system storage" означает, что на почтовике кончилось
+    место на диске, и про существование ящика не говорит ничего. Раньше
+    подстрочный матч по "storage" стоял выше разбора кодов, ловил любой код,
+    и такие ответы уезжали в valid с бонусом +70.
+    """
+
+    def setUp(self):
+        self.v = NetworkValidator(timeout=3)
+
+    def parse(self, code, msg):
+        return self.v._parse_smtp_response(code, msg, "user@corp.com", "corp.com")
+
+    def test_server_out_of_disk_is_not_valid(self):
+        for code, msg in [(452, b"4.3.1 Insufficient system storage"),
+                          (452, b"4.3.1 insufficient system storage"),
+                          (550, b"5.0.0 no storage left"),
+                          (421, b"4.0.0 mailbox full, try later")]:
+            with self.subTest(code=code, msg=msg):
+                self.assertNotEqual(self.parse(code, msg)["status"], "valid")
+
+    def test_real_full_mailbox_stays_valid(self):
+        for code, msg in [(452, b"4.2.2 Mailbox full"),
+                          (452, b"4.2.2 quota exceeded"),
+                          (552, b"5.2.2 Over quota"),
+                          (552, b"5.2.2 anything at all")]:
+            with self.subTest(code=code, msg=msg):
+                self.assertEqual(self.parse(code, msg)["status"], "valid")
+
+    def test_other_452_not_treated_as_full_inbox(self):
+        self.assertNotEqual(self.parse(452, b"4.5.3 Too many recipients")["status"], "valid")
+
 if __name__ == '__main__':
     unittest.main()

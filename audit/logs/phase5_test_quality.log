@@ -1,0 +1,123 @@
+================================================================================================
+ФАЗА 5.2/5.3 — КАЧЕСТВО СУЩЕСТВУЮЩИХ ТЕСТОВ
+================================================================================================
+  Всего тестовых функций: 108
+  Тестов без обращения к проверяемой логике (smoke/структурные): 86
+     tests\test_engine.py         test_proxy_parsing_and_round_robin             assert=6 строк=11  не вызывает ни одной проверяемой функции
+     tests\test_engine.py         test_proxy_dead_marking                        assert=4 строк=11  не вызывает ни одной проверяемой функции
+     tests\test_engine.py         test_engine_initialization                     assert=1 строк=4  не вызывает ни одной проверяемой функции
+     tests\test_extractor.py      test_basic_emails                              assert=1 строк=4  1 assert, тело <=5 строк
+     tests\test_extractor.py      test_garbage_and_punctuation                   assert=1 строк=4  1 assert, тело <=5 строк
+     tests\test_extractor.py      test_deduplication                             assert=1 строк=4  1 assert, тело <=5 строк
+     tests\test_fcrdns.py         test_fcrdns_result_is_cached                   assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_fcrdns.py         test_fcrdns_rejection_is_not_invalid           assert=1 строк=4  1 assert, тело <=5 строк
+     tests\test_fcrdns.py         test_ptr_required_picks_only_ptr_proxies       assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_fcrdns.py         test_normal_domains_conserve_ptr_proxies       assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_fcrdns.py         test_falls_back_to_ptr_pool_when_plain_exhausted assert=1 строк=5  1 assert, тело <=5 строк
+     tests\test_fcrdns.py         test_without_split_all_proxies_usable          assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_fcrdns.py         test_error_codes_are_not_a_listing             assert=2 строк=4  не вызывает ни одной проверяемой функции
+     tests\test_fcrdns.py         test_dnsbl_result_is_cached                    assert=1 строк=4  1 assert, тело <=5 строк
+     tests\test_heuristics.py     test_no_false_positives_on_real_people         assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_heuristics.py     test_catches_machine_generated                 assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_heuristics.py     test_short_locals_never_flagged                assert=1 строк=4  1 assert, тело <=5 строк
+     tests\test_heuristics.py     test_separators_mean_human_format              assert=1 строк=2  1 assert, тело <=5 строк
+     tests\test_heuristics.py     test_degenerate_input                          assert=0 строк=3  1 assert, тело <=5 строк
+     tests\test_heuristics.py     test_entropy_basic                             assert=3 строк=4  не вызывает ни одной проверяемой функции
+     tests\test_heuristics.py     test_parked_hosts_detected                     assert=1 строк=4  1 assert, тело <=5 строк
+     tests\test_heuristics.py     test_real_mx_not_flagged                       assert=1 строк=5  1 assert, тело <=5 строк
+     tests\test_heuristics.py     test_machine_generated_penalised               assert=2 строк=6  не вызывает ни одной проверяемой функции
+     tests\test_heuristics.py     test_parked_domain_penalised                   assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_heuristics.py     test_defaults_do_not_penalise                  assert=2 строк=5  не вызывает ни одной проверяемой функции
+     tests\test_normalization.py  test_gmail_ignores_dots                        assert=2 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_normalization.py  test_gmail_plus_tag_stripped                   assert=2 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_normalization.py  test_googlemail_is_gmail                       assert=2 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_normalization.py  test_case_insensitive                          assert=1 строк=2  не вызывает ни одной проверяемой функции
+     tests\test_normalization.py  test_plus_tag_stripped_for_known_providers     assert=3 строк=4  не вызывает ни одной проверяемой функции
+     tests\test_normalization.py  test_dots_matter_outside_gmail                 assert=2 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_normalization.py  test_plus_not_stripped_for_corporate           assert=1 строк=2  не вызывает ни одной проверяемой функции
+     tests\test_normalization.py  test_different_users_stay_different            assert=2 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_normalization.py  test_degenerate_input_does_not_crash           assert=0 строк=3  1 assert, тело <=5 строк
+     tests\test_normalization.py  test_isp_detected                              assert=1 строк=2  1 assert, тело <=5 строк
+     tests\test_normalization.py  test_government_detected                       assert=1 строк=2  1 assert, тело <=5 строк
+     tests\test_normalization.py  test_corporate_default                         assert=1 строк=2  1 assert, тело <=5 строк
+     tests\test_proxy_formats.py  test_host_port                                 assert=1 строк=2  1 assert, тело <=5 строк
+     tests\test_proxy_formats.py  test_host_port_user_pass                       assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_proxy_formats.py  test_user_pass_at_host_port                    assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_proxy_formats.py  test_scheme_prefixes_are_stripped              assert=1 строк=5  1 assert, тело <=5 строк
+     tests\test_proxy_formats.py  test_scheme_with_at_credentials                assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_proxy_formats.py  test_password_may_contain_at                   assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_proxy_formats.py  test_case_preserved_in_credentials             assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_proxy_formats.py  test_garbage_returns_none                      assert=1 строк=4  1 assert, тело <=5 строк
+     tests\test_proxy_formats.py  test_wrong_password_is_rejected                assert=1 строк=5  1 assert, тело <=5 строк
+     tests\test_proxy_formats.py  test_scheme_detection                          assert=5 строк=7  не вызывает ни одной проверяемой функции
+     tests\test_proxy_formats.py  test_scheme_maps_to_proxy_type                 assert=4 строк=7  не вызывает ни одной проверяемой функции
+     tests\test_proxy_formats.py  test_socks_smtp_defaults_to_socks5             assert=1 строк=5  не вызывает ни одной проверяемой функции
+     tests\test_proxy_formats.py  test_socks_smtp_honours_explicit_type          assert=1 строк=5  не вызывает ни одной проверяемой функции
+     tests\test_smtp_parsing.py   test_250_is_valid                              assert=1 строк=2  не вызывает ни одной проверяемой функции
+     tests\test_smtp_parsing.py   test_full_mailbox_is_valid                     assert=2 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_smtp_parsing.py   test_user_does_not_exist_is_invalid            assert=1 строк=9  не вызывает ни одной проверяемой функции
+     tests\test_smtp_parsing.py   test_our_ip_blocked_is_not_invalid             assert=1 строк=7  не вызывает ни одной проверяемой функции
+     tests\test_smtp_parsing.py   test_sender_rejection_is_not_invalid           assert=1 строк=9  не вызывает ни одной проверяемой функции
+     tests\test_smtp_parsing.py   test_bare_550_is_not_invalid                   assert=1 строк=2  не вызывает ни одной проверяемой функции
+     tests\test_smtp_parsing.py   test_protocol_and_auth_5xx_are_not_invalid     assert=1 строк=4  не вызывает ни одной проверяемой функции
+     tests\test_smtp_parsing.py   test_unknown_5xx_is_not_invalid                assert=1 строк=2  не вызывает ни одной проверяемой функции
+     tests\test_smtp_parsing.py   test_temporary_4xx_is_not_invalid              assert=1 строк=4  не вызывает ни одной проверяемой функции
+     tests\test_smtp_parsing.py   test_account_disabled_is_risky_not_invalid     assert=1 строк=2  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_valid_smtp_with_good_server               assert=1 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_full_inbox_with_good_server               assert=1 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_valid_without_ptr_starttls_gets_penalized assert=1 строк=4  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_unmeasured_ptr_starttls_not_penalized     assert=2 строк=5  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_confirmed_valid_mailbox_never_graded_dead assert=1 строк=5  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_disposable_heavy_penalty                  assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_validation.py     test_dnsbl_penalty                             assert=1 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_no_ptr_penalty                            assert=1 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_no_starttls_penalty                       assert=1 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_gravatar_gives_10_not_20                  assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_validation.py     test_role_based_preserves_smtp_score           assert=2 строк=5  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_alive_free_provider_can_reach_hot         assert=2 строк=6  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_bare_alive_gmail_is_at_least_warm         assert=1 строк=4  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_full_inbox_outranks_plain_ok              assert=1 строк=6  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_machine_generated_alive_stays_below_warm  assert=1 строк=5  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_confirmed_bounce_is_dead_despite_healthy_domain assert=2 строк=6  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_grade_dead                                assert=1 строк=3  1 assert, тело <=5 строк
+     tests\test_validation.py     test_young_domain_penalty                      assert=1 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_old_domain_bonus                          assert=1 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_no_website_penalty_corporate              assert=1 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_known_disposable                          assert=2 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_legit_provider                            assert=2 строк=3  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_privacy_relays_not_disposable             assert=1 строк=2  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_subdomain_of_disposable                   assert=1 строк=2  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_corporate_not_disposable                  assert=1 строк=2  не вызывает ни одной проверяемой функции
+     tests\test_validation.py     test_cache_is_ordered_dict                     assert=1 строк=3  не вызывает ни одной проверяемой функции
+
+  ТАВТОЛОГИЧЕСКИЕ (тест сам подставляет ответ, который потом проверяет):
+     tests\test_fcrdns.py     test_fcrdns_result_is_cached                   — подменяет кэш и проверяет его же
+     tests\test_fcrdns.py     test_dnsbl_result_is_cached                    — подменяет кэш и проверяет его же
+
+================================================================================================
+ФАЗА 0.2 — ЧЕГО В СПЕЦИФИКАЦИИ НЕТ, А В КОДЕ ЕСТЬ / НЕДОДЕЛКИ
+================================================================================================
+  TODO/FIXME/HACK              0  
+  except: pass (голый)         2  ./core/tor_manager.py:120, ./core/tor_manager.py:130
+  except Exception: pass      46  ./async_proxy_checker.py:138, ./core/async_proxy.py:193, ./core/async_proxy.py:200, ./core/filters.py:24, ./core/github_parser.py:47, ./core/github_parser.py:112, ./core/github_parser.py:127, ./core/network.py:546, ./core/network.py:557, ./core/network.py:567, ./core/network.py:597, ./core/network.py:608 ...
+  except -> return None        3  ./core/network.py:173, ./core/network.py:188, ./core/parser/engine.py:223
+  return True  # temp         19  ./async_proxy_checker.py:62, ./core/ai_filter.py:46, ./core/async_proxy.py:104, ./core/heuristics.py:52, ./core/heuristics.py:61, ./core/heuristics.py:74, ./core/network.py:648, ./core/network.py:651, ./core/network.py:655, ./core/network.py:659, ./core/network.py:663, ./core/network.py:667 ...
+
+  Корневые test_*.py (побочные эффекты при импорте, ломают голый `pytest`):
+     test_aol.py          null-байты=False функций test_=False сеть=True  пишет файлы=False
+     test_direct.py       null-байты=True  функций test_=False сеть=False пишет файлы=False
+     test_filter.py       null-байты=False функций test_=False сеть=False пишет файлы=False
+     test_pagination.py   null-байты=False функций test_=False сеть=True  пишет файлы=False
+     test_pipeline.py     null-байты=False функций test_=False сеть=False пишет файлы=False
+     test_yahoo.py        null-байты=False функций test_=False сеть=True  пишет файлы=True
+
+  Неиспользуемые модули (импортируются ли откуда-нибудь):
+     core/ai_filter.py            импортируется 0 раз <-- НИКЕМ
+     core/tor_manager.py          импортируется 1 раз 
+     core/streamer.py             импортируется 6 раз 
+     async_proxy_checker.py       импортируется 0 раз <-- НИКЕМ
+     original_engine.py           импортируется 0 раз <-- НИКЕМ
+     core/parser/osint.py         импортируется 1 раз 
+     core/ai_engine.py            импортируется 1 раз 
+     core/gravatar.py             импортируется 2 раз 
+     core/github_parser.py        импортируется 1 раз 

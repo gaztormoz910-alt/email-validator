@@ -98,5 +98,32 @@ class TestScoringIntegration(unittest.TestCase):
         self.assertNotIn("припаркован", joined)
 
 
+
+class TestPrivacyRelayNotMachine(unittest.TestCase):
+    """Приватные relay-сервисы принадлежат РЕАЛЬНЫМ людям.
+
+    Apple Private Relay включён у миллионов по умолчанию и выдаёт случайную
+    локальную часть. Раньше энтропия штрафовала такие адреса на -20, хотя
+    core/disposable.py специально не считает эти сервисы одноразовыми.
+    """
+
+    RELAY = [
+        "dq5xr2mkpz@privaterelay.appleid.com",
+        "k8jf3nzqwt@privaterelay.appleid.com",
+        "x7kq2mn9@relay.firefox.com",
+        "abc123xyz@anonaddy.me",
+        "q9w8e7r6@duck.com",
+        "zx9k2m@simplelogin.io",
+    ]
+
+    def test_relay_addresses_are_never_machine_generated(self):
+        for e in self.RELAY:
+            with self.subTest(email=e):
+                self.assertFalse(looks_machine_generated(e))
+
+    def test_bots_on_normal_domains_still_caught(self):
+        # Исключение действует только для relay-доменов, не для всех подряд
+        self.assertTrue(looks_machine_generated("dq5xr2mkpz@gmail.com"))
+
 if __name__ == '__main__':
     unittest.main()

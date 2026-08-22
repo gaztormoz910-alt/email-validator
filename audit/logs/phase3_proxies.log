@@ -1,0 +1,60 @@
+====================================================================================
+S6.2 ПРОТОКОЛ ПОДКЛЮЧЕНИЯ СОВПАДАЕТ СО СХЕМОЙ
+====================================================================================
+  схема socks5  _parse_proxy=('127.0.0.1', 50880, 'user', 'pass')
+     _PROXY_TYPES[socks5] = 2
+     первые байты на проводе: b'\x05\x02\x00\x02' -> клиент говорил SOCKS5  [OK]
+     RFC1929-авторизация: [('AUTH', b'user', b'pass')]
+     результат пинга: valid / 250 OK
+
+  схема socks4  _parse_proxy=('127.0.0.1', 50882, 'user', 'pass')
+     _PROXY_TYPES[socks4] = 1
+     первые байты на проводе: b'\x04\x01\x00\x19' -> клиент говорил SOCKS4  [OK]
+     RFC1929-авторизация: не запрашивалась сервером
+     результат пинга: valid / 250 OK
+
+  схема http    _parse_proxy=('127.0.0.1', 50884, 'user', 'pass')
+     _PROXY_TYPES[http] = 3
+     первые байты на проводе: b'CONN' -> клиент говорил HTTP  [OK]
+     RFC1929-авторизация: не запрашивалась сервером
+     результат пинга: unknown / Server Disconnected
+
+====================================================================================
+S6.1 ПРОВЕРКА ПРОКСИ ИДЁТ ПО ПОРТУ 25
+====================================================================================
+   AsyncProxyChecker, ветка mode=smtp:
+      mode: "http" (for parser) or "smtp" (for validator)
+      self.target_host = "gstatic.com"
+      self.target_port = 80
+      elif self.mode == "smtp":
+      self.target_host = "gmail-smtp-in.l.google.com"
+      self.target_port = 25
+   check_single_proxy -> socks5://u:p@127.0.0.1:50887
+   запрошенный через прокси адрес: host='gmail-smtp-in.l.google.com' port=25  [OK: порт 25]
+
+====================================================================================
+S6.4 БАН ПРОКСИ ПОСЛЕ N СБОЕВ ПОДРЯД
+====================================================================================
+   PROXY_MAX_CONSECUTIVE_FAILS = 3
+     сбой #1: подряд=1 score=-3 забанен=False
+     сбой #2: подряд=2 score=-6 забанен=False
+     сбой #3: подряд=3 score=-9 забанен=True
+     сбой #4: подряд=4 score=-12 забанен=True
+   сбой,сбой,УСПЕХ,сбой,сбой -> подряд=2 забанен=False (верно: сбои не подряд)
+   после УСПЕХА забаненный p1 забанен=True (бан навсегда — как заявлено)
+   после бана всех: get_live_proxy_count()=0 all_proxies_dead()=True _pick_best_proxy()=None
+   _do_single_ping(proxy=None) при заданных прокси -> {'status': 'unknown', 'reason': 'All Proxies Dead (прямое соединение запрещено)'}
+
+====================================================================================
+S6.3 РАЗДЕЛЬНЫЕ ПУЛЫ ПО PTR
+====================================================================================
+   need_ptr=True  -> ['ptr1', 'ptr2']  [OK]
+   need_ptr=False -> ['plain1', 'plain2', 'plain3']  [OK: PTR сберегаются]
+   после бана обоих PTR: has_ptr_proxies()=False _pick_best_proxy(need_ptr=True)=None
+   stealth_smtp_ping на yahoo.com без живых PTR-прокси -> unknown: Нет прокси с обратным DNS (PTR) — Yahoo/AOL проверить нечем. Нужен прокси или VPS с PTR-за
+
+   S2.4 vs S6.3 — не перепутаны ли два разных PTR:
+     check_ptr(mx_host)     — PTR ПОЧТОВОГО СЕРВЕРА, идёт в скоринг (-10)
+     check_fcrdns(proxy_ip) — FCrDNS ВЫХОДНОГО IP, решает доступ к Yahoo/AOL
+     split_proxies_by_fcrdns использует: check_fcrdns
+     pipeline скоринг использует: check_ptr
