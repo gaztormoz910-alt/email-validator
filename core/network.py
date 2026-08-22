@@ -22,6 +22,18 @@ YAHOO_DOMAINS = {
 
 AOL_DOMAINS = {"aol.com", "aim.com", "verizon.net"}
 
+# Провайдеры, которые режут по РЕПУТАЦИИ исходящего IP. Проверено вживую:
+# Outlook отвечает "550 5.7.1 Service unavailable, Client host [IP]",
+# iCloud — "550 Mail from IP ... rejected", GMX рвёт соединение.
+# Через прокси из чёрных списков они молчат, через чистые — отвечают.
+NEEDS_CLEAN_IP_DOMAINS = {
+    "outlook.com", "hotmail.com", "live.com", "msn.com", "hotmail.co.uk",
+    "hotmail.fr", "hotmail.de", "hotmail.es", "hotmail.it", "live.co.uk",
+    "live.fr", "passport.com",
+    "icloud.com", "me.com", "mac.com",
+    "gmx.com", "gmx.de", "gmx.net", "gmx.at",
+}
+
 MICROSOFT_DOMAINS = {
     "outlook.com", "hotmail.com", "hotmail.co.uk", "hotmail.fr", "hotmail.de",
     "hotmail.es", "hotmail.it", "live.com", "live.co.uk", "live.fr",
@@ -197,6 +209,83 @@ def check_single_proxy(proxy, timeout):
         return None
 
 
+# Gmail в ответе на EHLO сообщает IP, с которого мы к нему пришли:
+#   "mx.google.com at your service, [203.0.113.3]"
+# Это ТОТ САМЫЙ выходной IP, который видит любой почтовый сервер, — а значит
+# именно его надо проверять на PTR и чёрные списки. Раньше проверялся адрес
+# подключения к прокси, а он совпадает с выходным не всегда (цепочки, NAT).
+_EXIT_IP_RE = re.compile(r'\[((?:\d{1,3}\.){3}\d{1,3})\]')
+
+EXIT_IP_PROBE_HOST = "gmail-smtp-in.l.google.com"
+
+
+def get_proxy_exit_ip(proxy, timeout=10):
+    """Возвращает реальный выходной IP прокси или None.
+
+    Спрашиваем у самого почтового сервера — стороннего сервиса не нужно,
+    лимитов нет, и ответ гарантированно совпадает с тем, что увидит Yahoo.
+    """
+    server = None
+    try:
+        parsed = _parse_proxy(proxy)
+        if not parsed:
+            return None
+        ip, port, user, password = parsed
+        server = SocksSMTP(ip, port, proxy_user=user, proxy_pass=password,
+                           timeout=timeout,
+                           proxy_type=_PROXY_TYPES.get(_proxy_scheme(proxy), socks.SOCKS5))
+        server.connect(EXIT_IP_PROBE_HOST, 25)
+        _code, msg = server.ehlo(random.choice(LEGIT_HELO_NAMES))
+        text = msg.decode('utf-8', 'ignore') if isinstance(msg, bytes) else str(msg)
+        m = _EXIT_IP_RE.search(text)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+    finally:
+        if server:
+            try:
+                server.quit()
+            except Exception:
+                pass
+
+
+def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None):
+    """Профилирует прокси: выходной IP, обратный DNS, чёрные списки.
+
+    Один проход вместо трёх: соединяемся через прокси, узнаём выходной IP,
+    и уже по нему проверяем PTR и DNSBL. Даёт понимание, какие прокси потянут
+    Outlook и iCloud (нужен чистый IP) и какие пройдут Yahoo/AOL (нужен PTR),
+    а не только «живой / мёртвый».
+
+    Возвращает {proxy: {'exit_ip', 'has_ptr', 'in_dnsbl'}}.
+    """
+    if not proxies:
+        return {}
+
+    validator = NetworkValidator(timeout=timeout)
+    result = {}
+    done = 0
+    lock = threading.Lock()
+
+    def profile_one(proxy):
+        exit_ip = get_proxy_exit_ip(proxy, timeout=timeout)
+        has_ptr = validator.check_fcrdns(exit_ip) if exit_ip else None
+        in_dnsbl = validator.check_dnsbl_ip(exit_ip) if exit_ip else False
+        return proxy, {"exit_ip": exit_ip, "has_ptr": has_ptr is True, "in_dnsbl": in_dnsbl}
+
+    with ThreadPoolExecutor(max_workers=min(workers, max(1, len(proxies)))) as pool:
+        for proxy, info in pool.map(profile_one, proxies):
+            result[proxy] = info
+            with lock:
+                done += 1
+                if progress_callback and (done % 50 == 0 or done == len(proxies)):
+                    ptr_n = sum(1 for v in result.values() if v["has_ptr"])
+                    bl_n = sum(1 for v in result.values() if v["in_dnsbl"])
+                    progress_callback(done, len(proxies), ptr_n, bl_n)
+
+    return result
+
+
 def split_proxies_by_fcrdns(proxies, timeout=4, workers=40, progress_callback=None):
     """Делит прокси на два пула: с обратным DNS (FCrDNS) и без него.
 
@@ -341,6 +430,9 @@ class NetworkValidator:
         self._proxy_banned = set()
         # Прокси с обратным DNS — единственные, через кого проверяется Yahoo/AOL
         self._ptr_proxies = set()
+        # Прокси, чей выходной IP числится в чёрных списках: Outlook, iCloud и GMX
+        # такие отшивают по репутации, а Gmail и Yandex — принимают
+        self._dirty_proxies = set()
         if self.proxies:
             for p in self.proxies:
                 self._proxy_scores[p] = 0  # Начальный score = 0
@@ -380,9 +472,24 @@ class NetworkValidator:
         with self._proxy_score_lock:
             self._ptr_proxies = set(ptr_proxies or [])
 
+    def set_proxy_profiles(self, profiles):
+        """Принимает результат profile_proxies(): выходной IP, PTR, чёрные списки.
+
+        Позволяет выбирать прокси под задачу: Yahoo/AOL требуют PTR,
+        Outlook/iCloud/GMX — чистую репутацию IP, остальным сойдёт любой живой.
+        """
+        with self._proxy_score_lock:
+            self._ptr_proxies = {p for p, v in (profiles or {}).items() if v.get("has_ptr")}
+            self._dirty_proxies = {p for p, v in (profiles or {}).items() if v.get("in_dnsbl")}
+
     def has_ptr_proxies(self):
         with self._proxy_score_lock:
             return bool(self._ptr_proxies - self._proxy_banned)
+
+    def has_clean_proxies(self):
+        with self._proxy_score_lock:
+            alive = {p for p in self.proxies if p not in self._proxy_banned}
+            return bool(alive - self._dirty_proxies)
 
     def _choose_from(self, candidates):
         """Берёт случайный из топа по health score."""
@@ -390,7 +497,7 @@ class NetworkValidator:
         top = ranked[:max(5, len(ranked) // 3)]
         return random.choice(top)
 
-    def _pick_best_proxy(self, need_ptr=False):
+    def _pick_best_proxy(self, need_ptr=False, need_clean=False):
         """Выбирает живой прокси с наивысшим health score (п.8).
 
         need_ptr=True  — только прокси с обратным DNS (для Yahoo/AOL/Verizon).
@@ -417,10 +524,18 @@ class NetworkValidator:
             without_ptr = [p for p in alive if p not in self._ptr_proxies]
 
             if need_ptr:
-                return self._choose_from(with_ptr) if with_ptr else None
+                pool = with_ptr
+                if need_clean:
+                    pool = [p for p in pool if p not in self._dirty_proxies] or pool
+                return self._choose_from(pool) if pool else None
 
             # Бережём PTR-прокси: для обычных доменов они не нужны
-            return self._choose_from(without_ptr or with_ptr)
+            pool = without_ptr or with_ptr
+            if need_clean:
+                # Outlook/iCloud/GMX режут по репутации — берём только чистые.
+                # Если чистых не осталось, идём грязными: лучше попытка, чем ничего.
+                pool = [p for p in pool if p not in self._dirty_proxies] or pool
+            return self._choose_from(pool)
 
     def has_proxies_configured(self):
         """True, если пользователь загрузил прокси (независимо от того, живы ли они)."""
@@ -449,6 +564,37 @@ class NetworkValidator:
                 self._proxy_consecutive_fails[proxy] = self._proxy_consecutive_fails.get(proxy, 0) + 1
                 if self._proxy_consecutive_fails[proxy] >= PROXY_MAX_CONSECUTIVE_FAILS:
                     self._proxy_banned.add(proxy)
+
+    def check_dnsbl_ip(self, ip):
+        """Проверяет ГОТОВЫЙ IP по чёрным спискам (без резолва имени).
+
+        Нужна для прокси: там уже известен выходной IP, резолвить нечего.
+        Листингом считается только 127.0.0.x / 127.0.1.x — см. check_dnsbl.
+        """
+        if not ip:
+            return False
+        with self._dnsbl_lock:
+            if ip in self._dnsbl_cache:
+                return self._dnsbl_cache[ip]
+
+        result = False
+        reversed_ip = '.'.join(reversed(ip.split('.')))
+        for bl in DNSBL_ZONES:
+            try:
+                answers = self.resolver.resolve(f"{reversed_ip}.{bl}", 'A')
+                for rdata in answers:
+                    code = rdata.to_text()
+                    if code.startswith('127.0.0.') or code.startswith('127.0.1.'):
+                        result = True
+                        break
+                if result:
+                    break
+            except Exception:
+                continue
+
+        with self._dnsbl_lock:
+            self._dnsbl_cache[ip] = result
+        return result
 
     def check_dnsbl(self, mx_host):
         """True = IP сервера реально в чёрном списке.
@@ -1029,6 +1175,7 @@ class NetworkValidator:
         # они отшивают на MAIL FROM, до проверки адреса дело не доходит — поэтому
         # для них берём только PTR-прокси, а остальным доменам PTR не нужен.
         needs_ptr = domain in YAHOO_DOMAINS or domain in AOL_DOMAINS
+        needs_clean = domain in NEEDS_CLEAN_IP_DOMAINS
         if needs_ptr and self.proxies and self._ptr_proxies and not self.has_ptr_proxies():
             return {
                 "status": "unknown",
@@ -1068,7 +1215,7 @@ class NetworkValidator:
                     }
                     break
 
-                proxy = self._pick_best_proxy(need_ptr=needs_ptr)
+                proxy = self._pick_best_proxy(need_ptr=needs_ptr, need_clean=needs_clean)
                 result = self._do_single_ping(email, mx_record, proxy=proxy)
 
                 # Если получили однозначный ответ — возвращаем сразу
