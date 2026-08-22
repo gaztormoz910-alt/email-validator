@@ -106,5 +106,72 @@ class TestProfileProxiesDegenerate(unittest.TestCase):
         self.assertEqual(profile_proxies(None), {})
 
 
+class TestPtrTriState(unittest.TestCase):
+    """PTR имеет ТРИ состояния, и путать их нельзя.
+
+    True  — PTR подтверждён, Yahoo пустит.
+    False — PTR точно нет, Yahoo отошьёт на MAIL FROM: брать такой прокси
+            для Yahoo бессмысленно, это гарантированный холостой ход.
+    None  — проверить не удалось. Во время профилирования летят сотни
+            параллельных DNS-запросов, часть отваливается по таймауту.
+            Схлопывать None в False нельзя: хороший прокси вылетел бы из
+            пула Yahoo из-за случайного сбоя DNS.
+    """
+
+    def _v(self, profiles):
+        v = NetworkValidator(timeout=2, proxies=list(profiles))
+        v.set_proxy_profiles(profiles)
+        return v
+
+    def _sample(self, v, **kw):
+        return {v._pick_best_proxy(**kw) for _ in range(60)}
+
+    def test_confirmed_ptr_preferred_over_unknown(self):
+        v = self._v({
+            "yes": {"exit_ip": "1.1.1.1", "has_ptr": True,  "in_dnsbl": False},
+            "unk": {"exit_ip": "2.2.2.2", "has_ptr": None,  "in_dnsbl": False},
+            "no":  {"exit_ip": "3.3.3.3", "has_ptr": False, "in_dnsbl": False},
+        })
+        self.assertEqual(self._sample(v, need_ptr=True), {"yes"})
+
+    def test_unknown_used_when_no_confirmed(self):
+        # Попытка стоит одного пинга, отказ гарантирует ноль результатов
+        v = self._v({
+            "unk": {"exit_ip": "2.2.2.2", "has_ptr": None,  "in_dnsbl": False},
+            "no":  {"exit_ip": "3.3.3.3", "has_ptr": False, "in_dnsbl": False},
+        })
+        self.assertEqual(self._sample(v, need_ptr=True), {"unk"})
+        self.assertTrue(v.has_ptr_proxies())
+
+    def test_definitely_no_ptr_never_used_for_yahoo(self):
+        v = self._v({
+            "no1": {"exit_ip": "3.3.3.3", "has_ptr": False, "in_dnsbl": False},
+            "no2": {"exit_ip": "4.4.4.4", "has_ptr": False, "in_dnsbl": False},
+        })
+        self.assertIsNone(v._pick_best_proxy(need_ptr=True))
+        self.assertFalse(v.has_ptr_proxies())
+
+    def test_such_proxies_still_serve_other_domains(self):
+        # Для Gmail и Yandex отсутствие PTR не помеха — пул не должен простаивать
+        v = self._v({
+            "no1": {"exit_ip": "3.3.3.3", "has_ptr": False, "in_dnsbl": False},
+            "no2": {"exit_ip": "4.4.4.4", "has_ptr": False, "in_dnsbl": False},
+        })
+        self.assertEqual(self._sample(v), {"no1", "no2"})
+
+    def test_unprofiled_pool_has_no_restrictions(self):
+        # Обратная совместимость: без профилирования ограничений быть не должно
+        v = NetworkValidator(timeout=2, proxies=["a:1", "b:1"])
+        self.assertIn(v._pick_best_proxy(need_ptr=True), ["a:1", "b:1"])
+        self.assertFalse(v._profiled)
+
+    def test_all_ptr_absent_is_not_confused_with_unprofiled(self):
+        # Регресс: когда PTR нет НИ У КОГО, все множества пусты — и раньше это
+        # было неотличимо от "профилирование не проводилось"
+        v = self._v({"no": {"exit_ip": "3.3.3.3", "has_ptr": False, "in_dnsbl": False}})
+        self.assertTrue(v._profiled)
+        self.assertIsNone(v._pick_best_proxy(need_ptr=True))
+
+
 if __name__ == '__main__':
     unittest.main()
