@@ -165,6 +165,41 @@ class TestGravatar(unittest.TestCase):
         self.assertIsInstance(self.checker._cache, OrderedDict)
 
 
+
+
+class TestFreeProviderClassification(unittest.TestCase):
+    """Крупные бесплатные почтовики не должны считаться корпоративными.
+
+    GLOBAL_VERIFIED_DOMAINS — список парсера на 81 домен, в нём нет yandex.ru,
+    mail.ru, protonmail.com, gmx.com. Из-за этого они получали +5 «корпоративный
+    домен», которого не получает gmail.com: postmaster@yandex.ru набирал больше,
+    чем postmaster@gmail.com при одинаковом ответе сервера.
+    """
+
+    def setUp(self):
+        from core.scoring import calculate_engagement_score, _is_free_provider
+        self.score = calculate_engagement_score
+        self.is_free = _is_free_provider
+
+    def test_major_free_providers_recognised(self):
+        for d in ["gmail.com", "yandex.ru", "mail.ru", "bk.ru", "protonmail.com",
+                  "gmx.com", "qq.com", "outlook.com", "icloud.com"]:
+            with self.subTest(domain=d):
+                self.assertTrue(self.is_free(d))
+
+    def test_corporate_domains_stay_corporate(self):
+        for d in ["tesla.com", "acme-corp.ru", "some-startup.io"]:
+            with self.subTest(domain=d):
+                self.assertFalse(self.is_free(d))
+
+    def test_free_providers_score_equally(self):
+        scores = {}
+        for e in ["postmaster@gmail.com", "postmaster@yandex.ru", "postmaster@mail.ru"]:
+            r = self.score(email=e, smtp_status="Valid", smtp_reason="250 OK",
+                           dns_health_score=2, has_ptr=True)
+            scores[e] = r["score"]
+            self.assertEqual(r["provider_type"], "Free")
+        self.assertEqual(len(set(scores.values())), 1, f"скоры разошлись: {scores}")
+
 if __name__ == '__main__':
     unittest.main()
-

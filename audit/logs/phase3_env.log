@@ -1,0 +1,13 @@
+======================================================================
+ОГРАНИЧЕНИЯ СРЕДЫ
+======================================================================
+  OK   SMTP исходящий -> Gmail MX                 gmail-smtp-in.l.google.com:25  (1.7s) b'220 mx.google.com ESMTP d2e1a72fcca58-85210a98f34si3432030b3a.178 - gs'
+  OK   SMTP исходящий -> Yahoo MX                 mta5.am0.yahoodns.net:25  (1.2s) b'220 mtaproxy312.free.mail.ne1.yahoo.com ESMTP ready\r\n'
+  OK   SMTP исходящий -> Mail.ru MX               mxs.mail.ru:25  (0.2s) b'220 mxs.mail.ru ESMTP ready (Looking for Mail for your domain? Visit h'
+  OK   HTTPS -> gravatar                          gravatar.com:443  (0.3s) b''
+  OK   HTTPS -> rdap.org                          rdap.org:443  (0.0s) b''
+  OK   DNS TCP -> 8.8.8.8                         8.8.8.8:53  (0.1s) b''
+
+  ИТОГ порт 25: ДОСТУПЕН
+  OK   DNS резолвинг работает: gmail.com MX = 5 записей
+  OK   модуль whois импортируется

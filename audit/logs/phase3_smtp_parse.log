@@ -1,0 +1,59 @@
+========================================================================================
+S3.3 КЛАССИФИКАЦИЯ SMTP-ОТВЕТОВ (реальный код, без моков)
+========================================================================================
+  [OK ] 250 2.1.5 OK                                               -> valid      (2.1.5 250 OK)
+  [OK ] 552 5.2.2 Requested mail action aborted: exceeded storag   -> valid      (5.2.2 250 OK (Full Inbox))
+  [OK ] 452 4.2.2 Mailbox full                                     -> valid      (4.2.2 250 OK (Full Inbox))
+  [OK ] 450 4.7.1 Greylisted, please try again in 300 seconds      -> greylisted (4.7.1 450 Greylisted (Retry Later))
+  [OK ] 450 4.2.0 Try again later                                  -> greylisted (4.2.0 450 Greylisted (Retry Later))
+  [OK ] 450 4.7.1 Rate limited, too many connections               -> unknown    (4.7.1 450 Rate Limited (Retry Late)
+  [OK ] 451 4.3.0 Temporary local problem                          -> greylisted (4.3.0 451 Server Error)
+  [OK ] 421 4.7.0 Too many connections, service busy               -> unknown    (4.7.0 421 Service Busy (Rate Limit)
+  [OK ] 550 5.1.1 The email account that you tried to reach does   -> invalid    (5.1.1 550 User Does Not Exist)
+  [OK ] 550 5.1.1 User unknown                                     -> invalid    (5.1.1 550 User Does Not Exist)
+  [OK ] 550 5.7.1 Service unavailable, client host blocked using   -> unknown    (5.7.1 550 Our IP Blocked (Email Ma)
+  [OK ] 550 5.7.1 Sender verify failed                             -> unknown    (5.7.1 550 Sender/Relay Rejected (E)
+  [OK ] 550 5.2.1 The account has been disabled or discontinued    -> invalid    (5.2.1 550 User Does Not Exist)
+  [OK ] 550 5.2.1 Mailbox is suspended                             -> risky      (5.2.1 550 Account Disabled/Suspend)
+  [OK ] 550 Rejected                                               -> risky      (550 Rejected (Ambiguous))
+  [OK ] 551 User not local                                         -> invalid    (551 User Not Local)
+  [OK ] 553 5.1.3 Bad recipient address syntax                     -> invalid    (5.1.3 553 Bad Address Format)
+  [OK ] 554 5.7.1 Your IP is blacklisted                           -> unknown    (5.7.1 554 Our IP Blacklisted (Emai)
+  [OK ] 554 5.0.0 Transaction failed                               -> unknown    (5.0.0 554 Transaction Failed)
+  [OK ] 500 Syntax error                                           -> unknown    (500 Server/Auth Error (Email May E)
+  [OK ] 503 5.5.1 Bad sequence of commands                         -> unknown    (5.5.1 503 Server/Auth Error (Email)
+  [OK ] 521 Domain does not accept mail                            -> unknown    (521 Server/Auth Error (Email May E)
+  [OK ] 530 5.7.0 Authentication required                          -> unknown    (5.7.0 530 Server/Auth Error (Email)
+  [OK ] 535 5.7.8 Authentication credentials invalid               -> unknown    (5.7.8 535 Server/Auth Error (Email)
+  [OK ] 571 5.7.1 Delivery not authorized                          -> unknown    (5.7.1 571 Server/Auth Error (Email)
+  [OK ] 556 5.1.10 Recipient address has null MX                   -> risky      (5.1.10 556 Permanent Error (Unveri)
+  [OK ] 471 4.0.0 Some temp error                                  -> unknown    (4.0.0 471 Temp Error)
+  [OK ] 999 weird                                                  -> unknown    (999 Unknown Response)
+
+  Сценариев проверено: 28;  расхождений: 0
+  Распределение вердиктов: {'valid': 3, 'greylisted': 3, 'unknown': 14, 'invalid': 5, 'risky': 3}
+
+========================================================================================
+АДВЕРСАРИАЛЬНО: подстрочный матч ДО разбора кода
+========================================================================================
+  550 5.1.1 no such user; contact storage administrator              -> valid     <-- ЛОЖНЫЙ 'valid'!   ловушка: слово 'storage' в 550
+  550 5.1.1 User unknown in virtual mailbox table (over quota chec   -> valid     <-- ЛОЖНЫЙ 'valid'!   ловушка: 'over quota' в 550
+  421 4.7.0 mailbox full of spam complaints, closing connection      -> valid     <-- ЛОЖНЫЙ 'valid'!   ловушка: 'mailbox full' в 421
+  554 5.7.1 rejected, storage backend unavailable                    -> valid     <-- ЛОЖНЫЙ 'valid'!   ловушка: 'storage' в 554
+  Причина: проверка `code==552 or 'over quota' in msg or 'storage' in msg or
+  'mailbox full' in msg` стоит ВЫШЕ разбора 550/554 и матчится по любому коду.
+==============================================================================================
+S3.3/S4.2 — стандартные строки MTA против правила 'полный ящик = valid'
+==============================================================================================
+  452 4.3.1 Insufficient system storage                          -> valid    <-- ЛОЖНЫЙ VALID (+70 в скоринге)
+       источник: Postfix: у СЕРВЕРА кончилось место на диске   ожидаемо: НЕ про ящик
+  452 4.3.1 Insufficient system resources                        -> unknown  
+       источник: Postfix: нехватка ресурсов сервера   ожидаемо: НЕ про ящик
+  421 4.3.2 System not accepting network messages                -> unknown  
+       источник: Postfix: сервер не принимает почту   ожидаемо: НЕ про ящик
+  452 4.5.3 Too many recipients                                  -> unknown  
+       источник: Postfix: лимит получателей   ожидаемо: НЕ про ящик
+  552 5.2.2 Over quota                                           -> valid    
+       источник: Exim: ящик переполнен   ожидаемо: про ящик — valid ВЕРНО
+  452 4.2.2 The email account that you tried to reach is over quota -> valid    
+       источник: Gmail: переполнен   ожидаемо: про ящик — valid ВЕРНО
