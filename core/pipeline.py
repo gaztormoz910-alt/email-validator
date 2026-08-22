@@ -220,7 +220,15 @@ class ValidationPipeline:
 
         proxy_profiles = {}
         if proxies:
-            from core.network import filter_live_proxies
+            from core.network import filter_live_proxies, dedupe_proxies
+            # Один прокси, записанный дважды, проверялся бы дважды и занимал
+            # два места в ротации — сначала схлопываем повторы.
+            before = len(proxies)
+            proxies = dedupe_proxies(proxies)
+            if before != len(proxies):
+                self.callbacks['on_log'](
+                    f"[INFO] Убрано повторов в списке прокси: {before - len(proxies)} "
+                    f"(осталось {len(proxies)}).", "info")
             self.callbacks['on_log'](f"[INFO] Тестирование {len(proxies)} прокси-серверов (потоков: {threads}, таймаут: {timeout}с)...", "info")
             # Теперь таймаут строго подчиняется твоему ползунку (никаких ограничений!)
             live_proxies = filter_live_proxies(proxies, timeout=timeout, threads=threads, progress_callback=self.callbacks['on_progress'], log_callback=self.callbacks.get('on_log'))
@@ -250,14 +258,35 @@ class ValidationPipeline:
                     proxy_profiles = profile_proxies(
                         live_proxies, timeout=timeout, progress_callback=on_prof)
 
-                    ptr_n = sum(1 for v in proxy_profiles.values() if v["has_ptr"])
-                    bl_n = sum(1 for v in proxy_profiles.values() if v["in_dnsbl"])
-                    known_ip = sum(1 for v in proxy_profiles.values() if v["exit_ip"])
+                    vals = list(proxy_profiles.values())
+                    ptr_n = sum(1 for v in vals if v["has_ptr"] is True)
+                    bl_n = sum(1 for v in vals if v["in_dnsbl"])
+                    known_ip = sum(1 for v in vals if v["exit_ip"])
+                    dirty_n = sum(1 for v in vals if v.get("rdns_dirty"))
+                    outlook_n = sum(1 for v in vals if v.get("outlook_ok") is True)
                     clean_n = len(live_proxies) - bl_n
+
+                    lats = sorted(v["latency_ms"] for v in vals if v.get("latency_ms"))
+                    if lats:
+                        median = lats[len(lats) // 2]
+                        self.callbacks['on_log'](
+                            f"[INFO] Скорость прокси: медиана {median} мс, "
+                            f"быстрейший {lats[0]} мс, медленнейший {lats[-1]} мс.", "info")
 
                     self.callbacks['on_log'](
                         f"[INFO] Профиль готов: выходной IP определён у {known_ip} из "
                         f"{len(live_proxies)}, с PTR — {ptr_n}, в чёрных списках — {bl_n}.", "info")
+
+                    if outlook_n is not None:
+                        self.callbacks['on_log'](
+                            f"[INFO] Microsoft реально принял {outlook_n} прокси из "
+                            f"{len(live_proxies)} (проверено пробой до MAIL FROM, "
+                            "а не по спискам).", "info")
+                    if dirty_n:
+                        self.callbacks['on_log'](
+                            f"[DEAD] У {dirty_n} прокси имя в PTR выдаёт прокси/VPN/динамику "
+                            "(proxy, vpn, tor, pool...). Почтовики такие штрафуют даже "
+                            "при валидном обратном DNS.", "dead")
 
                     if ptr_n:
                         self.callbacks['on_log'](
