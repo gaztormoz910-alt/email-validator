@@ -218,7 +218,7 @@ class ValidationPipeline:
                 "Обычно хватает 10-20с. (Зависнуть на одном адресе валидатор не даст: "
                 "есть общий дедлайн, максимум 180с на адрес.)", "dead")
 
-        ptr_proxies = []
+        proxy_profiles = {}
         if proxies:
             from core.network import filter_live_proxies
             self.callbacks['on_log'](f"[INFO] Тестирование {len(proxies)} прокси-серверов (потоков: {threads}, таймаут: {timeout}с)...", "info")
@@ -231,40 +231,57 @@ class ValidationPipeline:
                 self.callbacks['on_log']("[DEAD] Внимание: Ни один из загруженных прокси не работает. Валидация скорее всего завершится с ошибками.", "dead")
             proxies = live_proxies
 
-            # Делим прокси на два пула по наличию обратного DNS. Yahoo/AOL/Verizon
-            # пойдут только через PTR-прокси, всё остальное — через обычные, чтобы
-            # не расходовать дефицитные PTR там, где они не нужны.
+            # Профилируем прокси: реальный выходной IP, обратный DNS, чёрные списки.
+            # Выходной IP спрашиваем у самого Gmail (он сообщает его в ответе на
+            # EHLO) — стороннего сервиса не нужно. Проверять надо именно ЕГО:
+            # адрес подключения к прокси совпадает с выходным не всегда.
+            proxy_profiles = {}
             if live_proxies:
                 try:
-                    from core.network import split_proxies_by_fcrdns
+                    from core.network import profile_proxies
                     self.callbacks['on_log'](
-                        f"[INFO] Проверка обратного DNS (PTR) у {len(live_proxies)} прокси...", "info")
+                        f"[INFO] Профилирование {len(live_proxies)} прокси "
+                        "(выходной IP, PTR, чёрные списки)...", "info")
 
-                    def on_ptr_prog(done, total, found):
+                    def on_prof(done, total, ptr_n, bl_n):
                         self.callbacks['on_log'](
-                            f"[PROXY] PTR... {done}/{total} | С обратным DNS: {found}", "info")
+                            f"[PROXY] Профиль... {done}/{total} | с PTR: {ptr_n} | в списках: {bl_n}", "info")
 
-                    ptr_proxies, plain_proxies = split_proxies_by_fcrdns(
-                        live_proxies, timeout=timeout, progress_callback=on_ptr_prog)
+                    proxy_profiles = profile_proxies(
+                        live_proxies, timeout=timeout, progress_callback=on_prof)
 
-                    if ptr_proxies:
-                        pct = round(len(ptr_proxies) * 100 / len(live_proxies))
+                    ptr_n = sum(1 for v in proxy_profiles.values() if v["has_ptr"])
+                    bl_n = sum(1 for v in proxy_profiles.values() if v["in_dnsbl"])
+                    known_ip = sum(1 for v in proxy_profiles.values() if v["exit_ip"])
+                    clean_n = len(live_proxies) - bl_n
+
+                    self.callbacks['on_log'](
+                        f"[INFO] Профиль готов: выходной IP определён у {known_ip} из "
+                        f"{len(live_proxies)}, с PTR — {ptr_n}, в чёрных списках — {bl_n}.", "info")
+
+                    if ptr_n:
                         self.callbacks['on_log'](
-                            f"[INFO] PTR есть у {len(ptr_proxies)} из {len(live_proxies)} прокси ({pct}%). "
-                            f"Yahoo/AOL пойдут через них, остальные домены — через оставшиеся "
-                            f"{len(plain_proxies)}.", "info")
+                            f"[INFO] Yahoo/AOL пойдут через {ptr_n} прокси с PTR.", "info")
                     else:
                         self.callbacks['on_log'](
-                            "[DEAD] Обратного DNS (PTR) нет ни у одного прокси. Yahoo, AOL и Verizon "
-                            "проверить НЕ получится — они отшивают такие IP до проверки адреса. "
-                            "Остальные домены проверятся нормально.", "dead")
+                            "[DEAD] Обратного DNS (PTR) нет ни у одного прокси — Yahoo, AOL "
+                            "и Verizon проверить не получится. Остальные домены проверятся.", "dead")
+
+                    if clean_n:
+                        self.callbacks['on_log'](
+                            f"[INFO] Outlook/iCloud/GMX пойдут через {clean_n} прокси "
+                            "с чистой репутацией.", "info")
+                    else:
+                        self.callbacks['on_log'](
+                            "[DEAD] ВСЕ прокси числятся в чёрных списках — Outlook, iCloud "
+                            "и GMX будут молчать. Нужны прокси с чистым IP.", "dead")
                 except Exception as e:
                     self.callbacks['on_log'](
-                        f"[DEAD] Проверка PTR не удалась ({type(e).__name__}), пулы не разделены.", "dead")
+                        f"[DEAD] Профилирование прокси не удалось ({type(e).__name__}).", "dead")
 
         self.network = NetworkValidator(timeout=timeout, proxies=proxies)
-        if ptr_proxies:
-            self.network.set_ptr_proxies(ptr_proxies)
+        if proxy_profiles:
+            self.network.set_proxy_profiles(proxy_profiles)
         
         if enable_ai:
             self.callbacks['on_log']("[INFO] Прогрев и обучение Нейросети (TensorFlow + NaiveBayes)...", "info")
