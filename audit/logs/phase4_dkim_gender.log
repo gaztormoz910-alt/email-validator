@@ -1,0 +1,29 @@
+================================================================================
+S2.2 DNS Health по крупным доменам (DKIM ищется по 9 селекторам)
+================================================================================
+   gmail.com        {'has_spf': True, 'has_dmarc': True, 'has_dkim': False, 'score': 2}
+   yandex.ru        {'has_spf': True, 'has_dmarc': True, 'has_dkim': True, 'score': 3}
+   mail.ru          {'has_spf': True, 'has_dmarc': True, 'has_dkim': False, 'score': 2}
+   github.com       {'has_spf': True, 'has_dmarc': True, 'has_dkim': True, 'score': 3}
+   microsoft.com    {'has_spf': True, 'has_dmarc': True, 'has_dkim': True, 'score': 3}
+   outlook.com      {'has_spf': True, 'has_dmarc': True, 'has_dkim': True, 'score': 3}
+   example.com      {'has_spf': True, 'has_dmarc': True, 'has_dkim': True, 'score': 3}
+
+   Селекторы в коде: ['google','default','selector1','selector2','k1','mail','dkim','s1','s2']
+   Реальный DKIM-селектор Gmail (20230601._domainkey.gmail.com):
+      НАЙДЕН: "v=DKIM1; k=rsa; p="
+   => селектора gmail нет в списке -> gmail.com получает DNS 2/3 вместо 3/3
+
+================================================================================
+S4.6 ПОЛ: работает ли с enable_ml=True
+================================================================================
+   enable_ml=False
+      John Doe       -> ('', '')
+      Ivan Petrov    -> ('', 'Россия')
+      Maria Garcia   -> ('', 'Испания')
+      Anna Smith     -> ('', '')
+   enable_ml=True
+      John Doe       -> ('Мужской', '')
+      Ivan Petrov    -> ('Мужской', 'Россия')
+      Maria Garcia   -> ('Женский', 'Испания')
+      Anna Smith     -> ('Женский', '')

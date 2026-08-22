@@ -1,0 +1,31 @@
+============================================================================================
+S3.8 РАЗБОР БАННЕРА — определение древних MTA
+============================================================================================
+  [OK ] 220 mail.example.com ESMTP Postfix 2.11.3            -> True   Postfix 2.x — древний
+  [OK ] 220 mail.example.com ESMTP Postfix 3.1.4             -> True   Postfix 3.0-3.2 — устарел
+  [OK ] 220 mail.example.com ESMTP Postfix 3.8.1             -> False  Postfix 3.8 — современный
+  [OK ] 220 mail.example.com ESMTP Exim 4.69                 -> True   Exim 4.6x
+  [OK ] 220 mail.example.com ESMTP Exim 4.96                 -> False  Exim 4.96 — современный
+  [OK ] 220 mail.example.com Sendmail 8.13.8                 -> True   Sendmail 8.1x
+  [OK ] 220 mail.example.com Sendmail 8.17.1                 -> False  Sendmail 8.17 — современный
+  [OK ] 220 mail.example.com ESMTP qmail                     -> True   qmail — не обновляется с 2007
+  [OK ] 220 mail.example.com hMailServer 4.2                 -> True   hMailServer 0-4
+  [OK ] 220 mail.example.com Courier 0.60                    -> True   Courier очень старый
+  [OK ] 220 mx.google.com ESMTP                              -> False  Gmail
+  [OK ] (пусто)                                              -> False  пустой баннер
+  [OK ] 220 mail ESMTP Postfix                               -> False  Postfix без версии — не судим
+  [OK ] 220 mail ESMTP Exim 4.94.2                           -> False  Exim 4.94 — версия 4.9x не в шаблоне
+  [OK ] 220 Microsoft ESMTP MAIL Service, Version: 6.0.3790  -> False  Exchange 2003 — древний, но НЕ распознаётся
+  [OK ] 220 ESMTP Postfix 2.6.6 (Red Hat)                    -> True   Postfix 2.6
+  Расхождений с ожиданием: 0
+  ПОКРЫТИЕ: шаблоны только для Postfix 2.x/3.0-3.2, Exim 4.6x-4.7x, Sendmail 8.10-8.14,
+  Courier 0.x, hMailServer 0-4, qmail. Старый Microsoft Exchange, Zimbra, MDaemon,
+  Lotus Domino, Merak, IMail — НЕ распознаются.
+
+============================================================================================
+S3.7 STARTTLS — обе ветки на живом TCP-диалоге
+============================================================================================
+  сервер объявляет STARTTLS=True  -> has_starttls=True  server_outdated=True   [OK]
+       баннер в результате: 'trap ESMTP Postfix 2.11.3'
+  сервер объявляет STARTTLS=False -> has_starttls=False server_outdated=True   [OK]
+       баннер в результате: 'trap ESMTP Postfix 2.11.3'

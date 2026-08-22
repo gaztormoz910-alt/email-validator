@@ -1,0 +1,31 @@
+==============================================================================
+DNSBL SANITY (S2.5) — резолверы 8.8.8.8/1.1.1.1, как в проде
+==============================================================================
+зона                      127.0.0.2 (должен быть В списке)        127.0.0.1 (НЕ в списке)
+------------------------------------------------------------------------------
+zen.spamhaus.org          NXDOMAIN [] listed=False                NXDOMAIN [] listed=False
+b.barracudacentral.org    ANSWER ['127.0.0.2'] listed=True        NXDOMAIN [] listed=False
+bl.spamcop.net            ANSWER ['127.0.0.2'] listed=True        NXDOMAIN [] listed=False
+cbl.abuseat.org           NXDOMAIN [] listed=False                NXDOMAIN [] listed=False
+psbl.surriel.com          ANSWER ['127.0.0.2'] listed=True        NXDOMAIN [] listed=False
+dnsbl.sorbs.net           NXDOMAIN [] listed=False                NXDOMAIN [] listed=False
+------------------------------------------------------------------------------
+ЗОН РЕАЛЬНО РАБОТАЕТ: 3 из 6  -> ['b.barracudacentral.org', 'bl.spamcop.net', 'psbl.surriel.com']
+ЗОН НЕ РАБОТАЕТ:      3  -> ['zen.spamhaus.org', 'cbl.abuseat.org', 'dnsbl.sorbs.net']
+   zen.spamhaus.org: на 127.0.0.2 ответ NXDOMAIN [] — листинг НЕ распознан (код кодом молча уходит в 'чисто')
+   cbl.abuseat.org: на 127.0.0.2 ответ NXDOMAIN [] — листинг НЕ распознан (код кодом молча уходит в 'чисто')
+   dnsbl.sorbs.net: на 127.0.0.2 ответ NXDOMAIN [] — листинг НЕ распознан (код кодом молча уходит в 'чисто')
+
+[ПРОВЕРКА НА ТОТАЛЬНЫЙ ЛОЖНЫЙ ЛИСТИНГ] случайные заведомо чистые IP:
+   zen.spamhaus.org          чисто (ok) 
+   b.barracudacentral.org    чисто (ok) 
+   bl.spamcop.net            чисто (ok) 
+   cbl.abuseat.org           чисто (ok) 
+   psbl.surriel.com          чисто (ok) 
+   dnsbl.sorbs.net           чисто (ok) 
+
+[SPAMHAUS ERROR CODES] проверка обработки 127.255.255.x:
+   zen.spamhaus.org на 127.255.255.254 -> NXDOMAIN []; код счёл бы листингом: False
+   zen.spamhaus.org / 127.255.255.252 -> NXDOMAIN [] listed=False
+   zen.spamhaus.org / 127.255.255.254 -> NXDOMAIN [] listed=False
+   zen.spamhaus.org / 127.255.255.255 -> NXDOMAIN [] listed=False

@@ -1,0 +1,15 @@
+hash-рандомизация активна: -1445511875717550516 3339970011029679325
+
+  bob@x.gmail.com.y.yahoo.com.z
+    25 запусков -> 2 различных результатов  [НЕДЕТЕРМИНИРОВАН]
+        14x  bob@yahoo.com
+        11x  bob@gmail.com
+
+  bob@a.hotmail.com.b.live.com.c.d
+    25 запусков -> 1 различных результатов  [стабилен]
+        25x  bob@hotmail.com
+
+  bob@q.yahoo.co.uk.w.gmail.com.e
+    25 запусков -> 2 различных результатов  [НЕДЕТЕРМИНИРОВАН]
+        14x  bob@yahoo.co.uk
+        11x  bob@gmail.com

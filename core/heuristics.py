@@ -34,6 +34,18 @@ def local_part_entropy(local: str) -> float:
     return -sum((c / n) * math.log2(c / n) for c in counts.values())
 
 
+# Приватные relay-сервисы выдают случайные локальные части, но за ними стоят
+# РЕАЛЬНЫЕ люди: Apple Private Relay включён у миллионов по умолчанию.
+# core/disposable.py специально не считает их одноразовыми — здесь та же логика.
+PRIVACY_RELAY_DOMAINS = {
+    "privaterelay.appleid.com", "icloud.com",
+    "duck.com", "relay.firefox.com", "mozmail.com",
+    "anonaddy.me", "anonaddy.com", "addy.io",
+    "simplelogin.io", "simplelogin.com", "aleeas.com", "slmail.me",
+    "passinbox.com", "passmail.net",
+}
+
+
 def looks_machine_generated(email: str) -> bool:
     """True, если локальная часть похожа на сгенерированную машиной.
 
@@ -45,7 +57,13 @@ def looks_machine_generated(email: str) -> bool:
     if not email or "@" not in email:
         return False
 
-    local = email.rsplit("@", 1)[0].lower()
+    local, _, domain = email.rpartition("@")
+    local = local.lower()
+    domain = domain.lower()
+
+    # Приватный relay — случайная локальная часть тут норма, а не признак бота
+    if domain in PRIVACY_RELAY_DOMAINS:
+        return False
 
     # Короткие адреса не судим: 'ivan', 'jhn', 'ao' — нормальные человеческие
     if len(local) < 8:

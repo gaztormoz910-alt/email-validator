@@ -1,5 +1,6 @@
 # core/network.py
 import dns.resolver
+import dns.reversename
 import smtplib
 import socket
 import random
@@ -247,6 +248,26 @@ def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None, l
     return live_proxies
 
 
+def build_proxy_dict(proxy):
+    """Готовит словарь proxies для requests из строки прокси.
+
+    Нужен, чтобы HTTP-проверки (Gravatar, RDAP, HEAD на сайт компании) шли
+    через тот же прокси, что и SMTP. Иначе реальный IP пользователя утекал
+    сразу по нескольким каналам, а Gravatar ещё и блокировал за объём.
+    """
+    parsed = _parse_proxy(proxy)
+    if not parsed:
+        return None
+    ip, port, user, password = parsed
+    scheme = _proxy_scheme(proxy)
+    # requests умеет socks5h/socks4a (DNS резолвится на стороне прокси)
+    kind = {"socks5": "socks5h", "socks4": "socks4a",
+            "http": "http", "https": "http"}.get(scheme, "socks5h")
+    auth = f"{user}:{password}@" if user and password else ""
+    url = f"{kind}://{auth}{ip}:{port}"
+    return {"http": url, "https": url}
+
+
 def _generate_random_local(style="short"):
     """Генерирует случайный локальный-адрес для Catch-All теста.
     style='short' — классический (16 символов), style='uuid' — UUID-подобный (п.4 Catch-All)"""
@@ -264,6 +285,9 @@ class NetworkValidator:
         self.from_email = from_email
         self.timeout = timeout
         self.proxies = proxies if proxies else []
+        # Потолок времени на ОДИН адрес, независимо от числа MX и повторов.
+        # Держит прогон предсказуемым: без него адрес с тремя MX мог висеть минутами.
+        self.address_deadline = max(30, min(180, timeout * 6))
 
         # Настройка DNS резолвера
         self.resolver = dns.resolver.Resolver()
@@ -476,7 +500,6 @@ class NetworkValidator:
 
         result = None
         try:
-            import dns.reversename
             rev_name = dns.reversename.from_address(ip)
             ptr_answers = self.resolver.resolve(rev_name, 'PTR')
             hostname = str(ptr_answers[0]).rstrip('.')
@@ -505,7 +528,6 @@ class NetworkValidator:
         try:
             ip_answers = self.resolver.resolve(mx_host, 'A')
             ip = str(ip_answers[0])
-            import dns.reversename
             rev_name = dns.reversename.from_address(ip)
             self.resolver.resolve(rev_name, 'PTR')
             result = True
@@ -702,9 +724,17 @@ class NetworkValidator:
         if code == 250:
             return make_result("valid", "250 OK")
 
-        # Ящик существует, но переполнен — всё равно валидный!
-        if code == 552 or "over quota" in msg or "storage" in msg or "mailbox full" in msg:
-            return make_result("valid", "250 OK (Full Inbox)")
+        # Переполненный ЯЩИК — доказательство, что он существует и активно используется.
+        # Но переполнен может быть и СЕРВЕР: "452 4.3.1 Insufficient system storage"
+        # означает, что на почтовике кончилось место на диске, и про ящик не говорит
+        # ничего. Раньше подстрочный матч по "storage" стоял выше разбора кодов и
+        # ловил любой код, из-за чего такие ответы уезжали в valid с бонусом +70.
+        if code in (452, 552):
+            if "insufficient system storage" in msg or "system storage" in msg:
+                return make_result("unknown", f"{code} Server Out Of Disk Space")
+            if ("over quota" in msg or "mailbox full" in msg or "quota exceeded" in msg
+                    or "mailbox is full" in msg or code == 552):
+                return make_result("valid", "250 OK (Full Inbox)")
 
         # 550 — самый информативный код, парсим текст детально
         if code == 550:
@@ -996,12 +1026,27 @@ class NetworkValidator:
 
         last_result = {"status": "unknown", "reason": "No Response"}
 
+        # Общий дедлайн на АДРЕС. Без него лимит попыток действовал на каждый MX
+        # по отдельности: у yahoo.com три MX, то есть до 45 попыток, и при глухих
+        # прокси один адрес мог занять несколько минут. Теперь сколько бы ни было
+        # MX, дольше дедлайна на одном адресе не сидим.
+        deadline = time.monotonic() + self.address_deadline
+
         # Мульти-MX: пробуем все MX-серверы по очереди (п.3.1) + smart proxy selection (п.8)
         for mx_record in mx_records:
+            if time.monotonic() > deadline:
+                break
             for attempt in range(max_retries):
                 # Прокси кончились — повторять бессмысленно, только время тратить
                 if self.all_proxies_dead():
                     return {"status": "unknown", "reason": "All Proxies Dead (прямое соединение запрещено)"}
+
+                if time.monotonic() > deadline:
+                    last_result = {
+                        "status": "unknown",
+                        "reason": f"Timeout: адрес проверялся дольше {self.address_deadline}с",
+                    }
+                    break
 
                 proxy = self._pick_best_proxy(need_ptr=needs_ptr)
                 result = self._do_single_ping(email, mx_record, proxy=proxy)
@@ -1019,9 +1064,9 @@ class NetworkValidator:
                 last_result = result
                 continue
 
-            # Если primary MX дал только unknown/greylisted — пробуем следующий MX (п.3.1)
-            if last_result["status"] in ("valid", "invalid"):
-                break
+            # Однозначный ответ (valid/invalid) уже возвращён выше через return,
+            # поэтому сюда мы попадаем только с unknown/greylisted и честно
+            # пробуем следующий MX.
 
         return last_result
 

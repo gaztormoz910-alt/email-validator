@@ -1,0 +1,58 @@
+================================================================================
+S1.1 RFC 5322
+================================================================================
+  [OK ] john.doe@gmail.com                 -> True   ожидалось True   обычный
+  [OK ] a@b.co                             -> True   ожидалось True   минимальный
+  [OK ] john..doe@gmail.com                -> False  ожидалось False  двойная точка
+  [OK ] john.@gmail.com                    -> False  ожидалось False  точка перед @
+  [OK ] john@.gmail.com                    -> False  ожидалось False  точка после @
+  [OK ] jo hn@gmail.com                    -> False  ожидалось False  пробел
+  [OK ] john@gmail@com                     -> False  ожидалось False  два @
+  [OK ] john@gmail                         -> False  ожидалось False  нет TLD
+  [OK ] @gmail.com                         -> False  ожидалось False  нет локальной части
+  [OK ] john@                              -> False  ожидалось False  нет домена
+  [OK ] aaaaaaaaaaaaaaaaaaaa...(320)       -> False  ожидалось False  длина > 320
+  [OK ] .john@gmail.com                    -> False  ожидалось False  точка в начале
+  [OK ] john+tag@gmail.com                 -> True   ожидалось True   плюс-тег валиден по RFC
+  [OK ] john_doe-1@sub.example.co.uk       -> True   ожидалось True   поддомен + составной TLD
+  [OK ] JOHN@GMAIL.COM                     -> True   ожидалось True   верхний регистр
+  [OK ] john@gmail.com.                    -> False  ожидалось False  точка в конце домена
+  [OK ] "john doe"@gmail.com               -> False  ожидалось False  quoted-string (RFC разрешает, строгая регулярка — нет)
+  [OK ] john@[192.168.1.1]                 -> False  ожидалось False  IP-литерал (RFC разрешает)
+  [OK ] иван@почта.рф                      -> False  ожидалось False  IDN/юникод (не преобразуется в punycode перед проверкой)
+  Расхождений с ожиданием: 0 (последние 3 — сознательное сужение RFC, см. отчёт)
+
+  Длина локальной части: RFC максимум 64
+    70 символов в local -> False  (регулярка допускает 1+63=64, значит должно быть False)
+    len(email)=80
+
+================================================================================
+S1.2 ОПЕЧАТКИ + S1.3 ХВОСТЫ
+================================================================================
+  [OK ] bob@gamil.com                      -> bob@gmail.com   (опечатка из спецификации)
+  [OK ] bob@yandex.r                       -> bob@yandex.ru   (опечатка из спецификации)
+  [OK ] bob@gmail.comtelefoon              -> bob@gmail.com   (мусорный хвост из спецификации)
+  [OK ] bob@gmail.com.br.spam.xyz          -> bob@gmail.com   (вложенные поддомены)
+  [OK ] bob@gmail.com-jobs                 -> bob@gmail.com   (хвост через дефис)
+  [OK ] karl....motiv@gmail.com            -> karl.motiv@gmail.com   (повторяющиеся точки)
+  [OK ] .karl.motiv.@gmail.com             -> karl.motiv@gmail.com   (точки по краям)
+  [OK ] bob@gmail.com.                     -> bob@gmail.com   (точка в конце)
+  [OK ] bob@yandex.rublahblah              -> bob@yandex.rublahblah   (хвост у домена, которого НЕТ в popular_domains)
+  [OK ] bob@mail.ruslan-company.com        -> bob@mail.ruslan-company.com   (легитимный домен, начинающийся как известный)
+  [OK ] bob@tesla.com                      -> bob@tesla.com   (корпоративный — не трогать)
+  [OK ] bob@sberbank.ru                    -> bob@sberbank.ru   (корпоративный — не трогать)
+
+  Недетерминированность: домен с >3 точками ищет совпадение перебором МНОЖЕСТВА
+    12 запусков в разных процессах (PYTHONHASHSEED разный) -> различных результатов: 1
+       bob@yahoo.co.uk
+
+================================================================================
+S1.4 НОРМАЛИЗАЦИЯ ДЛЯ ДЕДУПА
+================================================================================
+  [OK ] john.doe@gmail.com         ~ johndoe@gmail.com      -> johndoe@gmail.com / johndoe@gmail.com  склеены=True ожидалось=True
+  [OK ] john+news@gmail.com        ~ john@gmail.com         -> john@gmail.com / john@gmail.com  склеены=True ожидалось=True
+  [OK ] j@googlemail.com           ~ j@gmail.com            -> j@gmail.com / j@gmail.com  склеены=True ожидалось=True
+  [OK ] John.Doe+x@GMail.com       ~ johndoe@gmail.com      -> johndoe@gmail.com / johndoe@gmail.com  склеены=True ожидалось=True
+  [OK ] john.doe@yandex.ru         ~ johndoe@yandex.ru      -> john.doe@yandex.ru / johndoe@yandex.ru  склеены=False ожидалось=False
+  [OK ] john+tag@corp.com          ~ john@corp.com          -> john+tag@corp.com / john@corp.com  склеены=False ожидалось=False
+  [OK ] john.doe@outlook.com       ~ johndoe@outlook.com    -> john.doe@outlook.com / johndoe@outlook.com  склеены=False ожидалось=False
