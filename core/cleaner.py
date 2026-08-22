@@ -36,8 +36,8 @@ def normalize_for_dedup(email: str) -> str:
 
     Возвращает ключ для дедупа, а НЕ адрес для отправки.
     """
-    if not email or "@" not in email:
-        return (email or "").strip().lower()
+    if not isinstance(email, str) or "@" not in email:
+        return (email or "").strip().lower() if isinstance(email, str) else ""
 
     email = email.strip().lower()
     local, domain = email.rsplit("@", 1)

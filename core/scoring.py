@@ -61,6 +61,8 @@ def calculate_engagement_score(
     
     scoring_status = original_smtp_status if original_smtp_status is not None else smtp_status
 
+    email = email if isinstance(email, str) else ""
+    smtp_reason = smtp_reason if isinstance(smtp_reason, str) else ""
     domain = email.rsplit("@", 1)[1].lower() if "@" in email else ""
     is_free_provider = _is_free_provider(domain)
 
