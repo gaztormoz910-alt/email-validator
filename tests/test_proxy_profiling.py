@@ -173,5 +173,95 @@ class TestPtrTriState(unittest.TestCase):
         self.assertIsNone(v._pick_best_proxy(need_ptr=True))
 
 
+class TestDedupeProxies(unittest.TestCase):
+    """Повторы в списке проверялись бы дважды и занимали два места в ротации."""
+
+    def test_same_proxy_written_differently_collapses(self):
+        from core.network import dedupe_proxies
+        dup = ["1.2.3.4:1080", "socks5://1.2.3.4:1080", "  1.2.3.4:1080  "]
+        self.assertEqual(len(dedupe_proxies(dup)), 1)
+
+    def test_different_proxies_kept(self):
+        from core.network import dedupe_proxies
+        self.assertEqual(len(dedupe_proxies(["1.2.3.4:1080", "5.6.7.8:1080"])), 2)
+
+    def test_order_preserved(self):
+        from core.network import dedupe_proxies
+        got = dedupe_proxies(["b:1080", "a:1080", "b:1080"])
+        self.assertEqual(got, ["b:1080", "a:1080"])
+
+    def test_garbage_ignored(self):
+        from core.network import dedupe_proxies
+        self.assertEqual(dedupe_proxies(None), [])
+        self.assertEqual(dedupe_proxies("строка"), [])
+        self.assertEqual(dedupe_proxies(["", "   ", None, 5]), [])
+
+
+class TestDirtyRdns(unittest.TestCase):
+    """Имя в PTR почтовики читают: proxy/vpn/tor/pool штрафуются."""
+
+    def test_dirty_names_detected(self):
+        from core.network import is_dirty_rdns
+        for h in ["vpn-exit-12.host.net", "node-tor-exit.org",
+                  "pool-71-105.fios.verizon.net", "dynamic-ip-55.isp.com",
+                  "some-proxy-server.net"]:
+            with self.subTest(host=h):
+                self.assertTrue(is_dirty_rdns(h))
+
+    def test_normal_mail_hosts_clean(self):
+        from core.network import is_dirty_rdns
+        for h in ["mail.corp.com", "mx1.google.com", "dns.google",
+                  "one.one.one.one", "smtp.company.ru"]:
+            with self.subTest(host=h):
+                self.assertFalse(is_dirty_rdns(h))
+
+    def test_degenerate(self):
+        from core.network import is_dirty_rdns
+        for bad in [None, "", 0, [], object()]:
+            with self.subTest(bad=bad):
+                self.assertFalse(is_dirty_rdns(bad))
+
+
+class TestReputationFromThreeSignals(unittest.TestCase):
+    """Пригодность для Outlook/iCloud складывается из трёх независимых признаков.
+
+    Главный — прямая проба: замерено, что Microsoft отвергает IP, которого нет
+    ни в одном чёрном списке. У него своя база репутации, и DNSBL её
+    предсказывает лишь частично.
+    """
+
+    PROFILES = {
+        "clean":     {"exit_ip": "1", "has_ptr": True, "in_dnsbl": False,
+                      "outlook_ok": True,  "rdns_dirty": False},
+        "listed":    {"exit_ip": "2", "has_ptr": True, "in_dnsbl": True,
+                      "outlook_ok": True,  "rdns_dirty": False},
+        "msblocked": {"exit_ip": "3", "has_ptr": True, "in_dnsbl": False,
+                      "outlook_ok": False, "rdns_dirty": False},
+        "dirtyname": {"exit_ip": "4", "has_ptr": True, "in_dnsbl": False,
+                      "outlook_ok": True,  "rdns_dirty": True},
+    }
+
+    def setUp(self):
+        self.v = NetworkValidator(timeout=2, proxies=list(self.PROFILES))
+        self.v.set_proxy_profiles(self.PROFILES)
+
+    def test_all_three_signals_mark_proxy_unusable_for_outlook(self):
+        self.assertEqual(set(self.v._dirty_proxies),
+                         {"listed", "msblocked", "dirtyname"})
+
+    def test_outlook_gets_only_the_clean_one(self):
+        picked = {self.v._pick_best_proxy(need_clean=True) for _ in range(60)}
+        self.assertEqual(picked, {"clean"})
+
+    def test_other_domains_still_use_whole_pool(self):
+        # Для Gmail и Yandex репутация не помеха — пул не должен простаивать
+        picked = {self.v._pick_best_proxy() for _ in range(120)}
+        self.assertGreater(len(picked), 1)
+
+    def test_direct_probe_outweighs_clean_blocklists(self):
+        # msblocked чист по спискам, но Microsoft его отверг — значит непригоден
+        self.assertIn("msblocked", self.v._dirty_proxies)
+
+
 if __name__ == '__main__':
     unittest.main()

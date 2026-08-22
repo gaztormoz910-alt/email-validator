@@ -218,29 +218,58 @@ _EXIT_IP_RE = re.compile(r'\[((?:\d{1,3}\.){3}\d{1,3})\]')
 
 EXIT_IP_PROBE_HOST = "gmail-smtp-in.l.google.com"
 
+# Цели для проверки прокси. Одного Google мало: прокси может отвечать ему и
+# при этом быть заблокированным у Microsoft по репутации IP. DNSBL это
+# предсказывает лишь частично — у Microsoft своя база репутации, поэтому
+# честнее спросить у него напрямую.
+PROXY_PROBE_TARGETS = [
+    ("Gmail", "gmail-smtp-in.l.google.com"),
+    ("Outlook", "outlook-com.olc.protection.outlook.com"),
+]
 
-def get_proxy_exit_ip(proxy, timeout=10):
-    """Возвращает реальный выходной IP прокси или None.
+# Имена в PTR, за которые почтовики штрафуют: сервер видит, что письмо идёт
+# через прокси/VPN/Tor, и относится к нему хуже даже при валидном FCrDNS.
+DIRTY_RDNS_KEYWORDS = ("proxy", "vpn", "tor-", "torexit", "exit", "relay",
+                       "anon", "scan", "bot", "spam", "abuse", "hosting",
+                       "dynamic", "dhcp", "pool", "dial")
 
-    Спрашиваем у самого почтового сервера — стороннего сервиса не нужно,
-    лимитов нет, и ответ гарантированно совпадает с тем, что увидит Yahoo.
+
+def probe_proxy_target(proxy, host, timeout=10, want_exit_ip=False):
+    """Полная проба прокси до конкретного почтовика.
+
+    Идём до MAIL FROM, а не до баннера: именно там Microsoft отвечает
+    "550 5.7.1 Service unavailable, Client host [IP]", а Yahoo — 5.7.25.
+    До этого этапа оба выглядят рабочими.
+
+    Возвращает (ok, latency_ms, exit_ip, reason).
     """
     server = None
+    started = time.monotonic()
     try:
         parsed = _parse_proxy(proxy)
         if not parsed:
-            return None
+            return (False, None, None, "неверный формат прокси")
         ip, port, user, password = parsed
         server = SocksSMTP(ip, port, proxy_user=user, proxy_pass=password,
                            timeout=timeout,
                            proxy_type=_PROXY_TYPES.get(_proxy_scheme(proxy), socks.SOCKS5))
-        server.connect(EXIT_IP_PROBE_HOST, 25)
+        server.connect(host, 25)
+        latency = int((time.monotonic() - started) * 1000)
+
         _code, msg = server.ehlo(random.choice(LEGIT_HELO_NAMES))
         text = msg.decode('utf-8', 'ignore') if isinstance(msg, bytes) else str(msg)
-        m = _EXIT_IP_RE.search(text)
-        return m.group(1) if m else None
-    except Exception:
-        return None
+        exit_ip = None
+        if want_exit_ip:
+            m = _EXIT_IP_RE.search(text)
+            exit_ip = m.group(1) if m else None
+
+        mail_code, mail_msg = server.mail(random.choice(MAIL_FROM_POOL))
+        if mail_code >= 400:
+            reason = mail_msg.decode('utf-8', 'ignore') if isinstance(mail_msg, bytes) else str(mail_msg)
+            return (False, latency, exit_ip, f"{mail_code} {reason[:60]}")
+        return (True, latency, exit_ip, "ok")
+    except Exception as e:
+        return (False, None, None, type(e).__name__)
     finally:
         if server:
             try:
@@ -249,15 +278,70 @@ def get_proxy_exit_ip(proxy, timeout=10):
                 pass
 
 
-def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None):
-    """Профилирует прокси: выходной IP, обратный DNS, чёрные списки.
+def get_proxy_exit_ip(proxy, timeout=10):
+    """Возвращает реальный выходной IP прокси или None.
 
-    Один проход вместо трёх: соединяемся через прокси, узнаём выходной IP,
-    и уже по нему проверяем PTR и DNSBL. Даёт понимание, какие прокси потянут
-    Outlook и iCloud (нужен чистый IP) и какие пройдут Yahoo/AOL (нужен PTR),
-    а не только «живой / мёртвый».
+    Спрашиваем у самого почтового сервера — стороннего сервиса не нужно,
+    лимитов нет, и ответ гарантированно совпадает с тем, что увидит Yahoo.
+    """
+    _ok, _lat, exit_ip, _reason = probe_proxy_target(
+        proxy, EXIT_IP_PROBE_HOST, timeout=timeout, want_exit_ip=True)
+    return exit_ip
 
-    Возвращает {proxy: {'exit_ip', 'has_ptr', 'in_dnsbl'}}.
+
+def dedupe_proxies(proxies):
+    """Убирает повторы, сохраняя порядок.
+
+    Один прокси, записанный дважды (или с разным регистром схемы), проверялся
+    бы дважды и занимал два места в ротации.
+    """
+    if not proxies or isinstance(proxies, (str, bytes)) or not hasattr(proxies, "__iter__"):
+        return []
+    seen = set()
+    result = []
+    for p in proxies:
+        if not isinstance(p, str):
+            continue
+        norm = p.strip()
+        if not norm:
+            continue
+        parsed = _parse_proxy(norm)
+        # Ключ по разобранным частям: socks5://1.2.3.4:1080 и 1.2.3.4:1080 — одно
+        key = (_proxy_scheme(norm), parsed) if parsed else norm.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(norm)
+    return result
+
+
+def is_dirty_rdns(hostname):
+    """True, если имя из PTR выдаёт прокси/VPN/динамический IP.
+
+    Почтовики штрафуют такие имена даже при валидном FCrDNS: по хосту видно,
+    что письмо идёт не с нормального почтового сервера.
+    """
+    if not isinstance(hostname, str) or not hostname:
+        return False
+    low = hostname.lower()
+    return any(kw in low for kw in DIRTY_RDNS_KEYWORDS)
+
+
+def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None,
+                    probe_outlook=True):
+    """Профилирует прокси и говорит, для каких провайдеров он пригоден.
+
+    За один проход выясняем всё, что определяет пригодность:
+      * реальный выходной IP (спрашиваем у Gmail — он сообщает его на EHLO)
+      * задержку соединения (медленный прокси растягивает прогон)
+      * PTR по выходному IP: три состояния, "не проверили" != "нет"
+      * имя из PTR: proxy/vpn/tor в нём почтовики штрафуют
+      * чёрные списки по выходному IP
+      * реальную достижимость Microsoft — у него своя база репутации,
+        и DNSBL её предсказывает лишь частично
+
+    Возвращает {proxy: {exit_ip, latency_ms, has_ptr, rdns, rdns_dirty,
+                        in_dnsbl, outlook_ok, outlook_reason}}.
     """
     if not proxies or isinstance(proxies, (str, bytes)) or not hasattr(proxies, "__iter__"):
         return {}
@@ -269,9 +353,16 @@ def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None):
     lock = threading.Lock()
 
     def profile_one(proxy):
-        exit_ip = get_proxy_exit_ip(proxy, timeout=timeout)
+        empty = {"exit_ip": None, "latency_ms": None, "has_ptr": None,
+                 "rdns": None, "rdns_dirty": False, "in_dnsbl": False,
+                 "outlook_ok": None, "outlook_reason": None}
+
+        ok, latency, exit_ip, reason = probe_proxy_target(
+            proxy, EXIT_IP_PROBE_HOST, timeout=timeout, want_exit_ip=True)
         if not exit_ip:
-            return proxy, {"exit_ip": None, "has_ptr": None, "in_dnsbl": False}
+            empty["latency_ms"] = latency
+            empty["outlook_reason"] = reason if not ok else None
+            return proxy, empty
 
         # check_fcrdns различает "PTR нет" (False) и "проверить не удалось" (None).
         # Во время профилирования летят сотни параллельных DNS-запросов, и часть
@@ -284,8 +375,20 @@ def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None):
             time.sleep(0.3)
             has_ptr = validator.check_fcrdns(exit_ip)        # вторая попытка
 
+        rdns = validator.get_ptr_hostname(exit_ip)
         in_dnsbl = validator.check_dnsbl_ip(exit_ip)
-        return proxy, {"exit_ip": exit_ip, "has_ptr": has_ptr, "in_dnsbl": in_dnsbl}
+
+        outlook_ok = None
+        outlook_reason = None
+        if probe_outlook:
+            o_ok, _lat, _ip, o_reason = probe_proxy_target(
+                proxy, PROXY_PROBE_TARGETS[1][1], timeout=timeout)
+            outlook_ok, outlook_reason = o_ok, o_reason
+
+        return proxy, {"exit_ip": exit_ip, "latency_ms": latency,
+                       "has_ptr": has_ptr, "rdns": rdns,
+                       "rdns_dirty": is_dirty_rdns(rdns), "in_dnsbl": in_dnsbl,
+                       "outlook_ok": outlook_ok, "outlook_reason": outlook_reason}
 
     with ThreadPoolExecutor(max_workers=min(workers, max(1, len(proxies)))) as pool:
         for proxy, info in pool.map(profile_one, proxies):
@@ -293,48 +396,11 @@ def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None):
             with lock:
                 done += 1
                 if progress_callback and (done % 50 == 0 or done == len(proxies)):
-                    ptr_n = sum(1 for v in result.values() if v["has_ptr"])
+                    ptr_n = sum(1 for v in result.values() if v["has_ptr"] is True)
                     bl_n = sum(1 for v in result.values() if v["in_dnsbl"])
                     progress_callback(done, len(proxies), ptr_n, bl_n)
 
     return result
-
-
-def split_proxies_by_fcrdns(proxies, timeout=4, workers=40, progress_callback=None):
-    """Делит прокси на два пула: с обратным DNS (FCrDNS) и без него.
-
-    Через прокси без PTR нельзя проверить Yahoo/AOL/Verizon — они отшивают такой
-    IP на MAIL FROM ошибкой 5.7.25. Остальным провайдерам PTR не нужен, поэтому
-    дефицитные PTR-прокси приберегаем для Yahoo.
-
-    Возвращает (список_с_ptr, список_без_ptr).
-    """
-    if not proxies or isinstance(proxies, (str, bytes)) or not hasattr(proxies, "__iter__"):
-        return ([], [])
-    proxies = list(proxies)
-
-    validator = NetworkValidator(timeout=timeout)
-    with_ptr = []
-    without_ptr = []
-    done = 0
-
-    def check_one(p):
-        parsed = _parse_proxy(p)
-        if not parsed:
-            return (p, False)
-        return (p, validator.check_fcrdns(parsed[0]) is True)
-
-    with ThreadPoolExecutor(max_workers=min(workers, max(1, len(proxies)))) as pool:
-        for proxy, ok in pool.map(check_one, proxies):
-            if ok:
-                with_ptr.append(proxy)
-            else:
-                without_ptr.append(proxy)
-            done += 1
-            if progress_callback and (done % 100 == 0 or done == len(proxies)):
-                progress_callback(done, len(proxies), len(with_ptr))
-
-    return (with_ptr, without_ptr)
 
 
 def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None, log_callback=None):
@@ -518,7 +584,17 @@ class NetworkValidator:
             self._profiled = bool(profiles)
             self._ptr_proxies = {p for p, v in profiles.items() if v.get("has_ptr") is True}
             self._ptr_unknown = {p for p, v in profiles.items() if v.get("has_ptr") is None}
-            self._dirty_proxies = {p for p, v in profiles.items() if v.get("in_dnsbl")}
+
+            # "Грязный" = непригодный для провайдеров, чувствительных к репутации.
+            # Три независимых признака, и прямая проба среди них ГЛАВНАЯ: замерено,
+            # что Microsoft отвергает IP, которого нет ни в одном чёрном списке —
+            # у него своя база репутации, и DNSBL её предсказывает лишь частично.
+            self._dirty_proxies = {
+                p for p, v in profiles.items()
+                if v.get("in_dnsbl")                 # числится в чёрных списках
+                or v.get("outlook_ok") is False      # Microsoft отверг напрямую
+                or v.get("rdns_dirty")               # имя в PTR выдаёт прокси/VPN
+            }
 
     def has_ptr_proxies(self):
         """True, если есть чем проверять Yahoo/AOL: подтверждённый PTR либо непроверенный."""
@@ -717,6 +793,29 @@ class NetworkValidator:
         with self._fcrdns_lock:
             self._fcrdns_cache[ip] = result
         return result
+
+    def get_ptr_hostname(self, ip):
+        """Возвращает имя из PTR-записи IP или None.
+
+        Нужно, чтобы посмотреть НА САМО ИМЯ: почтовики штрафуют хосты вида
+        vpn-exit-12.host.net или pool-71-105.fios.verizon.net даже при
+        валидном FCrDNS — по имени видно, что это не почтовый сервер.
+        """
+        if not isinstance(ip, str) or not ip:
+            return None
+        with self._ptr_lock:
+            key = "name:" + ip
+            if key in self._ptr_cache:
+                return self._ptr_cache[key]
+        name = None
+        try:
+            rev = dns.reversename.from_address(ip)
+            name = str(self.resolver.resolve(rev, 'PTR')[0]).rstrip('.')
+        except Exception:
+            name = None
+        with self._ptr_lock:
+            self._ptr_cache["name:" + ip] = name
+        return name
 
     def check_ptr(self, mx_host):
         """True = PTR есть, False = PTR точно нет, None = проверить не удалось.
