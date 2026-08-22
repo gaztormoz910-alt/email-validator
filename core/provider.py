@@ -9,6 +9,8 @@
 ведёт себя по-разному (разные лимиты, разные пороги жалоб).
 """
 
+from collections import Counter
+
 # Провайдер -> его домены
 _PROVIDER_DOMAINS = {
     "Gmail": {"gmail.com", "googlemail.com"},
@@ -79,7 +81,7 @@ def classify_domain(email: str, mx_record: str = "") -> tuple:
     provider_name: 'Gmail', 'Outlook', 'Google Workspace', 'Corporate' и т.п.
     domain_type:   'Personal' | 'ISP' | 'Education' | 'Government' | 'Corporate'
     """
-    if not email or "@" not in email:
+    if not isinstance(email, str) or "@" not in email:
         return ("Unknown", "Unknown")
 
     domain = email.rsplit("@", 1)[1].lower().strip()
@@ -142,8 +144,11 @@ def scan_base_providers(email_sources, limit=None):
 
     Возвращает dict: {'total', 'providers', 'verifiability'}
     """
+    if (not email_sources or isinstance(email_sources, (str, bytes, dict))
+            or not hasattr(email_sources, "__iter__")):
+        return {"total": 0, "providers": Counter(), "verifiability": Counter()}
+
     from core.streamer import StreamLoader
-    from collections import Counter
 
     providers = Counter()
     verdicts = Counter()
@@ -164,7 +169,9 @@ def scan_base_providers(email_sources, limit=None):
 
 def format_base_scan(scan) -> list:
     """Готовит человекочитаемый отчёт по результату scan_base_providers()."""
-    total = scan["total"]
+    if not isinstance(scan, dict):
+        return ["[INFO] Скан базы: данных нет."]
+    total = scan.get("total", 0)
     if not total:
         return ["[INFO] Скан базы: адресов не найдено."]
 
@@ -204,7 +211,7 @@ def format_base_scan(scan) -> list:
 
 def _provider_from_mx(mx_record: str):
     """Определяет хостера почты по MX-записи."""
-    if not mx_record or mx_record == "N/A":
+    if not isinstance(mx_record, str) or not mx_record or mx_record == "N/A":
         return None
     mx = mx_record.lower()
     for hint, name in _MX_PROVIDER_HINTS.items():

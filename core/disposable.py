@@ -424,7 +424,7 @@ def is_disposable(email: str) -> bool:
     Проверяет, является ли email одноразовым/временным.
     Возвращает True если домен в списке disposable-провайдеров.
     """
-    if "@" not in email:
+    if not isinstance(email, str) or "@" not in email:
         return False
     domain = email.rsplit("@", 1)[1].lower().strip()
     
@@ -450,7 +450,8 @@ def extend_disposable_domains(domains) -> int:
 
     Возвращает, сколько доменов реально добавилось.
     """
-    if not domains:
+    if (not domains or isinstance(domains, (str, bytes, int, float))
+            or not hasattr(domains, "__iter__")):
         return 0
     before = len(DISPOSABLE_DOMAINS)
     for d in domains:

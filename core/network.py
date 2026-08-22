@@ -126,7 +126,7 @@ _PROXY_TYPES = {
 
 def _proxy_scheme(proxy):
     """Возвращает схему прокси ('socks5' по умолчанию, если не указана)."""
-    if proxy and "://" in proxy:
+    if isinstance(proxy, str) and "://" in proxy:
         return proxy.split("://", 1)[0].strip().lower()
     return "socks5"
 
@@ -164,7 +164,7 @@ def _parse_proxy(proxy):
         user:pass@host:port      <- этот отдают многие продавцы
     """
     try:
-        if not proxy:
+        if not isinstance(proxy, str) or not proxy:
             return None
 
         proxy_clean = proxy.strip()
@@ -259,8 +259,9 @@ def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None):
 
     Возвращает {proxy: {'exit_ip', 'has_ptr', 'in_dnsbl'}}.
     """
-    if not proxies:
+    if not proxies or isinstance(proxies, (str, bytes)) or not hasattr(proxies, "__iter__"):
         return {}
+    proxies = list(proxies)
 
     validator = NetworkValidator(timeout=timeout)
     result = {}
@@ -308,8 +309,9 @@ def split_proxies_by_fcrdns(proxies, timeout=4, workers=40, progress_callback=No
 
     Возвращает (список_с_ptr, список_без_ptr).
     """
-    if not proxies:
+    if not proxies or isinstance(proxies, (str, bytes)) or not hasattr(proxies, "__iter__"):
         return ([], [])
+    proxies = list(proxies)
 
     validator = NetworkValidator(timeout=timeout)
     with_ptr = []
@@ -337,6 +339,9 @@ def split_proxies_by_fcrdns(proxies, timeout=4, workers=40, progress_callback=No
 
 def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None, log_callback=None):
     """Тестирует список прокси и возвращает только рабочие (у которых открыт 25 порт)."""
+    if not proxies or isinstance(proxies, (str, bytes)) or not hasattr(proxies, "__iter__"):
+        return []
+    proxies = list(proxies)
     from core.async_proxy import run_async_checker
 
     def on_prog(c, t, l):
@@ -486,6 +491,8 @@ class NetworkValidator:
         Только через них можно проверять Yahoo/AOL/Verizon — остальные они
         отшивают на MAIL FROM ошибкой 5.7.25, не дойдя до проверки адреса.
         """
+        if isinstance(ptr_proxies, (str, bytes)) or not hasattr(ptr_proxies, "__iter__"):
+            ptr_proxies = []
         with self._proxy_score_lock:
             self._ptr_proxies = set(ptr_proxies or [])
             self._profiled = bool(ptr_proxies)
@@ -501,7 +508,7 @@ class NetworkValidator:
         подтверждённых не осталось. Отказ от проверки гарантирует ноль
         результатов, а попытка стоит одного пинга.
         """
-        profiles = profiles or {}
+        profiles = profiles if isinstance(profiles, dict) else {}
         with self._proxy_score_lock:
             # Факт профилирования храним отдельно от его результатов: если у ВСЕХ
             # прокси PTR точно отсутствует, все три множества окажутся пустыми,
@@ -525,6 +532,8 @@ class NetworkValidator:
 
     def _choose_from(self, candidates):
         """Берёт случайный из топа по health score."""
+        if not candidates or not hasattr(candidates, "__iter__"):
+            return None
         ranked = sorted(candidates, key=lambda p: self._proxy_scores.get(p, 0), reverse=True)
         top = ranked[:max(5, len(ranked) // 3)]
         return random.choice(top)
@@ -611,7 +620,7 @@ class NetworkValidator:
         Нужна для прокси: там уже известен выходной IP, резолвить нечего.
         Листингом считается только 127.0.0.x / 127.0.1.x — см. check_dnsbl.
         """
-        if not ip:
+        if not isinstance(ip, str) or not ip:
             return False
         with self._dnsbl_lock:
             if ip in self._dnsbl_cache:
@@ -867,6 +876,8 @@ class NetworkValidator:
         """
         if not banner_text:
             return False
+        if not isinstance(banner_text, str):
+            return False
         b = banner_text.lower()
         
         import re
@@ -919,6 +930,10 @@ class NetworkValidator:
         Глубокий анализ баннеров (п.3 SMTP +4 балла).
         Возвращает словарь {'status': ..., 'reason': ...}
         """
+        try:
+            code = int(code)
+        except (TypeError, ValueError):
+            return {"status": "unknown", "reason": "Некорректный ответ сервера"}
         msg = message.decode('utf-8', 'ignore').lower() if isinstance(message, bytes) else str(message).lower()
 
         enhanced_match = re.search(r'(\d\.\d+\.\d+)\s', msg)
@@ -1048,7 +1063,6 @@ class NetworkValidator:
         from_addr = from_email or random.choice(MAIL_FROM_POOL)
         domain = email.split("@")[1].lower() if "@" in email else ""
         server = None
-        ping_success = False
 
         # Rate Limiting: ждём своей очереди к этому MX-серверу (п.3.3)
         sem = self._get_mx_semaphore(mx_record)
@@ -1122,7 +1136,6 @@ class NetworkValidator:
             if code == 421:
                 self._record_mx_error(mx_record)
 
-            ping_success = True  # Соединение прошло (даже если ответ отрицательный)
             self._update_proxy_score(proxy, True)  # Прокси жив
             return result
 
