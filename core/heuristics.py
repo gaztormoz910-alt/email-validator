@@ -109,3 +109,66 @@ def is_parked_domain(mx_record: str) -> bool:
         return False
     mx = mx_record.lower()
     return any(host in mx for host in PARKING_HOSTS)
+
+
+# Ролевые (не персональные) ящики. Раньше список лежал ВНУТРИ process_single,
+# пересоздавался на каждом адресе и был продублирован в блоке повтора greylisting.
+ROLE_EXACT = {
+    "abuse", "admin", "billing", "compliance", "contact", "devnull", "dns",
+    "ftp", "help", "hostmaster", "hr", "info", "jobs", "list", "maildaemon",
+    "marketing", "media", "noc", "no-reply", "noreply", "null", "office",
+    "postmaster", "privacy", "registrar", "root", "sales", "security", "spam",
+    "staff", "subscribe", "support", "sysadmin", "tech", "unsubscribe",
+    "webmaster", "www", "hello", "press", "legal", "feedback",
+}
+
+# Основы, от которых ролевые адреса образуются с суффиксами и разделителями:
+# sales-team@, info.desk@, noreply2@, do-not-reply@, mailer-daemon@.
+# Раньше сравнение шло только на точное равенство, и всё это проходило как личные.
+ROLE_STEMS = (
+    "noreply", "no-reply", "donotreply", "do-not-reply", "mailer-daemon",
+    "maildaemon", "mailerdaemon", "postmaster", "abuse", "support", "sales",
+    "info", "contact", "admin", "billing", "help", "hr", "jobs", "careers",
+    "marketing", "newsletter", "news", "office", "team", "service", "enquiries",
+    "inquiries", "feedback", "webmaster", "hostmaster", "security", "privacy",
+    "legal", "press", "media", "orders", "shop", "store", "booking", "reception",
+)
+
+_ROLE_SPLIT = re.compile(r"[.\-_+]")
+
+
+def is_role_based(email: str) -> bool:
+    """True, если ящик ролевой (не принадлежит конкретному человеку).
+
+    Ловит три формы:
+      info@            — точное совпадение
+      sales-team@      — ролевая основа + суффикс через разделитель
+      noreply2@        — ролевая основа + цифры
+    """
+    if not email or "@" not in email:
+        return False
+
+    local = email.rsplit("@", 1)[0].strip().lower()
+    if not local:
+        return False
+
+    if local in ROLE_EXACT:
+        return True
+
+    # Любая часть после разделителей совпала с ролевой: sales-team@, info.desk@
+    parts = [p for p in _ROLE_SPLIT.split(local) if p]
+    if any(p in ROLE_EXACT for p in parts):
+        return True
+
+    # Основа + цифры/суффикс без разделителя: noreply2@, support01@
+    stripped = local.rstrip("0123456789")
+    if stripped and stripped in ROLE_EXACT:
+        return True
+
+    # Многословные основы, которые не режутся разделителями: donotreply@
+    compact = _ROLE_SPLIT.sub("", local).rstrip("0123456789")
+    for stem in ROLE_STEMS:
+        if compact == _ROLE_SPLIT.sub("", stem):
+            return True
+
+    return False

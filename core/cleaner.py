@@ -57,9 +57,25 @@ def normalize_for_dedup(email: str) -> str:
     return f"{local}@{domain}"
 
 class EmailCleaner:
+    # Известные окончания доменов. Нужны, чтобы отрезать мусор, приклеенный
+    # к TLD, у ЛЮБОГО домена, а не только у 81 из списка парсера.
+    _KNOWN_TLDS = (
+        "com", "org", "net", "ru", "ua", "by", "kz", "de", "fr", "it", "es",
+        "pl", "nl", "be", "se", "no", "dk", "fi", "cz", "sk", "hu", "ro", "bg",
+        "gr", "pt", "at", "ch", "uk", "ie", "us", "ca", "au", "nz", "jp", "cn",
+        "kr", "in", "br", "mx", "ar", "cl", "co", "io", "me", "info", "biz",
+        "edu", "gov", "mil", "int", "tv", "cc", "xyz", "online", "site", "shop",
+        "app", "dev", "tech", "store", "pro", "name", "email", "cloud",
+    )
+
     def __init__(self):
         # Самые популярные провайдеры для проверки на опечатки
         self.popular_domains = set(GLOBAL_VERIFIED_DOMAINS)
+        # Порядок обхода set в Python не гарантирован между запусками, из-за чего
+        # очистка была недетерминированной. Сортируем по длине (длинные вперёд),
+        # а при равной длине — по алфавиту: gmail.com и yahoo.com одной длины,
+        # и без второго критерия порядок между ними всё равно плавал.
+        self._sorted_domains = sorted(self.popular_domains, key=lambda d: (-len(d), d))
         
         # Хеш-таблица опечаток: неправильный домен → правильный (расширенная — п.6)
         self._typo_map = {
@@ -113,6 +129,21 @@ class EmailCleaner:
             'live.co': 'live.com', 'live.con': 'live.com', 'lve.com': 'live.com',
         }
 
+    def _strip_tld_tail(self, domain: str) -> str:
+        """Отрезает мусор, приклеенный к известному TLD.
+
+        yandex.rublahblah -> yandex.ru,  mail.ruXXX -> mail.ru,  corp.deSpam -> corp.de
+        Работает для любого домена, а не только для списка популярных.
+        Если после TLD идёт ещё одна точка (реальный поддомен вроде co.uk) —
+        не трогаем, чтобы не сломать составные зоны.
+        """
+        import re
+        for tld in self._KNOWN_TLDS:
+            m = re.match(rf'^(.+\.{tld})([a-z]{{2,}})$', domain)
+            if m and m.group(2) not in self._KNOWN_TLDS:
+                return m.group(1)
+        return domain
+
     def correct_and_normalize(self, email: str) -> str:
         """
         Гибридный Cleaner (п.1.1 ТЗ):
@@ -138,25 +169,34 @@ class EmailCleaner:
             return None
         
         # 1. Жесткая зачистка "хвостов" от копипаста в домене
-        
-        # Удаляем всякие странные приписки после доменов (типа -jobs, -site-..., .watch, .regarde)
-        # Ищем стандартный домен (например .com, .org, .ru), а все что после него - отсекаем
-        # НО: сохраняем составные TLD (.co.uk, .com.br, .co.in и т.д.)
+
+        # Приписки после известного TLD через дефис/подчёркивание: corp.com-jobs
         domain = re.sub(r'(\.(com|org|net|ru|edu|gov|io|me|info|biz))[-_].*$', r'\1', domain)
-        
-        # Хардкод-фикс для слипшихся мусорных доменов (типа gmail.comtelefoon, yahoo.comwatch)
-        for pop in self.popular_domains:
-            if domain.startswith(pop) and len(domain) > len(pop):
-                domain = pop
-                break
-        
-        # П.7: Глубоко вложенные мусорные поддомены (gmail.com.br.spam.xyz → gmail.com)
-        # Если домен содержит больше 3 точек — ищем совпадение с известным доменом внутри
-        if domain.count('.') > 3:
-            for pop in self.popular_domains:
-                if pop in domain:
-                    domain = pop
-                    break
+
+        # Слипшийся мусор после известного домена: gmail.comtelefoon -> gmail.com.
+        # ВАЖНО: перебираем ОТСОРТИРОВАННЫЙ список, а не set. Раньше порядок обхода
+        # set менялся между запусками, и один адрес давал разные результаты
+        # (замерено: bob@x.gmail.com.y.yahoo.com.z -> 7 раз gmail.com, 5 раз yahoo.com).
+        # Самое длинное совпадение выигрывает, поэтому результат однозначен.
+        matches = [pop for pop in self._sorted_domains
+                   if domain.startswith(pop) and len(domain) > len(pop)]
+        if matches:
+            domain = matches[0]
+
+        # Глубоко вложенные мусорные поддомены: gmail.com.br.spam.xyz -> gmail.com.
+        # Если внутри нашлось несколько известных доменов, берём тот, что стоит
+        # РАНЬШЕ в строке: он и есть настоящий, остальное — приклеенный мусор.
+        elif domain.count('.') > 3:
+            inner = [(domain.index(pop), -len(pop), pop)
+                     for pop in self._sorted_domains if pop in domain]
+            if inner:
+                domain = min(inner)[2]
+
+        # Хвост, приклеенный к известному TLD, у ЛЮБОГО домена: yandex.rublahblah,
+        # mail.ruXXX. Раньше чистились только домены из списка парсера, поэтому
+        # живые адреса на прочих доменах уезжали в Invalid как "мёртвый домен".
+        else:
+            domain = self._strip_tld_tail(domain)
         
         # Убираем случайные точки в конце
         domain = domain.rstrip('.')
