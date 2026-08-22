@@ -308,8 +308,8 @@ class ValidationPipeline:
         
         # Очередь для Greylisting retry (п.2.4)
         import queue as queue_module
+        # queue.Queue уже потокобезопасна — отдельный лок не нужен
         greylisted_queue = queue_module.Queue()
-        greylisted_lock = threading.Lock()
 
         # Статистика вердиктов по домену. Если у домена МНОГО адресов и ВСЕ до
         # единого ответили 250 OK — это почти наверняка catch-all, даже когда
