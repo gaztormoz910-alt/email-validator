@@ -269,9 +269,22 @@ def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None):
 
     def profile_one(proxy):
         exit_ip = get_proxy_exit_ip(proxy, timeout=timeout)
-        has_ptr = validator.check_fcrdns(exit_ip) if exit_ip else None
-        in_dnsbl = validator.check_dnsbl_ip(exit_ip) if exit_ip else False
-        return proxy, {"exit_ip": exit_ip, "has_ptr": has_ptr is True, "in_dnsbl": in_dnsbl}
+        if not exit_ip:
+            return proxy, {"exit_ip": None, "has_ptr": None, "in_dnsbl": False}
+
+        # check_fcrdns различает "PTR нет" (False) и "проверить не удалось" (None).
+        # Во время профилирования летят сотни параллельных DNS-запросов, и часть
+        # ожидаемо отваливается по таймауту. Схлопывать None в False нельзя:
+        # хороший прокси с PTR вылетел бы из пула Yahoo из-за случайного сбоя DNS.
+        has_ptr = validator.check_fcrdns(exit_ip)
+        if has_ptr is None:
+            with validator._fcrdns_lock:
+                validator._fcrdns_cache.pop(exit_ip, None)   # не кэшируем неудачу
+            time.sleep(0.3)
+            has_ptr = validator.check_fcrdns(exit_ip)        # вторая попытка
+
+        in_dnsbl = validator.check_dnsbl_ip(exit_ip)
+        return proxy, {"exit_ip": exit_ip, "has_ptr": has_ptr, "in_dnsbl": in_dnsbl}
 
     with ThreadPoolExecutor(max_workers=min(workers, max(1, len(proxies)))) as pool:
         for proxy, info in pool.map(profile_one, proxies):
@@ -430,6 +443,10 @@ class NetworkValidator:
         self._proxy_banned = set()
         # Прокси с обратным DNS — единственные, через кого проверяется Yahoo/AOL
         self._ptr_proxies = set()
+        # PTR проверить не удалось — не путать с "PTR точно нет"
+        self._ptr_unknown = set()
+        # Профилировались ли прокси вообще (см. set_proxy_profiles)
+        self._profiled = False
         # Прокси, чей выходной IP числится в чёрных списках: Outlook, iCloud и GMX
         # такие отшивают по репутации, а Gmail и Yandex — принимают
         self._dirty_proxies = set()
@@ -471,20 +488,35 @@ class NetworkValidator:
         """
         with self._proxy_score_lock:
             self._ptr_proxies = set(ptr_proxies or [])
+            self._profiled = bool(ptr_proxies)
 
     def set_proxy_profiles(self, profiles):
         """Принимает результат profile_proxies(): выходной IP, PTR, чёрные списки.
 
         Позволяет выбирать прокси под задачу: Yahoo/AOL требуют PTR,
         Outlook/iCloud/GMX — чистую репутацию IP, остальным сойдёт любой живой.
+
+        PTR хранится ТРЕМЯ состояниями. "Не удалось проверить" — это не то же
+        самое, что "PTR нет": такие прокси стоит попробовать на Yahoo, если
+        подтверждённых не осталось. Отказ от проверки гарантирует ноль
+        результатов, а попытка стоит одного пинга.
         """
+        profiles = profiles or {}
         with self._proxy_score_lock:
-            self._ptr_proxies = {p for p, v in (profiles or {}).items() if v.get("has_ptr")}
-            self._dirty_proxies = {p for p, v in (profiles or {}).items() if v.get("in_dnsbl")}
+            # Факт профилирования храним отдельно от его результатов: если у ВСЕХ
+            # прокси PTR точно отсутствует, все три множества окажутся пустыми,
+            # и по ним нельзя отличить "профилировали, PTR ни у кого нет" от
+            # "не профилировали вовсе". А это разные случаи: в первом Yahoo
+            # проверять нечем, во втором ограничений нет.
+            self._profiled = bool(profiles)
+            self._ptr_proxies = {p for p, v in profiles.items() if v.get("has_ptr") is True}
+            self._ptr_unknown = {p for p, v in profiles.items() if v.get("has_ptr") is None}
+            self._dirty_proxies = {p for p, v in profiles.items() if v.get("in_dnsbl")}
 
     def has_ptr_proxies(self):
+        """True, если есть чем проверять Yahoo/AOL: подтверждённый PTR либо непроверенный."""
         with self._proxy_score_lock:
-            return bool(self._ptr_proxies - self._proxy_banned)
+            return bool((self._ptr_proxies | self._ptr_unknown) - self._proxy_banned)
 
     def has_clean_proxies(self):
         with self._proxy_score_lock:
@@ -517,14 +549,22 @@ class NetworkValidator:
             if not alive:
                 return None
 
-            if not self._ptr_proxies:
+            # Профилирование не проводилось — разделения нет, берём из общего пула.
+            # ВАЖНО: проверяем именно факт профилирования, а не пустоту _ptr_proxies.
+            # Раньше стояло "if not self._ptr_proxies", и когда подтверждённых PTR
+            # не находилось, вся логика need_ptr обходилась: для Yahoo выбирался
+            # прокси с ТОЧНО отсутствующим PTR — гарантированный холостой ход.
+            if not self._profiled:
                 return self._choose_from(alive)
 
             with_ptr = [p for p in alive if p in self._ptr_proxies]
             without_ptr = [p for p in alive if p not in self._ptr_proxies]
 
             if need_ptr:
-                pool = with_ptr
+                # Сначала подтверждённые PTR; если таких нет — пробуем те, что
+                # проверить не удалось. Прокси с ТОЧНО отсутствующим PTR не берём
+                # никогда: Yahoo отошьёт их на MAIL FROM, это гарантированный холостой ход.
+                pool = with_ptr or [p for p in alive if p in self._ptr_unknown]
                 if need_clean:
                     pool = [p for p in pool if p not in self._dirty_proxies] or pool
                 return self._choose_from(pool) if pool else None
