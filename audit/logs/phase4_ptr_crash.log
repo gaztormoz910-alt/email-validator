@@ -1,0 +1,38 @@
+Traceback (most recent call last):
+  File "C:\Users\Bog_1\OneDrive\Desktop\Fetch free email\core\network.py", line 506, in check_ptr
+    ip_answers = self.resolver.resolve(mx_host, 'A')
+  File "C:\Users\Bog_1\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\dns\resolver.py", line 1328, in resolve
+    timeout = self._compute_timeout(start, lifetime, resolution.errors)
+  File "C:\Users\Bog_1\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\dns\resolver.py", line 1084, in _compute_timeout
+    raise LifetimeTimeout(timeout=duration, errors=errors)
+dns.resolver.LifetimeTimeout: The resolution lifetime expired after 2.113 seconds: Server Do53:192.0.2.1@53 answered The DNS operation timed out.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Bog_1\OneDrive\Desktop\Fetch free email\audit\test_ptr_crash.py", line 22, in run
+    r = v.check_ptr("gmail-smtp-in.l.google.com")
+  File "C:\Users\Bog_1\OneDrive\Desktop\Fetch free email\core\network.py", line 512, in check_ptr
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            ^^^
+UnboundLocalError: cannot access local variable 'dns' where it is not associated with a value
+==============================================================================
+S2.4  check_ptr — поведение при сбое DNS
+==============================================================================
+  [БАГ] резолвер недоступен (таймаут A-записи)         -> ИСКЛЮЧЕНИЕ UnboundLocalError: cannot access local variable 'dns' where it is not associated with a value
+  [OK ] резолвер работает                              -> вернул True
+
+  Случай 2: MX-хост без A-записи (NXDOMAIN на A):
+  [БАГ] ИСКЛЮЧЕНИЕ UnboundLocalError: cannot access local variable 'dns' where it is not associated with a value
+
+  Случай 3: тот же баг у check_fcrdns? (там import — ПЕРВАЯ строка try)
+  [OK ] check_fcrdns при мёртвом DNS -> None
+
+  ПОСЛЕДСТВИЕ В ПРОДЕ: pipeline.py:405-408 оборачивает вызов в
+      try: has_ptr = self.network.check_ptr(mx_host)
+      except Exception: pass
+  -> исключение проглатывается, has_ptr остаётся None, кэш НЕ заполняется,
+     значит на каждом адресе того же домена всё повторяется заново.
+     Сигнал S2.4 при любом сбое DNS по A-записи не вычисляется вообще.
+
+  СТЕК:

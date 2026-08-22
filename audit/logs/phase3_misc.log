@@ -1,0 +1,110 @@
+==========================================================================================
+S2.3 ВОЗРАСТ ДОМЕНА: WHOIS + RDAP-фоллбэк + кэш
+==========================================================================================
+   github.com                         age=6891    18.9 лет         1.7s | кэш: 0.000s OK
+   gmail.com                          age=11332   31.0 лет         2.8s | кэш: 0.000s OK
+   google.com                         age=10568   28.9 лет         1.4s | кэш: 0.000s OK
+   yandex.ru                          age=10560   28.9 лет         0.1s | кэш: 0.000s OK
+   mail.ru                            age=10556   28.9 лет         0.1s | кэш: 0.000s OK
+   tesla.com                          age=12344   33.8 лет         1.4s | кэш: 0.000s OK
+   nonexistent-zzq7x4m2nv8w1k.com     age=-1      НЕ ОПРЕДЕЛЁН     1.3s | кэш: 0.000s OK
+   Отдельно RDAP-фоллбэк (rdap.org) — работает ли сам по себе:
+     rdap.org/github.com -> registration=2007-10-09T18:20:50Z
+     rdap.org/gmail.com -> registration=1995-08-13T04:00:00Z
+
+==========================================================================================
+S2.6 ЖИВОЙ САЙТ (HEAD) + кэш
+==========================================================================================
+   github.com                         alive=True     0.6s | кэш 0.000s
+   gmail.com                          alive=True     6.8s | кэш 0.000s
+   nonexistent-zzq7x4m2nv8w1k.com     alive=False    0.1s | кэш 0.000s
+   example.com                        alive=True     0.1s | кэш 0.000s
+
+==========================================================================================
+S2.7 ПРИПАРКОВАННЫЙ ДОМЕН
+==========================================================================================
+   Список PARKING_HOSTS (18 записей): sedoparking, sedo.com, bodis.com, afternic, parkingcrew, dan.com, undeveloped.com, namecheap.com/parking, parklogic, above.com, voodoo.com, cashparking, hugedomains, domainmarket, brandbucket, efty.com, parkpage, parked.com
+   [OK ] is_parked_domain(mx.sedoparking.com            ) = True
+   [OK ] is_parked_domain(mail.bodis.com                ) = True
+   [OK ] is_parked_domain(park-mx.afternic.com          ) = True
+   [OK ] is_parked_domain(mx1.parkingcrew.net           ) = True
+   [OK ] is_parked_domain(gmail-smtp-in.l.google.com    ) = False
+   [OK ] is_parked_domain(                              ) = False
+   [OK ] is_parked_domain(N/A                           ) = False
+   [OK ] is_parked_domain(mx.hugedomains.com            ) = True
+   [OK ] is_parked_domain(mail.dan.com                  ) = True
+   Заявлено 'MX на sedoparking, bodis, afternic и т.п.' -> все три присутствуют
+   ВАЖНО: проверяется ТОЛЬКО primary MX (res['mx_record']), A-запись не проверяется
+
+==========================================================================================
+S4.5 ROLE-BASED
+==========================================================================================
+   Записей в списке: 41 (заявлено 40+)
+    abuse, admin, billing, compliance, contact, devnull, dns, feedback, ftp, hello, help, hostmaster, hr, info, jobs, legal, list, maildaemon, marketing, media, no-reply, noc, noreply, null, office, postmaster, press, privacy, registrar, root, sales, security, spam, staff, subscribe, support, sysadmin, tech, unsubscribe, webmaster, www
+   Сравнение: local_part.lower() in roles -> ТОЧНОЕ РАВЕНСТВО
+   [OK ] info@corp.com              -> True
+   [OK ] noreply@corp.com           -> True
+   [OK ] admin@corp.com             -> True
+   [OK ] no-reply@corp.com          -> True
+   [OK ] sales-team@corp.com        -> False  <-- ролевой по смыслу, но НЕ ловится (нет паттернов/префиксов)
+   [OK ] info.desk@corp.com         -> False  <-- ролевой по смыслу, но НЕ ловится (нет паттернов/префиксов)
+   [OK ] noreply2@corp.com          -> False  <-- ролевой по смыслу, но НЕ ловится (нет паттернов/префиксов)
+   [OK ] Info@corp.com              -> True
+   [OK ] mailer-daemon@corp.com     -> False  <-- ролевой по смыслу, но НЕ ловится (нет паттернов/префиксов)
+   [OK ] do-not-reply@corp.com      -> False  <-- ролевой по смыслу, но НЕ ловится (нет паттернов/префиксов)
+   [OK ] newsletter@corp.com        -> False  <-- ролевой по смыслу, но НЕ ловится (нет паттернов/префиксов)
+   [OK ] careers@corp.com           -> False  <-- ролевой по смыслу, но НЕ ловится (нет паттернов/префиксов)
+   [OK ] team@corp.com              -> False  <-- ролевой по смыслу, но НЕ ловится (нет паттернов/префиксов)
+
+==========================================================================================
+S4.6 ИМЯ / ПОЛ / СТРАНА
+==========================================================================================
+   john.doe@gmail.com             name='John Doe'  gender=''  country=''
+   ivan.petrov@mail.ru            name='Ivan Petrov'  gender=''  country='Россия'
+   anna_smith@corp.com            name=''  gender=''  country=''
+   postmaster@gmail.com           name=''  gender=''  country=''
+   jsmith@corp.com                name='Jsmith'  gender=''  country=''
+   maria.garcia@empresa.es        name=''  gender=''  country='Испания'
+   xk3n9fj2q1x@gmail.com          name=''  gender=''  country=''
+   Помечены ли поля как предположительные? Ищем в ui/gui.py признак:
+     'предпол' встречается в gui.py: 0 раз
+     'guess' встречается в gui.py: 0 раз
+     '~' встречается в gui.py: 0 раз
+     'probable' встречается в gui.py: 0 раз
+     '(?)' встречается в gui.py: 0 раз
+
+==========================================================================================
+S4.4 ЧТО ПРОИСХОДИТ ПРИ СБОЕ АВТООБНОВЛЕНИЯ
+==========================================================================================
+   URL битые. Отчёт: ['[DEAD] disposable.txt: сервер вернул 404, оставляю старый список.', '[DEAD] spam_traps.txt: скачать не удалось (URLError), оставляю старый список.']
+   размер файла до=126695 после=126695  [СПИСОК СОХРАНЁН]
+   Ответ 200, но содержимое не список доменов: ['[DEAD] disposable.txt: сервер вернул 429, оставляю старый список.']
+   размер файла после=126695  [СПИСОК СОХРАНЁН (сработал предохранитель)]
+   Атомарность записи: os.replace(tmp_path, filepath) — атомарная подмена, полупустой файл при обрыве невозможен
+   ОДНАКО: обновляется только data/*.txt (SpamFilter). Множество DISPOSABLE_DOMAINS в core/disposable.py (491 доменов) захардкожено и автообновлением НЕ затрагивается.
+
+==========================================================================================
+S3.6 GREYLISTING — структура повтора
+==========================================================================================
+      worker_threads = []
+      worker_threads.append(wt)
+      for wt in worker_threads:
+      wt.join()
+      greylisted_count = greylisted_queue.qsize()
+      if greylisted_count > 0 and self.is_running and deep_ping:
+      for i in range(90):
+      if not self.is_running:
+      time.sleep(1)
+      if self.is_running:
+      retry_count = 0
+      while not greylisted_queue.empty() and self.is_running:
+      email, data, is_role = greylisted_queue.get_nowait()
+
+   ФАКТЫ ИЗ КОДА:
+     1. Повтор стартует ПОСЛЕ join() всех воркеров — то есть весь прогон стоит.
+     2. Ожидание: for i in range(90): time.sleep(1) — блокирует поток пайплайна на 90 с.
+     3. Повтор идёт в ОДИН поток (while not greylisted_queue.empty()), без ThreadPool.
+     4. Greylisted-адреса НЕ отдаются в on_result на первом проходе (return),
+        значит до конца повтора их в выдаче нет вообще.
+     5. Если is_running стало False во время ожидания или повтора —
+        очередь отбрасывается, и эти адреса НЕ попадут в результат НИКОГДА.

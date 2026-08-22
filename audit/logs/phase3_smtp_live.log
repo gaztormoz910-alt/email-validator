@@ -1,0 +1,116 @@
+==============================================================================
+0. FCrDNS НАШЕГО исходящего IP (S6.3 / G2)
+==============================================================================
+  внешний IP: 31.192.250.3
+  check_fcrdns(31.192.250.3) = None   (True=Yahoo/AOL пустят, False=отошьют, None=неизвестно)
+
+==============================================================================
+1. RCPT-дискриминация: существующий vs заведомо несуществующий
+==============================================================================
+
+--- gmail.com  (ожидаем: RCPT различает существующий/нет)
+    MX (5): ['gmail-smtp-in.l.google.com', 'alt1.gmail-smtp-in.l.google.com', 'alt2.gmail-smtp-in.l.google.com', 'alt3.gmail-smtp-in.l.google.com']
+    СУЩЕСТВУЮЩИЙ    postmaster@gmail.com               -> status=valid        3.8s
+        reason      : 2.1.5 250 OK
+        starttls    : True   outdated_server: False
+        banner      : mx.google.com ESMTP 41be03b00d2f7-cc1551f9d80si17480277a12.70 - gsmtp
+    НЕСУЩЕСТВУЮЩИЙ  xd8ltnuw74w99641@gmail.com         -> status=invalid      3.9s
+        reason      : 5.1.1 550 User Does Not Exist
+        starttls    : True   outdated_server: False
+        banner      : mx.google.com ESMTP 41be03b00d2f7-cc188662f48si4183876a12.295 - gsmtp
+    => ВЕРДИКТ: RCPT-верификация РАБОТАЕТ (различает valid/invalid)
+
+--- mail.ru  (в коде помечен как catch-all)
+    MX (1): ['mxs.mail.ru']
+    СУЩЕСТВУЮЩИЙ    postmaster@mail.ru                 -> status=valid        0.6s
+        reason      : 250 OK
+        starttls    : True   outdated_server: False
+        banner      : mxs.mail.ru ESMTP ready (Looking for Mail for your domain? Visit https://biz.mail.ru)
+    НЕСУЩЕСТВУЮЩИЙ  1ohtnnrfbj436408@mail.ru           -> status=valid        0.8s
+        reason      : 250 OK
+        starttls    : True   outdated_server: False
+        banner      : mxs.mail.ru ESMTP ready (Looking for Mail for your domain? Visit https://biz.mail.ru)
+    => ВЕРДИКТ: НЕ РАЗЛИЧАЕТ (оба 'valid') — либо catch-all, либо нас не пускают
+
+--- yandex.ru  (в skip_catchall)
+    MX (1): ['mx.yandex.ru']
+    СУЩЕСТВУЮЩИЙ    postmaster@yandex.ru               -> status=valid        0.8s
+        reason      : 2.1.5 250 OK
+        starttls    : True   outdated_server: False
+        banner      : mail-nwsmtp-mxfront-production-main-97.klg.yp-c.yandex.net Ok 1787416145-5TcbuH9fXeA0
+    НЕСУЩЕСТВУЮЩИЙ  dkrc37b4sykb3622@yandex.ru         -> status=invalid      1.1s
+        reason      : 5.7.1 550 User Does Not Exist
+        starttls    : True   outdated_server: False
+        banner      : mail-nwsmtp-mxfront-production-main-58.iva.yp-c.yandex.net Ok 1787416145-5TclTCFZVSw0
+    => ВЕРДИКТ: RCPT-верификация РАБОТАЕТ (различает valid/invalid)
+
+--- outlook.com  (Microsoft, max_retries=2 без прокси)
+    MX (1): ['outlook-com.olc.protection.outlook.com']
+    СУЩЕСТВУЮЩИЙ    postmaster@outlook.com             -> status=unknown      2.1s
+        reason      : 550 MAIL FROM Rejected (Email May Exist): 5.7.1 Service unavailable, Client host [
+        starttls    : True   outdated_server: False
+        banner      : SN1PEPF00036F42.mail.protection.outlook.com Microsoft ESMTP MAIL Service ready at Sat, 22 
+    НЕСУЩЕСТВУЮЩИЙ  hjyz4ci9s3tk7919@outlook.com       -> status=unknown      2.0s
+        reason      : 550 MAIL FROM Rejected (Email May Exist): 5.7.1 Service unavailable, Client host [
+        starttls    : True   outdated_server: False
+        banner      : SN1PEPF00036F3F.mail.protection.outlook.com Microsoft ESMTP MAIL Service ready at Sat, 22 
+    => ВЕРДИКТ: НЕ РАЗЛИЧАЕТ (оба 'unknown') — либо catch-all, либо нас не пускают
+
+--- yahoo.com  (требует FCrDNS (S6.3))
+    MX (3): ['mta6.am0.yahoodns.net', 'mta5.am0.yahoodns.net', 'mta7.am0.yahoodns.net']
+    СУЩЕСТВУЮЩИЙ    postmaster@yahoo.com               -> status=unknown     16.3s
+        reason      : 550 Нет обратного DNS у нашего IP (FCrDNS) — Yahoo/AOL не пускают. Нужен прокси с PTR-записью.
+        starttls    : True   outdated_server: False
+        banner      : mtaproxy509.free.mail.gq1.yahoo.com ESMTP ready
+    НЕСУЩЕСТВУЮЩИЙ  np86vm388pf68873@yahoo.com         -> status=unknown     13.4s
+        reason      : 550 Нет обратного DNS у нашего IP (FCrDNS) — Yahoo/AOL не пускают. Нужен прокси с PTR-записью.
+        starttls    : True   outdated_server: False
+        banner      : mtaproxy513.free.mail.gq1.yahoo.com ESMTP ready
+    => ВЕРДИКТ: НЕ РАЗЛИЧАЕТ (оба 'unknown') — либо catch-all, либо нас не пускают
+
+--- aol.com  (требует FCrDNS)
+    MX (1): ['mx-aol.mail.gm0.yahoodns.net']
+    СУЩЕСТВУЮЩИЙ    postmaster@aol.com                 -> status=unknown      5.3s
+        reason      : 550 Нет обратного DNS у нашего IP (FCrDNS) — Yahoo/AOL не пускают. Нужен прокси с PTR-записью.
+        starttls    : True   outdated_server: False
+        banner      : mtaproxy124.aol.mail.ne1.yahoo.com ESMTP ready
+    НЕСУЩЕСТВУЮЩИЙ  9xmdnszhrhr10048@aol.com           -> status=unknown      5.3s
+        reason      : 550 Нет обратного DNS у нашего IP (FCrDNS) — Yahoo/AOL не пускают. Нужен прокси с PTR-записью.
+        starttls    : True   outdated_server: False
+        banner      : mtaproxy117.aol.mail.ne1.yahoo.com ESMTP ready
+    => ВЕРДИКТ: НЕ РАЗЛИЧАЕТ (оба 'unknown') — либо catch-all, либо нас не пускают
+
+==============================================================================
+2. S2.1 MX c фоллбэком на A-запись
+==============================================================================
+   get_mx_records(gmail.com                           ) = ['gmail-smtp-in.l.google.com', 'alt1.gmail-smtp-in.l.google.com', 'alt2.gmail-smtp-in.l.google.com']
+   get_mx_records(example.com                         ) = []
+   get_mx_records(nonexistent-zzq7x4m2nv8w1k.com      ) = []
+   get_mx_records(cloudflare.com                      ) = ['mxb-canary.global.inbound.cf-emailsecurity.net', 'mxa-canary.global.inbound.cf-emailsecurity.net', 'mxb.global.inbound.cf-emailsecurity.net']
+
+==============================================================================
+3. S2.4 PTR почтового сервера (True/False/None)
+==============================================================================
+   check_ptr(gmail-smtp-in.l.google.com    ) = True
+   check_ptr(mxs.mail.ru                   ) = True
+   check_ptr(mx.yandex.ru                  ) = True
+   check_ptr(mta5.am0.yahoodns.net         ) = True
+Traceback (most recent call last):
+  File "C:\Users\Bog_1\OneDrive\Desktop\Fetch free email\core\network.py", line 506, in check_ptr
+    ip_answers = self.resolver.resolve(mx_host, 'A')
+  File "C:\Users\Bog_1\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\dns\resolver.py", line 1328, in resolve
+    timeout = self._compute_timeout(start, lifetime, resolution.errors)
+  File "C:\Users\Bog_1\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\dns\resolver.py", line 1084, in _compute_timeout
+    raise LifetimeTimeout(timeout=duration, errors=errors)
+dns.resolver.LifetimeTimeout: The resolution lifetime expired after 2.109 seconds: Server Do53:192.0.2.1@53 answered The DNS operation timed out.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Bog_1\OneDrive\Desktop\Fetch free email\audit\test_smtp_live.py", line 68, in <module>
+    print(f"   check_ptr \u043f\u0440\u0438 \u043c\u0451\u0440\u0442\u0432\u043e\u043c \u0440\u0435\u0437\u043e\u043b\u0432\u0435\u0440\u0435            = {v3.check_ptr('gmail-smtp-in.l.google.com')}  (\u043e\u0436\u0438\u0434\u0430\u0435\u0442\u0441\u044f None)")
+                                                             ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Bog_1\OneDrive\Desktop\Fetch free email\core\network.py", line 512, in check_ptr
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            ^^^
+UnboundLocalError: cannot access local variable 'dns' where it is not associated with a value

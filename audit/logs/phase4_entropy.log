@@ -1,0 +1,83 @@
+==================================================================================
+S4.3 ЭНТРОПИЯ — расширенная выборка
+==================================================================================
+
+[обычные имена]
+   ok   ivan.petrov@mail.ru                          H=3.28
+   ok   john.doe@gmail.com                           H=2.75
+   ok   anna-maria@web.de                            H=2.32
+   ok   jsmith@corp.com                              H=2.58
+   ok   m.gonzalez@empresa.es                        H=3.12
+   ok   olga_ivanova@yandex.ru                       H=2.86
+   ok   pierre.dupont@free.fr                        H=3.24
+
+[слитные имена без разделителей]
+   ok   alexandrapetrova@gmail.com                   H=3.25
+   ok   michaeljohnson@gmail.com                     H=3.38
+   BOT  wolfgangschmidt@web.de                       H=3.77  <-- ЛОЖНОЕ СРАБАТЫВАНИЕ (-20 живому человеку)
+   ok   francescarossi@libero.it                     H=3.04
+   ok   katarzynanowak@wp.pl                         H=2.95
+
+[кириллические транслиты]
+   ok   vyacheslavshchepkin@mail.ru                  H=3.47
+   ok   zhdanovkrzysztof@gmail.com                   H=3.58
+   ok   bogdantsybin@gmail.com                       H=3.25
+   ok   dzhamshutrahmatov@mail.ru                    H=3.29
+   ok   shchvetsovvv@yandex.ru                       H=2.58
+   ok   krzysztofszczepanski@wp.pl                   H=3.58
+
+[азиатские латинизации]
+   ok   zhangwei@163.com                             H=3.00
+   ok   nguyenthithanhhuong@gmail.com                H=3.09
+   ok   wkrishnamurthy@qq.com                        H=3.52
+   ok   srisuwanwongsakul@gmail.com                  H=3.34
+   ok   chenxiaoming@126.com                         H=3.25
+   ok   phuongnguyenhoang@gmail.com                  H=2.98
+   ok   kimseonghyeon@naver.com                      H=3.24
+
+[корпоративные хэш/ID-логины]
+   ok   u8f34kd9@corp.com                            H=3.00
+   ok   emp0093471x@bigcorp.com                      H=3.28
+   ok   ab12cd34@company.io                          H=3.00
+   BOT  x7k2m9p4@enterprise.net                      H=3.00  <-- ЛОЖНОЕ СРАБАТЫВАНИЕ (-20 живому человеку)
+   ok   svc7acct22@corp.com                          H=2.65
+
+[Apple Private Relay / relay-сервисы]
+   BOT  kp8x2mnq4t@privaterelay.appleid.com          H=3.32  <-- ЛОЖНОЕ СРАБАТЫВАНИЕ (-20 живому человеку)
+   BOT  d7f3k9xz2q@privaterelay.appleid.com          H=3.32  <-- ЛОЖНОЕ СРАБАТЫВАНИЕ (-20 живому человеку)
+   BOT  a4x9mk2p@duck.com                            H=3.00  <-- ЛОЖНОЕ СРАБАТЫВАНИЕ (-20 живому человеку)
+   BOT  zx84nq7v@relay.firefox.com                   H=3.00  <-- ЛОЖНОЕ СРАБАТЫВАНИЕ (-20 живому человеку)
+   BOT  p9k3m7xq2w@anonaddy.me                       H=3.32  <-- ЛОЖНОЕ СРАБАТЫВАНИЕ (-20 живому человеку)
+
+[инициалы и короткие]
+   ok   aabbccdd@gmail.com                           H=2.00
+   ok   jjmm2024@gmail.com                           H=2.25
+   ok   mk1987ab@mail.ru                             H=3.00
+
+[заведомо ботовские]
+   BOT  xk3n9fj2q1x@gmail.com                        H=3.28
+   BOT  a7f3k2m9x1@mail.ru                           H=3.32
+   BOT  qwertyuiop123@gmail.com                      H=3.70
+   BOT  asdfghjkl99@mail.ru                          H=3.28
+   BOT  zxcvbnm4477@gmail.com                        H=3.10
+   BOT  kd8f9j2mx7q3@yandex.ru                       H=3.58
+   BOT  b3n7v2x9k4m1@gmail.com                       H=3.58
+   BOT  1234567890ab@gmail.com                       H=3.58
+   BOT  f9q2wz8xk3n7v@mail.ru                        H=3.70
+   BOT  qazwsxedc123@gmail.com                       H=3.58
+
+==================================================================================
+Живых адресов проверено:      38
+ЛОЖНЫХ СРАБАТЫВАНИЙ:          7  (18.4%)
+    - wolfgangschmidt@web.de
+    - x7k2m9p4@enterprise.net
+    - kp8x2mnq4t@privaterelay.appleid.com
+    - d7f3k9xz2q@privaterelay.appleid.com
+    - a4x9mk2p@duck.com
+    - zx84nq7v@relay.firefox.com
+    - p9k3m7xq2w@anonaddy.me
+Ботовских адресов проверено:  10
+ПРОПУЩЕНО ботов:              0  (0.0%)
+
+Заявлено: 0 ложных на 24 живых, 7 из 7 ботовских.
+Фактически на 38 живых: 7 ложных; на 10 ботовских поймано 10.

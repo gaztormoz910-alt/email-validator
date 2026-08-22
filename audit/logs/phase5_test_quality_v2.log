@@ -1,0 +1,35 @@
+================================================================================================
+ФАЗА 5 (уточнённо). КАЧЕСТВО НАБОРА tests/ — с разрешением алиасов setUp
+================================================================================================
+  Всего тестов: 108
+
+  A. Тесты без единого assert (проверяют только 'не упало'): 2
+       tests\test_heuristics.py   test_degenerate_input
+       tests\test_normalization.py test_degenerate_input_does_not_crash
+
+  B. Тавтологические (сами подставляют ответ): 2
+       tests\test_fcrdns.py       test_fcrdns_result_is_cached               подставляет значение в кэш и его же проверяет
+       tests\test_fcrdns.py       test_dnsbl_result_is_cached                подставляет значение в кэш и его же проверяет
+
+  C. Не обращаются к логике вообще (структура/константы): 12
+       tests\test_engine.py       test_engine_initialization                 assert=1  не вызывает ни одной проверяемой функции — проверяет только константы/структуру
+       tests\test_fcrdns.py       test_error_codes_are_not_a_listing         assert=2  не вызывает ни одной проверяемой функции — проверяет только константы/структуру
+       tests\test_normalization.py test_gmail_ignores_dots                    assert=2  не вызывает ни одной проверяемой функции — проверяет только константы/структуру
+       tests\test_normalization.py test_gmail_plus_tag_stripped               assert=2  не вызывает ни одной проверяемой функции — проверяет только константы/структуру
+       tests\test_normalization.py test_googlemail_is_gmail                   assert=2  не вызывает ни одной проверяемой функции — проверяет только константы/структуру
+       tests\test_normalization.py test_case_insensitive                      assert=1  не вызывает ни одной проверяемой функции — проверяет только константы/структуру
+       tests\test_normalization.py test_plus_tag_stripped_for_known_providers assert=3  не вызывает ни одной проверяемой функции — проверяет только константы/структуру
+       tests\test_normalization.py test_dots_matter_outside_gmail             assert=2  не вызывает ни одной проверяемой функции — проверяет только константы/структуру
+       tests\test_normalization.py test_plus_not_stripped_for_corporate       assert=1  не вызывает ни одной проверяемой функции — проверяет только константы/структуру
+       tests\test_normalization.py test_different_users_stay_different        assert=2  не вызывает ни одной проверяемой функции — проверяет только константы/структуру
+       tests\test_proxy_formats.py test_scheme_maps_to_proxy_type             assert=4  не вызывает ни одной проверяемой функции — проверяет только константы/структуру
+       tests\test_validation.py   test_cache_is_ordered_dict                 assert=1  не вызывает ни одной проверяемой функции — проверяет только константы/структуру
+
+  ИТОГО слабых: 16 из 108 (15%). Остальные 92 вызывают настоящие функции.
+
+================================================================================================
+ЗАПАС ПРОЧНОСТИ ASSERT'ОВ В СКОРИНГЕ (насколько балл может упасть незамеченным)
+================================================================================================
+   test_valid_smtp_with_good_server     фактический балл=60   граница теста >= 30 -> запас 30 баллов (50%)
+   test_full_inbox_with_good_server     фактический балл=75   граница теста >= 40 -> запас 35 баллов (47%)
+   => такие широкие границы пропустят крупную регрессию скоринга.

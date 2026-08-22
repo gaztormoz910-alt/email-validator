@@ -80,18 +80,79 @@ class TestPtrProxyRouting(unittest.TestCase):
         self.assertIn(v._pick_best_proxy(need_ptr=False), self.plain)
 
 
+class _FakeAnswer:
+    """Подделка ответа dnspython: список объектов с .to_text()."""
+
+    class _R:
+        def __init__(self, text):
+            self._t = text
+
+        def to_text(self):
+            return self._t
+
+    def __init__(self, codes):
+        self._items = [self._R(c) for c in codes]
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __getitem__(self, i):
+        return self._items[i]
+
+
 class TestDnsblCodes(unittest.TestCase):
-    """Листингом считается только 127.0.0.x / 127.0.1.x."""
+    """Листингом считается ТОЛЬКО 127.0.0.x / 127.0.1.x.
 
-    def test_error_codes_are_not_a_listing(self):
+    Раньше здесь стоял тест-пустышка: он проверял содержимое списка констант,
+    а саму check_dnsbl не вызывал. Из-за этого мутация «DNSBL всем ставит -40»
+    проходила незамеченной, хотя это -40 баллов каждому адресу базы.
+    """
+
+    def _validator_answering(self, codes_by_zone):
+        v = NetworkValidator(timeout=1)
+
+        def fake_resolve(name, rtype):
+            name = str(name)
+            if rtype == 'A' and not name.endswith(tuple(codes_by_zone.keys())):
+                return _FakeAnswer(['1.2.3.4'])          # резолв самого MX-хоста
+            for zone, codes in codes_by_zone.items():
+                if name.endswith(zone):
+                    if codes is None:
+                        raise Exception("NXDOMAIN")      # не числится
+                    return _FakeAnswer(codes)
+            raise Exception("NXDOMAIN")
+
+        v.resolver.resolve = fake_resolve
+        return v
+
+    def test_real_listing_is_detected(self):
         from core.network import DNSBL_ZONES
-        self.assertIn("zen.spamhaus.org", DNSBL_ZONES)
-        self.assertGreater(len(DNSBL_ZONES), 1)
+        v = self._validator_answering({DNSBL_ZONES[0]: ['127.0.0.2']})
+        self.assertTrue(v.check_dnsbl("mx.listed.test"))
 
-    def test_dnsbl_result_is_cached(self):
-        v = NetworkValidator(timeout=2)
-        v._dnsbl_cache["mx.example.com"] = True
-        self.assertTrue(v.check_dnsbl("mx.example.com"))
+    def test_127_0_1_x_is_also_a_listing(self):
+        from core.network import DNSBL_ZONES
+        v = self._validator_answering({DNSBL_ZONES[0]: ['127.0.1.4']})
+        self.assertTrue(v.check_dnsbl("mx.listed2.test"))
+
+    def test_blocklist_error_code_is_not_a_listing(self):
+        # 127.255.255.x = "запрос отклонён" (публичный DNS, лимит), а не листинг.
+        # Именно на этом коде раньше вся база получала бы -40.
+        from core.network import DNSBL_ZONES
+        v = self._validator_answering({z: ['127.255.255.254'] for z in DNSBL_ZONES})
+        self.assertFalse(v.check_dnsbl("mx.clean.test"))
+
+    def test_no_answer_means_clean(self):
+        from core.network import DNSBL_ZONES
+        v = self._validator_answering({z: None for z in DNSBL_ZONES})
+        self.assertFalse(v.check_dnsbl("mx.clean2.test"))
+
+    def test_several_zones_are_queried(self):
+        from core.network import DNSBL_ZONES
+        self.assertGreater(len(DNSBL_ZONES), 1)
+        # Листинг во ВТОРОЙ зоне тоже должен находиться, а не только в первой
+        v = self._validator_answering({DNSBL_ZONES[1]: ['127.0.0.2']})
+        self.assertTrue(v.check_dnsbl("mx.listed3.test"))
 
 
 if __name__ == '__main__':
