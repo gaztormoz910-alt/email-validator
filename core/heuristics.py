@@ -25,7 +25,7 @@ _VOWELS = set("aeiouyаеёиоуыэюя")
 
 def local_part_entropy(local: str) -> float:
     """Энтропия Шеннона на символ. Чем выше — тем «случайнее» строка."""
-    if not local:
+    if not local or not isinstance(local, str):
         return 0.0
     counts = {}
     for ch in local:
@@ -54,7 +54,7 @@ def looks_machine_generated(email: str) -> bool:
 
     Намеренно КОНСЕРВАТИВНА: лучше пропустить бота, чем оболгать живого.
     """
-    if not email or "@" not in email:
+    if not isinstance(email, str) or "@" not in email:
         return False
 
     local, _, domain = email.rpartition("@")
@@ -105,7 +105,7 @@ def looks_machine_generated(email: str) -> bool:
 
 def is_parked_domain(mx_record: str) -> bool:
     """True, если MX ведёт на парковочный сервис (домен продаётся/пустой)."""
-    if not mx_record or mx_record == "N/A":
+    if not isinstance(mx_record, str) or not mx_record or mx_record == "N/A":
         return False
     mx = mx_record.lower()
     return any(host in mx for host in PARKING_HOSTS)
@@ -145,7 +145,7 @@ def is_role_based(email: str) -> bool:
       sales-team@      — ролевая основа + суффикс через разделитель
       noreply2@        — ролевая основа + цифры
     """
-    if not email or "@" not in email:
+    if not isinstance(email, str) or "@" not in email:
         return False
 
     local = email.rsplit("@", 1)[0].strip().lower()
