@@ -37,10 +37,12 @@ class TestFCrDNSHandling(unittest.TestCase):
                 res = self.v._parse_smtp_response(550, msg, "a@aol.com", "aol.com")
                 self.assertNotEqual(res["status"], "invalid")
 
-    def test_split_handles_empty_list(self):
-        from core.network import split_proxies_by_fcrdns
-        self.assertEqual(split_proxies_by_fcrdns([]), ([], []))
-        self.assertEqual(split_proxies_by_fcrdns(None), ([], []))
+    def test_profiling_handles_empty_list(self):
+        # split_proxies_by_fcrdns вытеснена profile_proxies: та за один проход
+        # выясняет и выходной IP, и PTR, и чёрные списки
+        from core.network import profile_proxies
+        self.assertEqual(profile_proxies([]), {})
+        self.assertEqual(profile_proxies(None), {})
 
 
 class TestPtrProxyRouting(unittest.TestCase):
