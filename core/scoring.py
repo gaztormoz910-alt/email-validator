@@ -141,7 +141,7 @@ def calculate_engagement_score(
         
     if in_dnsbl:
         score -= 40
-        signals.append("-40: IP сервера в блэклисте Spamhaus")
+        signals.append("-40: IP сервера в чёрных списках (DNSBL)")
         
     # PTR и STARTTLS — гигиена почтового СЕРВЕРА, а не доказательство мёртвого ящика.
     # Штрафуем только при подтверждённом отсутствии (False), но не при None ("не проверено"),
