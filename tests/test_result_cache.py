@@ -146,7 +146,7 @@ class _StubNetwork:
                 "mx_record": "mx.example.com", "has_starttls": True,
                 "server_outdated": False}
 
-    def check_dns_health(self, domain):
+    def check_dns_health(self, domain, mx_record=""):
         return {"has_spf": True, "has_dmarc": True, "has_dkim": True, "score": 3}
 
     def check_dnsbl(self, host):
@@ -166,13 +166,26 @@ class _StubNames:
     def extract_name(self, email):
         return "Test User"
 
+    def last_profile(self):
+        return {}
+
 
 class _StubML:
-    def predict(self, name, email=None):
-        return ("male", "US")
+    """Повторяет интерфейс MLPredictor. Если он разойдётся с настоящим,
+    обогащение упадёт молча — воркер поймает исключение, и адрес уйдёт
+    в выдачу без скоринга. Поэтому набор методов здесь важен."""
+
+    def predict(self, name, email=None, country_hint=""):
+        return ("Мужской", "США")
+
+    def predict_gender(self, name, country=""):
+        return "Мужской"
 
     def predict_country(self, name):
-        return "US"
+        return "США"
+
+    def country_distribution(self, name):
+        return ("United States", 0.9, 0.05)
 
     def is_person(self, name):
         return True

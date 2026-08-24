@@ -36,10 +36,21 @@ class BlacklistDownloader:
         # оценке базы никто не считал, что ловушки отфильтрованы.
         self.sources = {
             "disposable.txt": "https://raw.githubusercontent.com/disposable-email-domains/disposable-email-domains/master/disposable_email_blocklist.conf",
-            "disposable_extra.txt": "https://raw.githubusercontent.com/unkn0w/disposable-email-domain-list/master/domains.txt"
+            "disposable_extra.txt": "https://raw.githubusercontent.com/unkn0w/disposable-email-domain-list/master/domains.txt",
+            # Третий источник одноразовых: списки пересекаются лишь частично.
+            "disposable_more.txt": "https://raw.githubusercontent.com/FGRibreau/mailchecker/master/list.txt",
+            # Бесплатные почтовики. Нужен НЕ для отбраковки, а для скоринга:
+            # без него mail.com, zoho.com и сотни региональных сервисов
+            # считались корпоративными и получали +5, которого нет у gmail.com.
+            "free_providers.txt": "https://raw.githubusercontent.com/willwhite/freemail/master/data/free.txt",
         }
 
         self._migrate_legacy_names()
+
+    # Файлы, которые НЕ являются списками одноразовых доменов и не должны
+    # попадать в чёрный список. free_providers.txt — это gmail.com и подобные;
+    # загрузи его в SpamFilter, и вся база уедет в Trap/Disposable.
+    NON_BLACKLIST_FILES = frozenset({"free_providers.txt"})
 
     # Старое имя -> новое. SpamFilter грузит ВСЕ .txt из data/, поэтому оставить
     # старый файл рядом с новым нельзя: он загрузился бы вторым экземпляром.
@@ -139,6 +150,17 @@ class BlacklistDownloader:
             if len(new_domains) < self.MIN_PLAUSIBLE_DOMAINS:
                 log(f"[DEAD] {filename}: ответ битый ({len(new_domains)} доменов), оставляю старый список.", "dead")
                 continue
+
+            # Санити-контракт для чёрных списков: крупного почтовика в списке
+            # одноразовых доменов быть не может. Если он там есть — источник
+            # испорчен, и применять его нельзя: вся база уедет в Trap.
+            if filename not in self.NON_BLACKLIST_FILES:
+                from core.filters import BLACKLIST_SENTINELS
+                bad = BLACKLIST_SENTINELS & new_domains
+                if bad:
+                    log(f"[DEAD] {filename}: источник испорчен — внутри "
+                        f"{', '.join(sorted(bad)[:3])}. Оставляю старый список.", "dead")
+                    continue
 
             old_count = 0
             if exists:
