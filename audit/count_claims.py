@@ -45,7 +45,7 @@ print(f"       Всего веток return make_result(...): {branches}")
 from core.disposable import DISPOSABLE_DOMAINS, get_disposable_count
 print(f"\n[S4.4] Заявлено 8948 disposable-доменов")
 print(f"       Python-set DISPOSABLE_DOMAINS (используется is_disposable): {get_disposable_count()}")
-for f in ('data/disposable.txt','data/spam_traps.txt'):
+for f in ('data/disposable.txt','data/disposable_extra.txt'):
     n = sum(1 for l in open(f, encoding='utf-8') if l.strip())
     print(f"       {f}: {n} непустых строк")
 from core.filters import SpamFilter

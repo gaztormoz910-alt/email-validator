@@ -7,6 +7,7 @@ import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from core.cache import ResultCache
 from core.cleaner import EmailCleaner, normalize_for_dedup
 from core.filters import SpamFilter
 from core.github_parser import BlacklistDownloader
@@ -30,6 +31,9 @@ _TRANSIENT_MARKERS = (
     "rate limit", "service busy", "all proxies dead", "temp unavailable",
     "temp error", "our ip blocked", "our ip blacklisted", "transaction failed",
     "mail from rejected", "too many recipients",
+    # DNS через прокси не ответил — домен не проверен, а не мёртв. Повтор другим
+    # прокси обычно решает.
+    "dns не удалось спросить",
 )
 
 # Эти Unknown повторять бессмысленно — ответ не изменится от смены прокси
@@ -60,6 +64,14 @@ def _as_utc(dt):
     return dt.astimezone(datetime.timezone.utc)
 
 
+def _fmt_stamp(iso_stamp):
+    """ISO-время из кэша в тот же формат, что и у свежих проверок."""
+    try:
+        return _as_utc(datetime.datetime.fromisoformat(iso_stamp)).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return ""
+
+
 class ValidationPipeline:
     def __init__(self, callbacks):
         self.callbacks = callbacks 
@@ -73,6 +85,10 @@ class ValidationPipeline:
         self.name_extractor = None
         self.ml_predictor = None
         self.gravatar_checker = GravatarChecker(timeout=3, proxy_provider=self._http_proxies)
+        # Кэш доказанных вердиктов между прогонами (см. core/cache.py)
+        self.cache = None
+        self._cache_hits = 0
+        self._cache_lock = threading.Lock()
         self._domain_age_cache = {}
         self._domain_age_lock = threading.Lock()
         self._http_alive_cache = {}
@@ -177,9 +193,32 @@ class ValidationPipeline:
             self._http_alive_cache[domain] = False
         return False
 
-    def setup(self, timeout=5, enable_ai=False, proxies=None, threads=100):
+    def setup(self, timeout=5, enable_ai=False, proxies=None, threads=100, use_cache=True):
         # Гибридный режим: Whitelist + DNS-проверка неизвестных доменов
         self.callbacks['on_log']("[INFO] Подготовка валидатора (гибридный режим: Whitelist + DNS)...", "info")
+
+        # Кэш вердиктов прошлых прогонов. Хранит только доказанное — Valid и
+        # Invalid/Bounce; Unknown и Risky не кэшируются никогда, иначе сбой
+        # нашей стороны закрепился бы за адресом навсегда.
+        self.cache = None
+        self._cache_hits = 0
+        if use_cache:
+            try:
+                cache = ResultCache()
+                if cache.enabled:
+                    dropped = cache.purge_expired()
+                    self.cache = cache
+                    msg = f"[INFO] Кэш вердиктов: {cache.size()} адресов из прошлых прогонов."
+                    if dropped:
+                        msg += f" Просроченных удалено: {dropped}."
+                    self.callbacks['on_log'](msg, "info")
+                else:
+                    self.callbacks['on_log'](
+                        "[DEAD] Кэш вердиктов недоступен (не удалось открыть базу) — "
+                        "проверяю всё заново.", "dead")
+            except Exception as e:
+                self.callbacks['on_log'](
+                    f"[DEAD] Кэш вердиктов не включён ({type(e).__name__}).", "dead")
         
         # Обновляем disposable/spam-списки ДО загрузки SpamFilter, чтобы он
         # сразу подхватил свежие данные. Списки переустанавливаются (замена, не
@@ -255,8 +294,11 @@ class ValidationPipeline:
                         self.callbacks['on_log'](
                             f"[PROXY] Профиль... {done}/{total} | с PTR: {ptr_n} | в списках: {bl_n}", "info")
 
+                    # Потоки берём из ползунка: раньше здесь было жёсткое 30, и
+                    # список в несколько тысяч прокси профилировался часами.
                     proxy_profiles = profile_proxies(
-                        live_proxies, timeout=timeout, progress_callback=on_prof)
+                        live_proxies, timeout=timeout, workers=threads,
+                        progress_callback=on_prof)
 
                     vals = list(proxy_profiles.values())
                     ptr_n = sum(1 for v in vals if v["has_ptr"] is True)
@@ -402,9 +444,12 @@ class ValidationPipeline:
                 if self.filter.is_spam_or_disposable(email):
                     data["engagement_score"] = 0
                     data["engagement_grade"] = "Dead"
-                    data["provider_type"] = "Spam Trap"
-                    data["provider_name"] = "Spam Trap"
-                    data["domain_type"] = "Spam Trap"
+                    # Не «ловушка»: это совпадение с внешним списком одноразовых
+                    # доменов. Настоящих списков спам-ловушек в открытом доступе
+                    # нет — опубликованная ловушка перестаёт работать.
+                    data["provider_type"] = "Disposable (внешний список)"
+                    data["provider_name"] = "Disposable"
+                    data["domain_type"] = "Disposable"
                     self.callbacks['on_result'](email, "Trap/Disposable", "External Blacklist Match", "N/A", data)
                     return
 
@@ -423,6 +468,35 @@ class ValidationPipeline:
                     self.callbacks['on_result'](email, "Trap/Disposable", "AI: Bot/Spam Pattern", "N/A", data)
                     return
                 
+            # Шаг 2: Кэш прошлых прогонов. Доказанный вердикт SMTP от перезапуска
+            # не меняется, поэтому тратить на него прокси и время незачем.
+            # В кэше лежат только Valid и Invalid/Bounce — см. core/cache.py.
+            if deep_ping and self.cache:
+                cached = self.cache.get(email)
+                if cached:
+                    # Данные из файла базы важнее кэша — их не перезаписываем.
+                    # А вот вычисленное прошлым прогоном (скор, провайдер по
+                    # MX-записи) точнее того, что проставлено выше вслепую.
+                    # Пустая строка в data — это «в файле колонки не было»,
+                    # а не «значение пустое»: такие поля кэш заполняет.
+                    computed = ("engagement_score", "engagement_grade", "provider_type",
+                                "provider_name", "domain_type", "has_gravatar")
+                    for key, value in (cached.get("data") or {}).items():
+                        if key in computed or not data.get(key):
+                            data[key] = value
+                    # Показываем ДАТУ ИСХОДНОЙ проверки, а не сегодняшнюю:
+                    # иначе кэш выглядел бы как свежая проверка.
+                    data["validated_at"] = _fmt_stamp(cached["checked_at"]) or data["validated_at"]
+                    data["from_cache"] = True
+                    status_display = "Role-based" if is_role else cached["status"]
+                    with self._cache_lock:
+                        self._cache_hits += 1
+                    self.callbacks['on_result'](
+                        email, status_display,
+                        f"{cached['reason']} [из кэша, {cached['age_days']} дн. назад]",
+                        cached["mx"], data)
+                    return
+
             # Шаг 3: Глубокий SMTP Ping
             if deep_ping:
                 res = self.network.check_email(email)
@@ -582,6 +656,12 @@ class ValidationPipeline:
                 prov_name, dom_type = classify_domain(email, res.get("mx_record", ""))
                 data["provider_name"] = prov_name
                 data["domain_type"] = dom_type
+
+                # В кэш уходит SMTP-статус, а не отображаемый: ролевой ящик
+                # показывается как Role-based, но доказан-то он как Valid.
+                if self.cache:
+                    self.cache.put(email, original_smtp_status, res.get("reason", ""),
+                                   res.get("mx_record", "N/A"), data)
 
                 self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
             else:
@@ -821,7 +901,11 @@ class ValidationPipeline:
                     data["provider_name"] = prov_name
                     data["domain_type"] = dom_type
                     data["validated_at"] = _utc_now().strftime("%Y-%m-%d %H:%M")
-                    
+
+                    if self.cache:
+                        self.cache.put(email, original_smtp_status, res.get("reason", ""),
+                                       res.get("mx_record", "N/A"), data)
+
                     self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
                     with retry_lock:
                         retry_count += 1
@@ -893,12 +977,23 @@ class ValidationPipeline:
         except Exception:
             pass
 
+        if self.cache:
+            with self._cache_lock:
+                hits = self._cache_hits
+            if hits:
+                self.callbacks['on_log'](
+                    f"[INFO] Из кэша взято {hits} вердиктов — эти адреса заново "
+                    "не проверялись. Дата в колонке «Проверено» у них исходная.", "info")
+            self.cache.close()
+            self.cache = None
+
         self.is_running = False
         self.callbacks['on_complete']()
 
-    def start(self, email_sources, threads, timeout, fix_typos, check_spam, deep_ping, enable_ai, proxies=None, enable_osint=False):
+    def start(self, email_sources, threads, timeout, fix_typos, check_spam, deep_ping, enable_ai, proxies=None, enable_osint=False, use_cache=True):
         def worker():
-            self.setup(timeout=timeout, enable_ai=enable_ai, proxies=proxies, threads=threads)
+            self.setup(timeout=timeout, enable_ai=enable_ai, proxies=proxies, threads=threads,
+                       use_cache=use_cache)
             self.run_pipeline(email_sources, threads, fix_typos, check_spam, deep_ping, enable_ai, enable_osint=enable_osint)
             
         t = threading.Thread(target=worker, daemon=True)
