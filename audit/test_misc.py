@@ -115,11 +115,11 @@ from core.github_parser import BlacklistDownloader
 import shutil, tempfile
 tmp = tempfile.mkdtemp()
 shutil.copy("data/disposable.txt", os.path.join(tmp, "disposable.txt"))
-shutil.copy("data/spam_traps.txt", os.path.join(tmp, "spam_traps.txt"))
+shutil.copy("data/disposable_extra.txt", os.path.join(tmp, "disposable_extra.txt"))
 before = os.path.getsize(os.path.join(tmp, "disposable.txt"))
 bd = BlacklistDownloader(data_dir=tmp)
 bd.sources = {"disposable.txt": "https://raw.githubusercontent.com/does-not-exist-zzq/x/master/y.txt",
-              "spam_traps.txt": "https://127.0.0.1:1/nothing"}
+              "disposable_extra.txt": "https://127.0.0.1:1/nothing"}
 rep = bd.download_all()
 after = os.path.getsize(os.path.join(tmp, "disposable.txt"))
 print("   URL битые. Отчёт: %s" % rep)

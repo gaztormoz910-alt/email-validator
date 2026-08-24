@@ -1,6 +1,11 @@
 # core/network.py
 import dns.resolver
 import dns.reversename
+import dns.exception
+import dns.message
+import dns.query
+import dns.rcode
+import dns.rdatatype
 import smtplib
 import socket
 import random
@@ -82,6 +87,11 @@ MAIL_FROM_POOL = [
     'verify@usa.com',          # Минимальный SPF (~all)
 ]
 
+# TLD: либо обычные буквы, либо punycode-зона IDN (xn--p1ai для .рф, xn--80asehdb
+# для .онлайн). Без второй половины любой интернационализированный домен после
+# перевода в punycode не проходил регулярку и получал вердикт «Bad Syntax».
+_TLD_PART = r'(?:xn--[a-zA-Z0-9\-]{2,}|[a-zA-Z]{2,})'
+
 # RFC 5322 — строгая проверка синтаксиса email (п.1.3)
 _RFC5322_REGEX = re.compile(
     r'^[a-zA-Z0-9]'                # Начинается с буквы или цифры
@@ -89,7 +99,13 @@ _RFC5322_REGEX = re.compile(
     r'@'
     r'[a-zA-Z0-9]'                 # Домен начинается с буквы/цифры
     r'[a-zA-Z0-9.\-]{0,251}'       # Тело домена
-    r'\.[a-zA-Z]{2,}$'             # TLD минимум 2 буквы
+    r'\.' + _TLD_PART + r'$'       # TLD: буквы либо punycode-зона
+)
+
+# Домен отдельно — нужен, когда локальная часть не-ASCII и общей регуляркой
+# адрес не проверить.
+_DOMAIN_REGEX = re.compile(
+    r'^[a-zA-Z0-9][a-zA-Z0-9.\-]{0,251}\.' + _TLD_PART + r'$'
 )
 
 _BAD_SYNTAX_PATTERNS = re.compile(
@@ -100,8 +116,40 @@ _BAD_SYNTAX_PATTERNS = re.compile(
 )
 
 
+def to_ascii_domain(domain: str):
+    """Переводит домен в punycode. None — домен непереводим (значит, битый).
+
+    почта.рф -> xn--80a1acny.xn--p1ai,  münchen.de -> xn--mnchen-3ya.de
+    """
+    if not isinstance(domain, str) or not domain:
+        return None
+    try:
+        if domain.isascii():
+            return domain
+        return domain.encode('idna').decode('ascii')
+    except Exception:
+        return None
+
+
+def has_non_ascii_local(email: str) -> bool:
+    """True, если локальная часть содержит не-ASCII символы (нужен SMTPUTF8).
+
+    Такой адрес законен по RFC 6531, но `RCPT TO` с ним отправить нельзя:
+    smtplib кодирует команду в ASCII. Это повод для `unknown`, а не для `invalid`.
+    """
+    if not isinstance(email, str) or "@" not in email:
+        return False
+    return not email.rsplit("@", 1)[0].isascii()
+
+
 def validate_email_syntax(email: str) -> bool:
-    """Проверяет email по стандарту RFC 5322. Возвращает True если синтаксис корректен."""
+    """Проверяет синтаксис email. True — адрес построен корректно.
+
+    Интернационализированные адреса (IDN-домен, не-ASCII локальная часть)
+    считаются КОРРЕКТНЫМИ. Раньше их резала ASCII-регулярка, и живой
+    ivan@почта.рф получал вердикт `invalid` «Bad Syntax» — ложное захоронение
+    лида на ровном месте. Проверяемость таких адресов решается отдельно.
+    """
     if not email or not isinstance(email, str):
         return False
     if len(email) > 320:  # RFC максимум: 64 (local) + 1 (@) + 255 (domain)
@@ -110,7 +158,19 @@ def validate_email_syntax(email: str) -> bool:
         return False
     if _BAD_SYNTAX_PATTERNS.search(email):
         return False
-    return bool(_RFC5322_REGEX.match(email))
+
+    local, _, domain = email.partition('@')
+    domain_ascii = to_ascii_domain(domain)
+    if not domain_ascii:
+        return False
+
+    # Не-ASCII локальная часть: общей регуляркой её не проверить, поэтому
+    # смотрим только длину и домен. Отбраковывать адрес за это нельзя.
+    if not local.isascii():
+        return bool(local) and len(local.encode('utf-8')) <= 64 and bool(
+            _DOMAIN_REGEX.match(domain_ascii))
+
+    return bool(_RFC5322_REGEX.match(f"{local}@{domain_ascii}"))
 
 
 # Схема прокси -> тип соединения PySocks. Чекер умеет проверять socks4 и HTTP,
@@ -347,7 +407,10 @@ def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None,
         return {}
     proxies = list(proxies)
 
-    validator = NetworkValidator(timeout=timeout)
+    # proxy_dns=False осознанно: здесь резолвятся обратные записи САМИХ прокси,
+    # данных пользователя в этих запросах нет. Гнать их через проверяемый прокси
+    # значило бы ставить качество профиля в зависимость от того, что мы измеряем.
+    validator = NetworkValidator(timeout=timeout, proxy_dns=False)
     result = {}
     done = 0
     lock = threading.Lock()
@@ -389,6 +452,16 @@ def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None,
                        "has_ptr": has_ptr, "rdns": rdns,
                        "rdns_dirty": is_dirty_rdns(rdns), "in_dnsbl": in_dnsbl,
                        "outlook_ok": outlook_ok, "outlook_reason": outlook_reason}
+
+    # Число потоков приходит из ползунка. Раньше здесь стояло жёсткое 30, и на
+    # списке в несколько тысяч прокси профилирование занимало часы: на каждый
+    # прокси идут два полных SMTP-диалога плюс DNS. Потолок в 300 — та же
+    # аппаратная защита, что и у валидации.
+    try:
+        workers = int(workers)
+    except (TypeError, ValueError):
+        workers = 30
+    workers = max(1, min(workers, 300))
 
     with ThreadPoolExecutor(max_workers=min(workers, max(1, len(proxies)))) as pool:
         for proxy, info in pool.map(profile_one, proxies):
@@ -448,6 +521,150 @@ def build_proxy_dict(proxy):
     return {"http": url, "https": url}
 
 
+# --- DNS через прокси --------------------------------------------------------
+#
+# Раньше резолвер ходил на 8.8.8.8 напрямую всегда. Это был последний канал, по
+# которому реальный IP пользователя уходил наружу: публичный DNS видел и его
+# адрес, и ПОЛНЫЙ список доменов проверяемой базы. SMTP, Gravatar, RDAP и HTTP
+# уже шли через прокси, а DNS — нет.
+#
+# Теперь при заданных прокси каждый DNS-запрос идёт через тот же прокси:
+#   1. DoH (POST wire-format) через socks5h. Соединение переиспользуется
+#      сессией, поэтому 25 DKIM-селекторов на домен не превращаются в 25
+#      TLS-рукопожатий.
+#   2. Обычный DNS по TCP через SOCKS — если DoH недоступен.
+#   3. Отказ. Прямого запроса в обход прокси НЕТ — ради этого всё и делалось.
+DOH_ENDPOINTS = (
+    "https://cloudflare-dns.com/dns-query",
+    "https://dns.google/dns-query",
+)
+
+# Задержка для прокси, у которого её не измеряли. Ставим заведомо большую, чтобы
+# при равном health score измеренные быстрые шли впереди неизвестных.
+UNKNOWN_LATENCY_MS = 10000
+
+
+class DNSUnavailable(dns.exception.DNSException):
+    """DNS спросить не удалось: прокси заданы, но ни один транспорт не ответил.
+
+    Отличать от NXDOMAIN обязательно. «Не смогли проверить» — это не
+    «домена не существует»: иначе живой домен уедет в Invalid как мёртвый.
+    """
+
+
+class ProxiedResolver:
+    """Резолвер с интерфейсом dns.resolver.Resolver.resolve().
+
+    Без прокси ведёт себя ровно как раньше — обычный резолвер на 8.8.8.8/1.1.1.1.
+    С прокси заворачивает запрос в тот же прокси, что и SMTP.
+    """
+
+    def __init__(self, nameservers, timeout, proxy_provider=None):
+        self._plain = dns.resolver.Resolver()
+        self._plain.nameservers = list(nameservers)
+        self._plain.timeout = timeout
+        self._plain.lifetime = timeout
+        self.nameservers = self._plain.nameservers
+        self.timeout = timeout
+        self.lifetime = timeout
+        self._proxy_provider = proxy_provider
+        # Сессии requests не потокобезопасны — держим по одной на поток.
+        self._local = threading.local()
+
+    def resolve(self, qname, rdtype='A'):
+        """Контракт proxy_provider():
+            None  — прокси не заданы, идём напрямую (прежнее поведение)
+            ""    — прокси заданы, но живых нет: спрашивать нельзя, это утечка
+            str   — идём через этот прокси
+        """
+        proxy = self._proxy_provider() if self._proxy_provider else None
+        if proxy is None:
+            return self._plain.resolve(qname, rdtype)
+        if not proxy:
+            raise DNSUnavailable("прокси заданы, но живых не осталось")
+
+        rd = dns.rdatatype.from_text(rdtype) if isinstance(rdtype, str) else rdtype
+        query = dns.message.make_query(qname, rd)
+        response = self._via_doh(query, proxy)
+        if response is None:
+            response = self._via_socks_tcp(query, proxy)
+        if response is None:
+            raise DNSUnavailable("ни DoH, ни DNS-over-TCP через прокси не ответили")
+        return self._extract(response, rd)
+
+    def _session(self, proxy):
+        store = getattr(self._local, "sessions", None)
+        if store is None:
+            store = {}
+            self._local.sessions = store
+        session = store.get(proxy)
+        if session is None:
+            import requests
+            session = requests.Session()
+            session.headers.update({
+                "Content-Type": "application/dns-message",
+                "Accept": "application/dns-message",
+                "User-Agent": "Mozilla/5.0",
+            })
+            proxies = build_proxy_dict(proxy)
+            if proxies:
+                session.proxies.update(proxies)
+            store[proxy] = session
+        return session
+
+    def _via_doh(self, query, proxy):
+        wire = query.to_wire()
+        for url in DOH_ENDPOINTS:
+            try:
+                resp = self._session(proxy).post(url, data=wire, timeout=self.timeout)
+                if resp.status_code == 200 and resp.content:
+                    return dns.message.from_wire(resp.content)
+            except Exception:
+                continue
+        return None
+
+    def _via_socks_tcp(self, query, proxy):
+        parsed = _parse_proxy(proxy)
+        if not parsed:
+            return None
+        pip, pport, puser, ppass = parsed
+        ptype = _PROXY_TYPES.get(_proxy_scheme(proxy), socks.SOCKS5)
+        for nameserver in self.nameservers:
+            sock = None
+            try:
+                sock = socks.socksocket()
+                sock.set_proxy(ptype, pip, pport, username=puser, password=ppass)
+                sock.settimeout(self.timeout)
+                sock.connect((nameserver, 53))
+                # DNS по UDP через SOCKS5 работает не везде, по TCP — везде.
+                return dns.query.tcp(query, nameserver, timeout=self.timeout, sock=sock)
+            except Exception:
+                continue
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+        return None
+
+    @staticmethod
+    def _extract(response, rdtype):
+        """Превращает ответ в список rdata — то же, что отдаёт обычный резолвер."""
+        rcode = response.rcode()
+        if rcode == dns.rcode.NXDOMAIN:
+            raise dns.resolver.NXDOMAIN
+        if rcode != dns.rcode.NOERROR:
+            raise DNSUnavailable(f"DNS rcode {dns.rcode.to_text(rcode)}")
+        items = []
+        for rrset in response.answer:
+            if rrset.rdtype == rdtype:
+                items.extend(rrset)
+        if not items:
+            raise dns.resolver.NoAnswer
+        return items
+
+
 def _generate_random_local(style="short"):
     """Генерирует случайный локальный-адрес для Catch-All теста.
     style='short' — классический (16 символов), style='uuid' — UUID-подобный (п.4 Catch-All)"""
@@ -461,7 +678,8 @@ def _generate_random_local(style="short"):
 
 
 class NetworkValidator:
-    def __init__(self, from_email="check@example.com", timeout=5, proxies=None):
+    def __init__(self, from_email="check@example.com", timeout=5, proxies=None,
+                 proxy_dns=True):
         self.from_email = from_email
         self.timeout = timeout
         self.proxies = proxies if proxies else []
@@ -469,11 +687,18 @@ class NetworkValidator:
         # Держит прогон предсказуемым: без него адрес с тремя MX мог висеть минутами.
         self.address_deadline = max(30, min(180, timeout * 6))
 
-        # Настройка DNS резолвера
-        self.resolver = dns.resolver.Resolver()
-        self.resolver.nameservers = ['8.8.8.8', '1.1.1.1', '8.8.4.4', '1.0.0.1']
-        self.resolver.timeout = self.timeout
-        self.resolver.lifetime = self.timeout
+        # Пускать ли DNS через прокси. Выключается только там, где запросы не
+        # содержат данных пользователя — например при профилировании самих
+        # прокси (обратный DNS их собственных IP).
+        self._proxy_dns = bool(proxy_dns)
+
+        # Настройка DNS резолвера. С прокси запросы идут через них, без прокси —
+        # напрямую, как раньше.
+        self.resolver = ProxiedResolver(
+            nameservers=['8.8.8.8', '1.1.1.1', '8.8.4.4', '1.0.0.1'],
+            timeout=self.timeout,
+            proxy_provider=self._dns_proxy,
+        )
 
         # Кэш MX-записей
         self.mx_cache = {}
@@ -508,6 +733,9 @@ class NetworkValidator:
         # Proxy Health Scoring (п.8): score каждого прокси
         self._proxy_scores = {}
         self._proxy_score_lock = threading.Lock()
+        # Задержка до баннера, измеренная профилировщиком. Раньше она только
+        # логировалась; теперь при равном health score быстрый прокси идёт первым.
+        self._proxy_latency = {}
         # Прокси, севший MAX_CONSECUTIVE_FAILS раз ПОДРЯД, выбывает из ротации навсегда.
         # Иначе мёртвый прокси бесконечно тормозит прогон (10 повторов × таймаут на адрес).
         self._proxy_consecutive_fails = {}
@@ -585,6 +813,12 @@ class NetworkValidator:
             self._ptr_proxies = {p for p, v in profiles.items() if v.get("has_ptr") is True}
             self._ptr_unknown = {p for p, v in profiles.items() if v.get("has_ptr") is None}
 
+            # Измеренная задержка идёт в выбор прокси, а не только в лог.
+            self._proxy_latency = {
+                p: v.get("latency_ms") for p, v in profiles.items()
+                if isinstance(v.get("latency_ms"), (int, float))
+            }
+
             # "Грязный" = непригодный для провайдеров, чувствительных к репутации.
             # Три независимых признака, и прямая проба среди них ГЛАВНАЯ: замерено,
             # что Microsoft отвергает IP, которого нет ни в одном чёрном списке —
@@ -606,11 +840,31 @@ class NetworkValidator:
             alive = {p for p in self.proxies if p not in self._proxy_banned}
             return bool(alive - self._dirty_proxies)
 
+    def _dns_proxy(self):
+        """Прокси для DNS-запроса. Контракт описан в ProxiedResolver.resolve().
+
+        Когда прокси заданы, но живых не осталось, возвращаем пустую строку, а не
+        None: молча уйти на 8.8.8.8 напрямую — значит раскрыть реальный IP там,
+        где пользователь этого не ждёт. Ровно та же логика, что у SMTP.
+        """
+        if not self._proxy_dns or not self.proxies:
+            return None
+        return self._pick_best_proxy() or ""
+
     def _choose_from(self, candidates):
-        """Берёт случайный из топа по health score."""
+        """Берёт случайный из топа: сначала health score, при равном — скорость.
+
+        Задержку меряет профилировщик. Она важнее, чем кажется: на один адрес
+        приходится до 15 попыток, и лишние 800 мс на попытку превращаются
+        в лишние 12 секунд на адресе.
+        """
         if not candidates or not hasattr(candidates, "__iter__"):
             return None
-        ranked = sorted(candidates, key=lambda p: self._proxy_scores.get(p, 0), reverse=True)
+        ranked = sorted(
+            candidates,
+            key=lambda p: (-self._proxy_scores.get(p, 0),
+                           self._proxy_latency.get(p) or UNKNOWN_LATENCY_MS),
+        )
         top = ranked[:max(5, len(ranked) // 3)]
         return random.choice(top)
 
@@ -703,6 +957,7 @@ class NetworkValidator:
                 return self._dnsbl_cache[ip]
 
         result = False
+        unreachable = 0
         reversed_ip = '.'.join(reversed(ip.split('.')))
         for bl in DNSBL_ZONES:
             try:
@@ -714,8 +969,16 @@ class NetworkValidator:
                         break
                 if result:
                     break
+            except DNSUnavailable:
+                unreachable += 1
+                continue
             except Exception:
                 continue
+
+        # Ни одна зона не ответила из-за DNS — это не «чисто», это «не спросили».
+        # Не кэшируем, иначе первый же сбой закрепит False на весь прогон.
+        if not result and unreachable == len(DNSBL_ZONES):
+            return False
 
         with self._dnsbl_lock:
             self._dnsbl_cache[ip] = result
@@ -735,6 +998,7 @@ class NetworkValidator:
                 return self._dnsbl_cache[mx_host]
 
         result = False
+        unreachable = 0
         try:
             ip = str(self.resolver.resolve(mx_host, 'A')[0])
             reversed_ip = '.'.join(reversed(ip.split('.')))
@@ -748,10 +1012,18 @@ class NetworkValidator:
                             break
                     if result:
                         break
+                except DNSUnavailable:
+                    unreachable += 1
+                    continue
                 except Exception:
                     continue  # Не в этом списке либо список не ответил
+        except DNSUnavailable:
+            return False  # Даже A-запись не спросили — вывода нет, не кэшируем
         except Exception:
             result = False
+
+        if not result and unreachable == len(DNSBL_ZONES):
+            return False
 
         with self._dnsbl_lock:
             self._dnsbl_cache[mx_host] = result
@@ -789,6 +1061,11 @@ class NetworkValidator:
             result = False  # PTR нет вовсе, либо имя никуда не резолвится
         except Exception:
             result = None   # DNS не ответил — вывода сделать нельзя
+
+        # Неудачу не кэшируем: хороший прокси не должен вылететь из пула Yahoo
+        # из-за одного таймаута DNS.
+        if result is None:
+            return None
 
         with self._fcrdns_lock:
             self._fcrdns_cache[ip] = result
@@ -836,36 +1113,50 @@ class NetworkValidator:
             result = False
         except Exception:
             result = None
+        if result is None:
+            return None  # «не проверено» не кэшируем — иначе сбой станет вечным
         with self._ptr_lock:
             self._ptr_cache[mx_host] = result
         return result
 
-    def get_mx_records(self, domain: str) -> list:
-        """Ищет MX-записи для домена. Если MX нет — фоллбэк на A-запись (RFC 5321, п.1.4)."""
-        try:
-            domain = domain.encode('idna').decode('ascii')
-        except Exception:
+    def get_mx_records(self, domain: str):
+        """Ищет MX-записи домена, с фоллбэком на A и AAAA (RFC 5321, п.1.4).
+
+        Возвращает:
+          [хосты] — куда слать
+          []      — записей нет, домен действительно мёртвый
+          None    — СПРОСИТЬ НЕ УДАЛОСЬ (DNS через прокси не ответил)
+
+        Различие между [] и None критично: без него сбой DNS выглядел бы как
+        «домена не существует», и живой домен уехал бы в Invalid целиком.
+        """
+        domain = to_ascii_domain(domain)
+        if not domain:
             return []
 
         with self.mx_lock:
             if domain in self.mx_cache:
                 return self.mx_cache[domain]
 
+        dns_failed = False
+
         try:
             answers = self.resolver.resolve(domain, 'MX')
             records = sorted(answers, key=lambda x: x.preference)
-            
+
             # 1.1 Null MX Check (RFC 7505)
             if len(records) == 1 and records[0].preference == 0 and str(records[0].exchange) in ['.', '']:
                 with self.mx_lock:
                     self.mx_cache[domain] = []
                 return []
-                
+
             result = [str(record.exchange).rstrip('.') for record in records]
             if result:
                 with self.mx_lock:
                     self.mx_cache[domain] = result
                 return result
+        except DNSUnavailable:
+            dns_failed = True
         except Exception:
             pass
 
@@ -877,6 +1168,8 @@ class NetworkValidator:
             with self.mx_lock:
                 self.mx_cache[domain] = result
             return result
+        except DNSUnavailable:
+            dns_failed = True
         except Exception:
             pass
 
@@ -887,8 +1180,15 @@ class NetworkValidator:
             with self.mx_lock:
                 self.mx_cache[domain] = result
             return result
+        except DNSUnavailable:
+            dns_failed = True
         except Exception:
             pass
+
+        # DNS не ответил — вывода о домене сделать нельзя. Не кэшируем:
+        # иначе один сбой похоронил бы домен на весь прогон.
+        if dns_failed:
+            return None
 
         # Ни MX, ни A, ни AAAA — домен мёртвый
         with self.mx_lock:
@@ -908,6 +1208,7 @@ class NetworkValidator:
         has_spf = False
         has_dmarc = False
         has_dkim = False
+        dns_failed = False
 
         # Проверяем SPF (TXT-запись с v=spf1)
         try:
@@ -917,6 +1218,8 @@ class NetworkValidator:
                 if 'v=spf1' in txt_str:
                     has_spf = True
                     break
+        except DNSUnavailable:
+            dns_failed = True
         except Exception:
             pass
 
@@ -928,6 +1231,8 @@ class NetworkValidator:
                 if 'v=dmarc1' in txt_str:
                     has_dmarc = True
                     break
+        except DNSUnavailable:
+            dns_failed = True
         except Exception:
             pass
 
@@ -956,11 +1261,20 @@ class NetworkValidator:
                         break
                 if has_dkim:
                     break
+            except DNSUnavailable:
+                # DNS недоступен — перебирать остальные 20+ селекторов бессмысленно
+                dns_failed = True
+                break
             except Exception:
                 continue
 
         score = int(has_spf) + int(has_dmarc) + int(has_dkim)
         result = {'has_spf': has_spf, 'has_dmarc': has_dmarc, 'has_dkim': has_dkim, 'score': score}
+
+        # DNS не ответил и ничего не нашли — это «не проверили», а не «записей нет».
+        # Кэшировать такой нуль нельзя: домен навсегда остался бы без бонуса.
+        if dns_failed and score == 0:
+            return result
 
         with self._dns_health_lock:
             self._dns_health_cache[domain] = result
@@ -1392,18 +1706,32 @@ class NetworkValidator:
     def check_email(self, email: str) -> dict:
         """Полная сетевая проверка почты с RFC-валидацией, Catch-All детектором и DNS-здоровьем."""
 
-        # Шаг 0: Проверка синтаксиса по RFC 5322 (п.1.3)
+        # Шаг 0: Проверка синтаксиса (п.1.3). IDN проходит — см. validate_email_syntax.
         if not validate_email_syntax(email):
             return {"status": "invalid", "reason": "Bad Syntax (RFC 5322)", "mx_record": "N/A"}
 
-        domain = email.rsplit("@", 1)[1].lower()
-        try:
-            domain = domain.encode('idna').decode('ascii')
-        except Exception:
+        # Не-ASCII локальная часть законна (RFC 6531), но `RCPT TO` с ней не
+        # отправить: команда кодируется в ASCII. Это «не проверили», а не «мёртв».
+        if has_non_ascii_local(email):
+            return {"status": "unknown",
+                    "reason": "Не-ASCII локальная часть (SMTPUTF8) — RCPT отправить нельзя",
+                    "mx_record": "N/A"}
+
+        local_part, _, raw_domain = email.rpartition("@")
+        domain = to_ascii_domain(raw_domain.lower())
+        if not domain:
             return {"status": "invalid", "reason": "Invalid Domain (IDNA Error)", "mx_record": "N/A"}
+
+        # На проводе домен всегда в punycode: ivan@почта.рф -> ivan@xn--80a1acny.xn--p1ai
+        probe_email = f"{local_part}@{domain}"
 
         # Шаг 1: DNS / MX Check (с A-фоллбэком — п.1.4)
         mx_records = self.get_mx_records(domain)
+        if mx_records is None:
+            # DNS не ответил через прокси. Домен НЕ мёртв — мы просто не спросили.
+            return {"status": "unknown",
+                    "reason": "DNS не удалось спросить через прокси (домен не проверен)",
+                    "mx_record": "N/A"}
         if not mx_records:
             return {"status": "invalid", "reason": "No MX/A records (Dead Domain)", "mx_record": "N/A"}
 
@@ -1436,7 +1764,7 @@ class NetworkValidator:
             is_catchall = self.is_catch_all_domain(domain, primary_mx)
             if is_catchall:
                 # Для Catch-All доменов: всё равно делаем пинг, но помечаем результат
-                result = self.stealth_smtp_ping(email, mx_records)
+                result = self.stealth_smtp_ping(probe_email, mx_records)
                 if result["status"] == "valid":
                     # Сервер принял — но домен Catch-All, так что это ненадёжно
                     result["status"] = "catchall"
@@ -1445,7 +1773,7 @@ class NetworkValidator:
                 return result
 
         # Шаг 4: Обычный Stealth SMTP Ping (с мульти-MX — п.3.1)
-        result = self.stealth_smtp_ping(email, mx_records)
+        result = self.stealth_smtp_ping(probe_email, mx_records)
 
         # Шаг 5: DNS-здоровье как бонус (п.2.2 + DKIM)
         # Если SMTP дал unknown, но DNS показывает здоровый домен — помечаем как Risky (не Unknown)

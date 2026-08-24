@@ -1,0 +1,5 @@
+# Кэш вердиктов валидации. НЕ коммитить: внутри лежит твоя база адресов
+# вместе с ответами почтовых серверов.
+data/validation_cache.sqlite
+data/validation_cache.sqlite-wal
+data/validation_cache.sqlite-shm
