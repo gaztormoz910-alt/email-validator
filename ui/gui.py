@@ -430,7 +430,13 @@ class ValidatorApp(ctk.CTk):
         self.chk_osint_val = ctk.CTkSwitch(self.validator_sidebar_frame, text="Обогащение данных (OSINT)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color=TEXT_ON_ACCENT, button_hover_color=TEXT_MAIN)
         self.chk_osint_val.select()
         self.chk_osint_val.pack(padx=20, anchor="w", pady=(0, 20))
-        
+
+        # Кэш вердиктов прошлых прогонов. Выключай, если базу нужно проверить
+        # заново целиком (например, спустя месяцы или после смены прокси).
+        self.chk_cache = ctk.CTkSwitch(self.validator_sidebar_frame, text="Кэш вердиктов (не перепроверять)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color=TEXT_ON_ACCENT, button_hover_color=TEXT_MAIN)
+        self.chk_cache.select()
+        self.chk_cache.pack(padx=20, anchor="w", pady=(0, 20))
+
         # --- PARSER SIDEBAR CONTENT ---
         self.parser_sidebar_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         
@@ -1155,6 +1161,7 @@ class ValidatorApp(ctk.CTk):
         self.timeout_slider.configure(state=state)
         self.chk_ai.configure(state=state)
         self.chk_osint_val.configure(state=state)
+        self.chk_cache.configure(state=state)
         self.dork_selector.configure(state=state)
         self.parser_proxy_selector.configure(state=state)
         self.parser_threads_slider.configure(state=state)
@@ -1248,7 +1255,8 @@ class ValidatorApp(ctk.CTk):
             deep_ping=True,
             enable_ai=self.chk_ai.get() == 1,
             enable_osint=self.chk_osint_val.get() == 1,
-            proxies=actual_proxies
+            proxies=actual_proxies,
+            use_cache=self.chk_cache.get() == 1
         )
 
     def pause_validation(self):

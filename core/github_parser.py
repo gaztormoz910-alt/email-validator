@@ -26,11 +26,47 @@ class BlacklistDownloader:
         # Манифест с ETag'ами последних загрузок — по нему понимаем, есть ли новые данные.
         self.etag_path = os.path.join(self.data_dir, ".blacklist_etags.json")
 
-        # Ссылки на GitHub репозитории с базами
+        # Ссылки на GitHub репозитории с базами.
+        #
+        # Второй список раньше назывался spam_traps.txt, и имя врало: настоящих
+        # спам-ловушек в нём нет и быть не может — опубликованная ловушка
+        # перестаёт работать, поэтому такие списки секретны по определению.
+        # Внутри лежат обычные одноразовые домены, что видно и по источнику
+        # (unkn0w/disposable-email-domain-list). Имя исправлено, чтобы при
+        # оценке базы никто не считал, что ловушки отфильтрованы.
         self.sources = {
             "disposable.txt": "https://raw.githubusercontent.com/disposable-email-domains/disposable-email-domains/master/disposable_email_blocklist.conf",
-            "spam_traps.txt": "https://raw.githubusercontent.com/unkn0w/disposable-email-domain-list/master/domains.txt"
+            "disposable_extra.txt": "https://raw.githubusercontent.com/unkn0w/disposable-email-domain-list/master/domains.txt"
         }
+
+        self._migrate_legacy_names()
+
+    # Старое имя -> новое. SpamFilter грузит ВСЕ .txt из data/, поэтому оставить
+    # старый файл рядом с новым нельзя: он загрузился бы вторым экземпляром.
+    LEGACY_RENAMES = {"spam_traps.txt": "disposable_extra.txt"}
+
+    def _migrate_legacy_names(self):
+        """Переименовывает файлы, оставшиеся от старых версий."""
+        for old_name, new_name in self.LEGACY_RENAMES.items():
+            old_path = os.path.join(self.data_dir, old_name)
+            new_path = os.path.join(self.data_dir, new_name)
+            if not os.path.exists(old_path):
+                continue
+            try:
+                if os.path.exists(new_path):
+                    os.remove(old_path)      # Новый уже есть — старый лишний
+                else:
+                    os.replace(old_path, new_path)
+            except Exception:
+                continue
+            # Переносим и ETag, иначе список скачается заново без нужды
+            try:
+                etags = self._load_etags()
+                if old_name in etags:
+                    etags.setdefault(new_name, etags.pop(old_name))
+                    self._save_etags(etags)
+            except Exception:
+                pass
 
     def _load_etags(self):
         try:
