@@ -6,23 +6,25 @@
 """
 
 from core.parser_pipeline import GLOBAL_VERIFIED_DOMAINS
-from core.provider import classify_domain
+from core.provider import classify_domain, is_free_mail_domain
 
 
 def _is_free_provider(domain: str) -> bool:
     """True, если домен принадлежит бесплатному почтовому провайдеру.
 
-    Раньше проверка шла только по GLOBAL_VERIFIED_DOMAINS (81 домен, список
-    парсера). В нём нет yandex.ru, mail.ru, protonmail.com, gmx.com и других —
-    из-за чего они считались КОРПОРАТИВНЫМИ и получали +5, которого не получает
-    gmail.com. Итог: postmaster@yandex.ru набирал больше, чем postmaster@gmail.com
-    при одинаковом ответе сервера.
+    Три источника, и все нужны. Сначала проверка шла только по
+    GLOBAL_VERIFIED_DOMAINS (81 домен списка парсера) — в нём нет yandex.ru,
+    mail.ru, protonmail.com. Потом добавилась classify_domain, знающая крупные
+    почтовики и ISP. Но и этого мало: mail.com, zoho.com, seznam.cz, rambler.ru
+    и ещё сотни бесплатных сервисов проходили как КОРПОРАТИВНЫЕ, получали +5,
+    которого не получает gmail.com, и зря гоняли HTTP-HEAD на несуществующий сайт.
     """
     if not domain:
         return False
     if domain in GLOBAL_VERIFIED_DOMAINS:
         return True
-    # classify_domain знает крупные почтовики и ISP поимённо
+    if is_free_mail_domain(domain):
+        return True
     _provider, domain_type = classify_domain(f"x@{domain}")
     return domain_type in ("Personal", "ISP")
 

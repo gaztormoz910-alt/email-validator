@@ -17,6 +17,22 @@ def clean_input_line(line):
     return CLEAN_PREFIX_RE.sub('', line.strip())
 
 
+def _format_sources(data):
+    """Коротко: откуда взяты имя, пол и страна.
+
+    «файл» означает, что значение пришло из исходной базы и является фактом.
+    Всё остальное — предсказание, и пользователь должен видеть разницу:
+    раньше догадка ML стояла в колонке наравне с данными из файла.
+    """
+    marks = []
+    for field, label in (("name_source", "имя"), ("gender_source", "пол"),
+                         ("country_source", "гео")):
+        source = data.get(field)
+        if source:
+            marks.append(f"{label}:{source}")
+    return " ".join(marks)
+
+
 class ProxyHunterInputSelector(ctk.CTkFrame):
     def __init__(self, parent, label_text, button_text, command=None, on_paste=None, on_clear=None):
         super().__init__(parent, fg_color="transparent")
@@ -809,6 +825,20 @@ class ValidatorApp(ctk.CTk):
         self.copy_btn = ctk.CTkButton(self.actions_frame, text="Копировать", command=self.copy_results, width=110, height=32, corner_radius=8, fg_color="transparent", border_width=1, border_color=BORDER_STRONG, hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN)
         self.copy_btn.pack(side="left", padx=(0, 8))
 
+        # Список отписок вычитается при экспорте: повторное письмо тому, кто
+        # уже отписался, стоит жалобы на спам.
+        self.suppress_path = None
+        self.suppress_btn = ctk.CTkButton(self.actions_frame, text="Отписки", command=self.choose_suppression, width=90, height=32, corner_radius=8, fg_color="transparent", border_width=1, border_color=BORDER_STRONG, hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN)
+        self.suppress_btn.pack(side="left", padx=(0, 8))
+
+        # Нарезка выгрузки под лимиты ESP. 0 — одним файлом.
+        ctk.CTkLabel(self.actions_frame, text="по", text_color=TEXT_MUTED,
+                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 4))
+        self.chunk_entry = ctk.CTkEntry(self.actions_frame, width=64, height=32,
+                                        corner_radius=8, justify="center",
+                                        placeholder_text="0")
+        self.chunk_entry.pack(side="left", padx=(0, 8))
+
         self.export_btn = ctk.CTkButton(self.actions_frame, text="Сохранить", command=self.export_results, width=110, height=32, corner_radius=8, fg_color=ACCENT_SUCCESS, hover_color=ACCENT_SUCCESS_HOVER, text_color=TEXT_ON_ACCENT)
         self.export_btn.pack(side="left")
 
@@ -837,7 +867,7 @@ class ValidatorApp(ctk.CTk):
         self.table_frame.grid_columnconfigure(0, weight=1)
 
         columns = ("email", "status", "score", "provider", "domain_type", "reason", "mx",
-                   "name", "gender", "country", "validated")
+                   "name", "gender", "country", "birth_year", "source", "validated")
         self.tree = ttk.Treeview(self.table_frame, columns=columns, show="headings")
         self.tree.heading("email", text="Email", anchor="w")
         self.tree.heading("status", text="Status", anchor="center")
@@ -849,6 +879,10 @@ class ValidatorApp(ctk.CTk):
         self.tree.heading("name", text="Name", anchor="w")
         self.tree.heading("gender", text="Gender", anchor="w")
         self.tree.heading("country", text="Country", anchor="w")
+        self.tree.heading("birth_year", text="Год рожд.", anchor="center")
+        # Откуда взяты имя, пол и страна: «файл» — из исходника, всё остальное
+        # предсказано. Раньше догадка ML показывалась как факт.
+        self.tree.heading("source", text="Источник", anchor="w")
         self.tree.heading("validated", text="Проверено", anchor="w")
         
         self.tree.column("email", width=210, minwidth=150, stretch=True, anchor="w")
@@ -861,6 +895,8 @@ class ValidatorApp(ctk.CTk):
         self.tree.column("name", width=110, minwidth=80, stretch=True, anchor="w")
         self.tree.column("gender", width=70, minwidth=55, stretch=False, anchor="w")
         self.tree.column("country", width=85, minwidth=55, stretch=False, anchor="w")
+        self.tree.column("birth_year", width=70, minwidth=55, stretch=False, anchor="center")
+        self.tree.column("source", width=130, minwidth=90, stretch=False, anchor="w")
         self.tree.column("validated", width=110, minwidth=90, stretch=False, anchor="w")
         self.tree.grid(row=0, column=0, sticky="nsew")
 
@@ -1230,15 +1266,16 @@ class ValidatorApp(ctk.CTk):
         self.terminal_box.configure(state="disabled")
         self.safe_log("[INFO] Инициализация конвейера валидации...", "info")
 
-        actual_proxies = []
-        for p in StreamLoader(self.proxy_sources).stream_lines():
-            p_lower = p.lower()
-            if not (p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://")):
-                actual_proxies.append(p)
-        actual_proxies = list(set(actual_proxies))
+        # Берём прокси ЛЮБОГО поддерживаемого протокола. Раньше здесь
+        # отсеивалось всё, кроме socks5 и голого host:port, хотя и чекер, и
+        # соединение давно умеют socks4 и HTTP CONNECT — часть купленного
+        # пула просто не доходила до валидатора.
+        from core.network import dedupe_proxies
+        actual_proxies = dedupe_proxies(
+            list(StreamLoader(self.proxy_sources).stream_lines()))
         
         if not actual_proxies:
-            self.safe_log("[DEAD] Ошибка: Загруженные источники не содержат валидных SOCKS5 прокси!", "dead")
+            self.safe_log("[DEAD] Ошибка: в загруженных источниках нет ни одного прокси!", "dead")
             self._set_playback_state("stopped")
             self._set_sidebar_state("normal")
             return
@@ -1443,6 +1480,8 @@ class ValidatorApp(ctk.CTk):
                 data.get("name", ""),
                 data.get("gender", ""),
                 data.get("country", ""),
+                data.get("birth_year", ""),
+                _format_sources(data),
                 data.get("validated_at", ""),
             ), tags=(tag,))
 
@@ -1706,43 +1745,111 @@ class ValidatorApp(ctk.CTk):
             messagebox.showwarning("Пусто", "По выбранным критериям не найдено ни одного адреса.")
             return
             
+        # Вычитаем список отписок ДО записи: письмо тому, кто уже отписался,
+        # стоит жалобы на спам, а сравнивать надо по каноническому виду —
+        # John.Doe@Gmail.com и johndoe@gmail.com это один ящик.
+        suppressed = 0
+        if self.suppress_path:
+            try:
+                from core import baseops
+                removals = baseops.read_emails(self.suppress_path)
+                keep = {e.lower() for e in
+                        baseops.subtract([r["email"] for r in export_data], removals)}
+                before = len(export_data)
+                export_data = [r for r in export_data if r["email"].lower() in keep]
+                suppressed = before - len(export_data)
+            except Exception as e:
+                messagebox.showwarning("Отписки", f"Список отписок не применён:\n{e}")
+
+        if not export_data:
+            messagebox.showwarning("Пусто", "После вычитания отписок не осталось ни одного адреса.")
+            return
+
+        try:
+            chunk_size = int(self.chunk_entry.get().strip() or 0)
+        except ValueError:
+            chunk_size = 0
+
         file_types = [("Text File (Только Email)", "*.txt"), ("CSV File (Email+Причина+MX)", "*.csv")]
         default_name = "results_filtered"
         filepath = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=file_types, initialfile=default_name)
-        
+
         if filepath:
             try:
-                if filepath.endswith(".csv"):
+                from core import baseops
+
+                def write_csv(f, rows):
                     import csv
                     # csv.writer обязателен: reason содержит запятые (напр. "[DNS: SPF=..., DMARC=...]"),
                     # из-за чего ручная склейка через "," разъезжала колонки в Excel.
-                    with open(filepath, "w", newline="", encoding="utf-8") as f:
-                        writer = csv.writer(f)
-                        writer.writerow(["Email", "Status", "Reason", "MX-Record", "Name", "Gender", "Country",
-                                         "Score", "Grade", "Provider", "DomainType", "ValidatedAt"])
-                        for r in export_data:
-                            data = r.get("data", {})
-                            writer.writerow([
-                                r["email"], r["status"], r["reason"], r["mx"],
-                                data.get("name", ""), data.get("gender", ""), data.get("country", ""),
-                                data.get("engagement_score", ""), data.get("engagement_grade", ""),
-                                data.get("provider_name", ""), data.get("domain_type", ""),
-                                data.get("validated_at", ""),
-                            ])
+                    writer = csv.writer(f)
+                    writer.writerow(["Email", "Status", "Reason", "MX-Record", "Name", "Gender", "Country",
+                                     "BirthYear", "Score", "Grade", "Provider", "DomainType",
+                                     "NameSource", "GenderSource", "CountrySource",
+                                     "SocialAccounts", "ValidatedAt"])
+                    for r in rows:
+                        data = r.get("data", {})
+                        writer.writerow([
+                            r["email"], r["status"], r["reason"], r["mx"],
+                            data.get("name", ""), data.get("gender", ""), data.get("country", ""),
+                            data.get("birth_year", ""),
+                            data.get("engagement_score", ""), data.get("engagement_grade", ""),
+                            data.get("provider_name", ""), data.get("domain_type", ""),
+                            data.get("name_source", ""), data.get("gender_source", ""),
+                            data.get("country_source", ""), data.get("social_accounts", ""),
+                            data.get("validated_at", ""),
+                        ])
+
+                def write_txt(f, rows):
+                    for r in rows:
+                        data = r.get("data", {})
+                        name = data.get("name", "")
+                        gender = data.get("gender", "")
+                        country = data.get("country", "")
+                        if name or gender or country:
+                            f.write(f"{r['email']}:{name}:{gender}:{country}\n")
+                        else:
+                            f.write(f"{r['email']}\n")
+
+                writer_fn = write_csv if filepath.endswith(".csv") else write_txt
+                written = baseops.write_chunks(export_data, filepath, chunk_size, writer_fn)
+
+                note = f"Сохранено {len(export_data)} строк."
+                if suppressed:
+                    note += f"\nВычтено по списку отписок: {suppressed}."
+                if len(written) > 1:
+                    note += f"\nРазбито на файлов: {len(written)} (по {chunk_size})."
                 else:
-                    with open(filepath, "w", encoding="utf-8") as f:
-                        for r in export_data:
-                            data = r.get("data", {})
-                            name = data.get("name", "")
-                            gender = data.get("gender", "")
-                            country = data.get("country", "")
-                            if name or gender or country:
-                                f.write(f"{r['email']}:{name}:{gender}:{country}\n")
-                            else:
-                                f.write(f"{r['email']}\n")
-                messagebox.showinfo("Успех", f"Успешно сохранено {len(export_data)} строк!\nФайл: {os.path.basename(filepath)}")
+                    note += f"\nФайл: {os.path.basename(written[0] if written else filepath)}"
+                messagebox.showinfo("Успех", note)
             except Exception as e:
                 messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
+
+    def choose_suppression(self):
+        """Выбирает файл отписок. Повторное нажатие сбрасывает выбор."""
+        if self.suppress_path:
+            self.suppress_path = None
+            self.suppress_btn.configure(text="Отписки", border_color=BORDER_STRONG)
+            self.safe_log("[INFO] Список отписок отключён.", "info")
+            return
+
+        path = filedialog.askopenfilename(
+            title="Файл с адресами отписавшихся",
+            filetypes=[("Text/CSV", "*.txt *.csv"), ("Все файлы", "*.*")])
+        if not path:
+            return
+        try:
+            from core import baseops
+            count = len(baseops.read_emails(path))
+        except Exception:
+            count = 0
+        if not count:
+            messagebox.showwarning("Отписки", "В файле не нашлось ни одного адреса.")
+            return
+        self.suppress_path = path
+        self.suppress_btn.configure(text=f"Отписки: {count}", border_color=ACCENT_SUCCESS)
+        self.safe_log(f"[INFO] Список отписок загружен: {count} адресов. "
+                      "Они будут вычтены при сохранении.", "info")
 
     def copy_results(self):
         if not hasattr(self, 'results_data') or not self.results_data:

@@ -254,21 +254,6 @@ def _parse_proxy(proxy):
         return None
 
 
-def check_single_proxy(proxy, timeout):
-    try:
-        parsed = _parse_proxy(proxy)
-        if not parsed:
-            return None
-        ip, port, user, password = parsed
-        server = SocksSMTP(ip, port, proxy_user=user, proxy_pass=password, timeout=timeout,
-                           proxy_type=_PROXY_TYPES.get(_proxy_scheme(proxy), socks.SOCKS5))
-        server.connect("gmail-smtp-in.l.google.com", 25)
-        server.quit()
-        return proxy
-    except Exception:
-        return None
-
-
 # Gmail в ответе на EHLO сообщает IP, с которого мы к нему пришли:
 #   "mx.google.com at your service, [203.0.113.3]"
 # Это ТОТ САМЫЙ выходной IP, который видит любой почтовый сервер, — а значит
@@ -288,10 +273,122 @@ PROXY_PROBE_TARGETS = [
 ]
 
 # Имена в PTR, за которые почтовики штрафуют: сервер видит, что письмо идёт
-# через прокси/VPN/Tor, и относится к нему хуже даже при валидном FCrDNS.
-DIRTY_RDNS_KEYWORDS = ("proxy", "vpn", "tor-", "torexit", "exit", "relay",
-                       "anon", "scan", "bot", "spam", "abuse", "hosting",
-                       "dynamic", "dhcp", "pool", "dial")
+# через прокси/VPN/Tor или с домашнего динамического адреса.
+#
+# Совпадение ищется ПО ГРАНИЦАМ ярлыка, а не подстрокой. Раньше стояло простое
+# `"exit" in hostname`, и под него попадали безобидные имена вроде exitcom.net,
+# а слово "hosting" отбраковывало ровно те датацентровые прокси, которые для
+# валидации и нужны. "relay" убрано отдельно: mail-relay — нормальное имя
+# почтового сервера, а не признак прокси.
+DIRTY_RDNS_KEYWORDS = ("proxy", "vpn", "tor", "torexit", "exit", "anon",
+                       "spam", "abuse", "dynamic", "dyn", "dhcp", "pool",
+                       "dial", "dialup", "pppoe", "cable", "dsl")
+
+_DIRTY_RDNS_RE = re.compile(
+    r'(?:^|[.\-])(' + "|".join(DIRTY_RDNS_KEYWORDS) + r')(?:[.\-0-9]|$)')
+
+# Почтовые шлюзы безопасности. Стоят ПЕРЕД корпоративным доменом и принимают
+# любой RCPT, фильтруя письмо позже, — то есть домен за таким шлюзом является
+# catch-all по конструкции. Проверено на практике: тройная проба выясняет это
+# верно, но тратит три подключения и не объясняет причину.
+SECURITY_GATEWAY_MX = {
+    "pphosted.com": "Proofpoint",
+    "ppe-hosted.com": "Proofpoint",
+    "pphosted.net": "Proofpoint",
+    "mimecast.com": "Mimecast",
+    "mimecast.co.za": "Mimecast",
+    "mimecast-offshore.com": "Mimecast",
+    "iphmx.com": "Cisco IronPort",
+    "barracudanetworks.com": "Barracuda",
+    "barracuda.com": "Barracuda",
+    "messagelabs.com": "Symantec",
+    "sophos.com": "Sophos",
+    "fortimail.com": "Fortinet",
+    "hornetsecurity.com": "Hornetsecurity",
+    "antispamcloud.com": "SpamExperts",
+    "spamexperts.com": "SpamExperts",
+    "mailcontrol.com": "Forcepoint",
+    "securence.com": "Securence",
+    "spamtitan.com": "SpamTitan",
+    "mailanyone.net": "FuseMail",
+    "emailfiltering.com": "Email Filtering",
+    "mailprotector.com": "Mailprotector",
+    "mailguard.com.au": "MailGuard",
+    "libraesva.com": "Libraesva",
+    "vadesecure.com": "Vade",
+    "abusix.com": "Abusix",
+}
+
+
+# Формулировки, по которым видно: отказали не ящику, а нашему исходящему IP.
+_IP_REPUTATION_MARKERS = (
+    "our ip blocked", "our ip blacklisted", "client host", "reputation",
+    "spamhaus", "barracuda", "blacklist", "rbl", "dnsbl", "listed in",
+    "service unavailable", "5.7.1", "5.7.606", "poor reputation",
+)
+
+
+def _looks_like_ip_reputation(reason):
+    """True, если причина отказа — репутация исходящего IP, а не ящик."""
+    if not isinstance(reason, str) or not reason:
+        return False
+    low = reason.lower()
+    return any(marker in low for marker in _IP_REPUTATION_MARKERS)
+
+
+def security_gateway(mx_records):
+    """Имя шлюза безопасности, если почта домена идёт через него, иначе None."""
+    if not mx_records:
+        return None
+    if isinstance(mx_records, str):
+        records = [mx_records]
+    elif hasattr(mx_records, "__iter__") and not isinstance(mx_records, (bytes, dict)):
+        records = list(mx_records)
+    else:
+        return None
+    for record in records:
+        if not isinstance(record, str):
+            continue
+        low = record.lower().rstrip(".")
+        for host, vendor in SECURITY_GATEWAY_MX.items():
+            if low == host or low.endswith("." + host):
+                return vendor
+    return None
+
+
+# DKIM-селекторы. Универсального способа их узнать нет — имя выбирает владелец
+# домена. Но если известно, на чьей инфраструктуре сидит домен, перебирать все
+# два с лишним десятка незачем: у Google селектор гугловский.
+_DKIM_BY_MX = (
+    (("google", "googlemail"), ['google', '20230601', '20221208', '20210112', '20161025']),
+    (("outlook", "microsoft", "protection.outlook"), ['selector1', 'selector2']),
+    (("yandex",), ['mx', 'yandex']),
+    (("mail.ru",), ['mailru', 'mail']),
+    (("protonmail", "proton.me"), ['protonmail', 'protonmail2', 'protonmail3']),
+    (("zoho",), ['zoho', 'zmail']),
+    (("yahoodns",), ['s2048', 's1024']),
+    (("messagingengine", "fastmail"), ['fm1', 'fm2', 'fm3', 'mesmtp']),
+    (("amazonaws", "amazonses"), ['amazonses']),
+    (("sendgrid",), ['s1', 's2']),
+    (("mailgun",), ['mailo', 'smtp', 'k1']),
+)
+
+_DKIM_FALLBACK = [
+    'google', '20230601', 'selector1', 'selector2', 'mailru', 'mail', 'dkim',
+    'default', 'mx', 'yandex', 'protonmail', 'zoho', 'k1', 'k2', 's1', 's2',
+    'sig1', 'smtp', 'key1', 'dkim1', '20221208', '20210112', 'zmail',
+]
+
+
+def _dkim_selectors_for(mx_record):
+    """Список селекторов под конкретный MX. Без MX — общий перебор."""
+    if isinstance(mx_record, str) and mx_record and mx_record != "N/A":
+        low = mx_record.lower()
+        for hints, selectors in _DKIM_BY_MX:
+            if any(hint in low for hint in hints):
+                # Плюс два самых частых общих — на случай своей подписи домена
+                return selectors + ['default', 'dkim']
+    return _DKIM_FALLBACK
 
 
 def probe_proxy_target(proxy, host, timeout=10, want_exit_ip=False):
@@ -380,11 +477,14 @@ def is_dirty_rdns(hostname):
 
     Почтовики штрафуют такие имена даже при валидном FCrDNS: по хосту видно,
     что письмо идёт не с нормального почтового сервера.
+
+    Совпадение по границам ярлыка: pool-71-105.fios.verizon.net — динамика,
+    а exitcom.net и hosting-provider.net — обычные хосты, и метить их грязными
+    значит выбрасывать годные датацентровые прокси.
     """
     if not isinstance(hostname, str) or not hostname:
         return False
-    low = hostname.lower()
-    return any(kw in low for kw in DIRTY_RDNS_KEYWORDS)
+    return bool(_DIRTY_RDNS_RE.search(hostname.lower()))
 
 
 def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None,
@@ -739,7 +839,13 @@ class NetworkValidator:
         # Прокси, севший MAX_CONSECUTIVE_FAILS раз ПОДРЯД, выбывает из ротации навсегда.
         # Иначе мёртвый прокси бесконечно тормозит прогон (10 повторов × таймаут на адрес).
         self._proxy_consecutive_fails = {}
+        # На каких MX пришлись сбои текущей серии: три неудачи на одном сервере
+        # означают мёртвый сервер, а не мёртвый прокси
+        self._proxy_fail_hosts = {}
         self._proxy_banned = set()
+        # Полный профиль прокси: нужен, чтобы при переснятии не потерять
+        # то, что заново не измеряли (например реакцию Microsoft)
+        self._proxy_profiles = {}
         # Прокси с обратным DNS — единственные, через кого проверяется Yahoo/AOL
         self._ptr_proxies = set()
         # PTR проверить не удалось — не путать с "PTR точно нет"
@@ -803,6 +909,7 @@ class NetworkValidator:
         результатов, а попытка стоит одного пинга.
         """
         profiles = profiles if isinstance(profiles, dict) else {}
+        self._proxy_profiles = dict(profiles)
         with self._proxy_score_lock:
             # Факт профилирования храним отдельно от его результатов: если у ВСЕХ
             # прокси PTR точно отсутствует, все три множества окажутся пустыми,
@@ -829,6 +936,48 @@ class NetworkValidator:
                 or v.get("outlook_ok") is False      # Microsoft отверг напрямую
                 or v.get("rdns_dirty")               # имя в PTR выдаёт прокси/VPN
             }
+
+    def refresh_proxy_profiles(self, timeout=10, workers=30):
+        """Переснимает профиль живых прокси и возвращает, что изменилось.
+
+        Зачем: у ротирующегося прокси выходной IP меняется по ходу прогона, а
+        профиль снимается один раз на старте. Маршрутизация продолжает считать,
+        что у прокси есть PTR, когда его уже нет, и Yahoo уходит в пустоту.
+
+        Тяжёлую пробу Microsoft не повторяем — репутация IP меняется медленно,
+        а вот сам IP и его обратный DNS проверить надо. Прежние значения
+        outlook_ok переносим из старого профиля.
+        """
+        with self._proxy_score_lock:
+            alive = [p for p in self.proxies if p not in self._proxy_banned]
+        if not alive:
+            return {"checked": 0, "ip_changed": 0, "ptr_lost": 0, "ptr_gained": 0}
+
+        previous = dict(self._proxy_profiles)
+        fresh = profile_proxies(alive, timeout=timeout, workers=workers,
+                                probe_outlook=False)
+        if not fresh:
+            return {"checked": 0, "ip_changed": 0, "ptr_lost": 0, "ptr_gained": 0}
+
+        ip_changed = ptr_lost = ptr_gained = 0
+        merged = dict(previous)
+        for proxy, info in fresh.items():
+            old = previous.get(proxy, {})
+            if old.get("exit_ip") and info.get("exit_ip") and old["exit_ip"] != info["exit_ip"]:
+                ip_changed += 1
+            if old.get("has_ptr") is True and info.get("has_ptr") is False:
+                ptr_lost += 1
+            if old.get("has_ptr") is not True and info.get("has_ptr") is True:
+                ptr_gained += 1
+            # Репутацию у Microsoft заново не спрашивали — берём прежнюю
+            if info.get("outlook_ok") is None and old.get("outlook_ok") is not None:
+                info["outlook_ok"] = old["outlook_ok"]
+                info["outlook_reason"] = old.get("outlook_reason")
+            merged[proxy] = info
+
+        self.set_proxy_profiles(merged)
+        return {"checked": len(fresh), "ip_changed": ip_changed,
+                "ptr_lost": ptr_lost, "ptr_gained": ptr_gained}
 
     def has_ptr_proxies(self):
         """True, если есть чем проверять Yahoo/AOL: подтверждённый PTR либо непроверенный."""
@@ -927,8 +1076,32 @@ class NetworkValidator:
     def all_proxies_dead(self):
         return bool(self.proxies) and self.get_live_proxy_count() == 0
 
-    def _update_proxy_score(self, proxy, success: bool):
-        """Обновляет health score прокси и банит его после N сбоев подряд (п.8)."""
+    def _mx_delay(self, mx_host):
+        """Пауза перед запросом к MX. Растёт с числом полученных от него 421.
+
+        Раньше пауза была фиксированной (0.1–0.4 с), и весь «back-off» сводился
+        к разовому понижению параллельности 5 → 2 → 1. Но сервер, ответивший
+        421, просит именно ПОДОЖДАТЬ. Теперь мы отступаем и по времени:
+        экспоненциально, с потолком в 8 секунд, чтобы не подвесить прогон.
+        """
+        base = random.uniform(0.1, 0.4)
+        if not isinstance(mx_host, str) or not mx_host:
+            return base
+        with self._mx_error_lock:
+            errors = self._mx_error_counts.get(mx_host.lower(), 0)
+        if not errors:
+            return base
+        return min(base * (2 ** min(errors, 5)), 8.0)
+
+    def _update_proxy_score(self, proxy, success: bool, mx_record=None):
+        """Обновляет health score прокси и банит его после N сбоев подряд (п.8).
+
+        ВАЖНО про бан. Считать сбои только по прокси нельзя: наблюдалось, как
+        рабочий прокси получил три таймаута подряд на ОДНОМ тугом MX и вылетел
+        из ротации навсегда — а с ним встала и проверка DNS, которая тоже идёт
+        через прокси. Три сбоя на одном сервере означают, что мёртв сервер;
+        мёртвым прокси считается тот, кто сыпется на РАЗНЫХ серверах.
+        """
         if not proxy:
             return
         with self._proxy_score_lock:
@@ -938,11 +1111,23 @@ class NetworkValidator:
             if success:
                 self._proxy_scores[proxy] += 1
                 self._proxy_consecutive_fails[proxy] = 0  # Ожил — счётчик подряд сбрасываем
-            else:
-                self._proxy_scores[proxy] -= 3  # Штраф за неудачу в 3 раза больше
-                self._proxy_consecutive_fails[proxy] = self._proxy_consecutive_fails.get(proxy, 0) + 1
-                if self._proxy_consecutive_fails[proxy] >= PROXY_MAX_CONSECUTIVE_FAILS:
-                    self._proxy_banned.add(proxy)
+                self._proxy_fail_hosts.pop(proxy, None)
+                return
+
+            self._proxy_scores[proxy] -= 3  # Штраф за неудачу в 3 раза больше
+            self._proxy_consecutive_fails[proxy] = self._proxy_consecutive_fails.get(proxy, 0) + 1
+
+            hosts = self._proxy_fail_hosts.setdefault(proxy, set())
+            if isinstance(mx_record, str) and mx_record:
+                hosts.add(mx_record.lower())
+
+            if self._proxy_consecutive_fails[proxy] < PROXY_MAX_CONSECUTIVE_FAILS:
+                return
+
+            # Сбои неизвестно на чём (сам прокси не поднялся) — банить можно.
+            # Сбои, все до одного пришедшиеся на один сервер, — вина сервера.
+            if not hosts or len(hosts) >= 2:
+                self._proxy_banned.add(proxy)
 
     def check_dnsbl_ip(self, ip):
         """Проверяет ГОТОВЫЙ IP по чёрным спискам (без резолва имени).
@@ -1195,11 +1380,15 @@ class NetworkValidator:
             self.mx_cache[domain] = []
         return []
 
-    def check_dns_health(self, domain: str) -> dict:
+    def check_dns_health(self, domain: str, mx_record: str = "") -> dict:
         """
         Проверяет DNS-здоровье домена: наличие SPF, DMARC и DKIM записей (п.2.2+).
         Возвращает {'has_spf': bool, 'has_dmarc': bool, 'has_dkim': bool, 'score': int}
         score: 0 = ничего, 1 = один из трёх, 2 = два из трёх, 3 = все три
+
+        mx_record сужает перебор DKIM-селекторов: если домен сидит на Google,
+        селектор точно гугловский, и остальные два десятка спрашивать незачем.
+        Через прокси каждый лишний DNS-запрос стоит заметно дороже.
         """
         with self._dns_health_lock:
             if domain in self._dns_health_cache:
@@ -1242,15 +1431,7 @@ class NetworkValidator:
         # и крупнейшие провайдеры давали ложное "DKIM нет": у Gmail селектор
         # 20230601, у Mail.ru — mailru, ни того ни другого в списке не было,
         # поэтому Gmail и Mail.ru никогда не получали +10 за полный DNS.
-        dkim_selectors = [
-            'google', '20230601', '20221208', '20210112', '20161025',   # Gmail
-            'mailru', 'mail', 'dkim', 'default',                        # Mail.ru и общие
-            'selector1', 'selector2',                                   # Microsoft 365
-            'mx', 'yandex',                                             # Yandex
-            'protonmail', 'protonmail2', 'protonmail3',                 # Proton
-            'zoho', 'zmail',                                            # Zoho
-            'k1', 'k2', 's1', 's2', 'sig1', 'smtp', 'key1', 'dkim1',    # прочие частые
-        ]
+        dkim_selectors = _dkim_selectors_for(mx_record)
         for selector in dkim_selectors:
             try:
                 dkim_answers = self.resolver.resolve(f'{selector}._domainkey.{domain}', 'TXT')
@@ -1482,8 +1663,8 @@ class NetworkValidator:
         sem.acquire()
 
         try:
-            # Небольшая задержка между запросами к одному серверу
-            time.sleep(random.uniform(0.1, 0.4))
+            # Пауза перед запросом. Растёт, если этот сервер уже отвечал 421.
+            time.sleep(self._mx_delay(mx_record))
 
             server = self._make_smtp_connection(proxy)
             banner_code, banner_msg = server.connect(mx_record, 25)
@@ -1526,7 +1707,7 @@ class NetworkValidator:
                               "Yahoo/AOL не пускают. Нужен прокси с PTR-записью.")
                 else:
                     reason = f"{mail_code} MAIL FROM Rejected (Email May Exist): {mail_text[:40]}"
-                    self._update_proxy_score(proxy, False)  # Похоже на проблему прокси/IP
+                    self._update_proxy_score(proxy, False, mx_record=mx_record)  # Похоже на проблему прокси/IP
 
                 return {
                     "status": "unknown",
@@ -1553,22 +1734,22 @@ class NetworkValidator:
             return result
 
         except smtplib.SMTPServerDisconnected:
-            self._update_proxy_score(proxy, False)
+            self._update_proxy_score(proxy, False, mx_record=mx_record)
             return {"status": "unknown", "reason": "Server Disconnected"}
         except socket.timeout:
-            self._update_proxy_score(proxy, False)
+            self._update_proxy_score(proxy, False, mx_record=mx_record)
             return {"status": "unknown", "reason": "Timeout"}
         except socks.ProxyConnectionError:
-            self._update_proxy_score(proxy, False)
+            self._update_proxy_score(proxy, False, mx_record=mx_record)
             return {"status": "unknown", "reason": "Proxy Dead"}
         except smtplib.SMTPConnectError:
-            self._update_proxy_score(proxy, False)
+            self._update_proxy_score(proxy, False, mx_record=mx_record)
             return {"status": "unknown", "reason": "SMTP Connect Error"}
         except smtplib.SMTPException as e:
-            self._update_proxy_score(proxy, False)
+            self._update_proxy_score(proxy, False, mx_record=mx_record)
             return {"status": "unknown", "reason": f"SMTP Error: {str(e)[:50]}"}
         except Exception as e:
-            self._update_proxy_score(proxy, False)
+            self._update_proxy_score(proxy, False, mx_record=mx_record)
             return {"status": "unknown", "reason": f"Error: {str(e)[:50]}"}
         finally:
             sem.release()  # Освобождаем слот для следующего потока
@@ -1578,57 +1759,100 @@ class NetworkValidator:
                 except Exception:
                     pass
 
+    def _probe_recipients(self, addresses, mx_record, proxy=None, from_email=None):
+        """Проверяет НЕСКОЛЬКО адресов в ОДНОЙ SMTP-сессии.
+
+        Раньше тройная проба catch-all делала три отдельных подключения
+        (connect + quit на каждое). На новом домене три коннекта подряд —
+        быстрый путь к ограничению со стороны сервера. Здесь мы соединяемся
+        один раз и шлём три RCPT TO, что и дешевле, и незаметнее.
+
+        Возвращает список результатов той же формы, что и _do_single_ping.
+        Досрочно прекращает перебор, если сервер отвалился.
+        """
+        if proxy is None and self.has_proxies_configured():
+            fail = {"status": "unknown", "reason": "All Proxies Dead (прямое соединение запрещено)"}
+            return [dict(fail) for _ in addresses]
+
+        from_addr = from_email or random.choice(MAIL_FROM_POOL)
+        domain = addresses[0].split("@")[1].lower() if addresses and "@" in addresses[0] else ""
+        results = []
+        server = None
+
+        sem = self._get_mx_semaphore(mx_record)
+        sem.acquire()
+        try:
+            time.sleep(self._mx_delay(mx_record))
+            server = self._make_smtp_connection(proxy)
+            server.connect(mx_record, 25)
+            try:
+                ehlo_code, _ = server.ehlo(self.helo_name)
+                if ehlo_code >= 500:
+                    server.helo(self.helo_name)
+            except Exception:
+                server.helo(self.helo_name)
+
+            mail_code, mail_msg = server.mail(from_addr)
+            if mail_code >= 400:
+                text = mail_msg.decode('utf-8', 'ignore') if isinstance(mail_msg, bytes) else str(mail_msg)
+                self._update_proxy_score(proxy, False, mx_record=mx_record)
+                fail = {"status": "unknown",
+                        "reason": f"{mail_code} MAIL FROM Rejected: {text[:40]}"}
+                return [dict(fail) for _ in addresses]
+
+            for address in addresses:
+                code, message = server.rcpt(address)
+                results.append(self._parse_smtp_response(code, message, address, domain))
+                if code == 421:
+                    self._record_mx_error(mx_record)
+                    break
+            self._update_proxy_score(proxy, True)
+        except Exception as e:
+            self._update_proxy_score(proxy, False, mx_record=mx_record)
+            results.append({"status": "unknown", "reason": f"Error: {type(e).__name__}"})
+        finally:
+            sem.release()
+            if server:
+                try:
+                    server.quit()
+                except Exception:
+                    pass
+
+        while len(results) < len(addresses):
+            results.append({"status": "unknown", "reason": "Сессия оборвалась"})
+        return results
+
     def is_catch_all_domain(self, domain, mx_record) -> bool:
         """
         Проверяет, является ли домен Catch-All (принимает любой адрес).
-        Тройная проверка (п.4): 3 разных паттерна — short, short, UUID-style.
+        Три разных паттерна — два коротких и UUID-подобный — в ОДНОЙ сессии.
         Результат кэшируется.
         """
         with self.catchall_lock:
             if domain in self.catchall_cache:
                 return self.catchall_cache[domain]
 
-        # Первый случайный несуществующий адрес (короткий)
-        fake_email_1 = f"{_generate_random_local('short')}@{domain}"
-        result_1 = self._do_single_ping(fake_email_1, mx_record, proxy=self._pick_best_proxy())
+        fakes = [
+            f"{_generate_random_local('short')}@{domain}",
+            f"{_generate_random_local('short')}@{domain}",
+            f"{_generate_random_local('uuid')}@{domain}",
+        ]
+        results = self._probe_recipients(fakes, mx_record, proxy=self._pick_best_proxy())
 
-        # Проба не удалась (мёртвый прокси, таймаут) — вывода сделать нельзя.
-        # НЕ кэшируем: иначе catch-all домен потом молча выдаст "Valid" на любой адрес.
-        if result_1["status"] == "unknown":
-            return False
-
-        # Если первый НЕ принят — однозначно не Catch-All
-        if result_1["status"] != "valid":
-            with self.catchall_lock:
-                self.catchall_cache[domain] = False
-            return False
-
-        # Первый принят — проверяем вторым (другим случайным адресом)
-        fake_email_2 = f"{_generate_random_local('short')}@{domain}"
-        result_2 = self._do_single_ping(fake_email_2, mx_record, proxy=self._pick_best_proxy())
-
-        if result_2["status"] == "unknown":
-            return False  # Проба сорвалась — не кэшируем вывод
-
-        if result_2["status"] != "valid":
-            with self.catchall_lock:
-                self.catchall_cache[domain] = False
-            return False
-
-        # Оба приняты — третья проверка с UUID-подобным адресом (совершенно другой паттерн)
-        fake_email_3 = f"{_generate_random_local('uuid')}@{domain}"
-        result_3 = self._do_single_ping(fake_email_3, mx_record, proxy=self._pick_best_proxy())
-
-        if result_3["status"] == "unknown":
-            return False  # Проба сорвалась — не кэшируем вывод
-
-        # Все 3 приняты — точно Catch-All
-        is_catchall = result_3["status"] == "valid"
+        for result in results:
+            # Проба сорвалась (мёртвый прокси, таймаут) — вывода сделать нельзя.
+            # НЕ кэшируем: иначе catch-all домен потом молча выдаст Valid на всё.
+            if result["status"] == "unknown":
+                return False
+            # Хоть один выдуманный адрес отвергнут — домен точно не catch-all
+            if result["status"] != "valid":
+                with self.catchall_lock:
+                    self.catchall_cache[domain] = False
+                return False
 
         with self.catchall_lock:
-            self.catchall_cache[domain] = is_catchall
-
-        return is_catchall
+            self.catchall_cache[domain] = True
+        return True
 
     def stealth_smtp_ping(self, email: str, mx_records: list) -> dict:
         """
@@ -1687,6 +1911,12 @@ class NetworkValidator:
                 # Если получили однозначный ответ — возвращаем сразу
                 if result["status"] in ("valid", "invalid"):
                     return result
+
+                # Отказ пришёл по репутации нашего IP — значит повторять
+                # «следующим по списку» бессмысленно, нужен заведомо чистый.
+                # Причина известна точно, глупо ею не воспользоваться.
+                if _looks_like_ip_reputation(result.get("reason", "")):
+                    needs_clean = True
 
                 # Если greylisted — запоминаем и пробуем ещё
                 if result["status"] == "greylisted":
@@ -1748,6 +1978,22 @@ class NetworkValidator:
 
         primary_mx = mx_records[0]
 
+        # Шаг 2.5: Почтовый шлюз безопасности перед доменом.
+        # Proofpoint, Mimecast, IronPort и прочие принимают ЛЮБОЙ адрес и
+        # фильтруют письмо позже — домен за таким шлюзом catch-all по
+        # конструкции. Тройная проба выяснит то же самое, но потратит три
+        # подключения и не объяснит причину.
+        gateway = security_gateway(mx_records)
+        if gateway:
+            result = self.stealth_smtp_ping(probe_email, mx_records)
+            if result["status"] == "valid":
+                result["status"] = "catchall"
+                result["reason"] = (f"Catch-All: почтовый шлюз {gateway} "
+                                    "принимает любой адрес")
+            result["mx_record"] = primary_mx
+            result["mx_records"] = mx_records
+            return result
+
         # Шаг 3: Catch-All проверка (не для гигантов — они точно не Catch-All)
         skip_catchall = (
             domain in YAHOO_DOMAINS or
@@ -1770,6 +2016,7 @@ class NetworkValidator:
                     result["status"] = "catchall"
                     result["reason"] = "Catch-All Domain (Unverifiable)"
                 result["mx_record"] = primary_mx
+                result["mx_records"] = mx_records
                 return result
 
         # Шаг 4: Обычный Stealth SMTP Ping (с мульти-MX — п.3.1)
@@ -1794,4 +2041,5 @@ class NetworkValidator:
             pass  # НЕ меняем на risky — pipeline сам перепроверит
 
         result["mx_record"] = primary_mx
+        result["mx_records"] = mx_records
         return result

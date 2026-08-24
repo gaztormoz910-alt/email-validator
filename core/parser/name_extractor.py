@@ -3,6 +3,8 @@ import os
 import wordsegment
 import threading
 from .osint import OSINTOperator
+from .names_index import is_known_name
+from .translit import variants as translit_variants
 
 _nd = None
 _nd_lock = threading.Lock()
@@ -20,11 +22,16 @@ def get_name_dataset():
     return _nd
 
 class NameExtractor:
-    def __init__(self, enable_osint=False):
+    def __init__(self, enable_osint=False, proxy_provider=None):
         # Load wordsegment corpus into memory (only happens once per process)
         wordsegment.load()
         self.enable_osint = enable_osint
-        self.osint_operator = OSINTOperator() if enable_osint else None
+        # proxy_provider обязателен, если заданы прокси: без него OSINT-запрос
+        # к Gravatar уходил с реального IP пользователя на каждом адресе,
+        # у которого не удалось разобрать имя.
+        self.osint_operator = OSINTOperator(proxy_provider=proxy_provider) if enable_osint else None
+        # Профиль последнего OSINT-запроса — по одному на поток
+        self._osint_local = threading.local()
         
         # Load the 138 million names dataset
         self.nd = get_name_dataset()
@@ -106,22 +113,102 @@ class NameExtractor:
                 return True
         return False
 
-    def _is_valid_name(self, word):
-        """Checks if a word is a legitimate human name using the 138M dataset."""
-        if not self.nd or not word:
+    def _is_valid_name(self, word, role="any"):
+        """Есть ли слово в базе имён (138M записей).
+
+        role='first' — только как ИМЯ, role='last' — только как ФАМИЛИЯ,
+        'any' — как что угодно.
+
+        Роли важны. Проверка «встречается хоть кем-то где-то в мире» слишком
+        широкая: под неё попадает даже 'aaa'. А ещё она мешает поймать
+        оверсегментацию, когда фамилия разваливается на куски, каждый из
+        которых где-то является именем.
+
+        Транслит перебирается: dmitriy / dmitry / dmitri — одно имя, но база
+        знает эти написания по-разному.
+        """
+        if not word or not isinstance(word, str):
             return False
-            
-        word_clean = word.title().strip()
+
+        word_clean = word.strip()
         if len(word_clean) < 2:
             return False
-            
-        res = self.nd.search(word_clean)
-        # res returns a dict with 'first_name' and 'last_name' matches.
-        # If the word exists in either category as a valid name somewhere in the world, we accept it.
-        if res and (res.get('first_name') or res.get('last_name')):
+
+        # Быстрый путь: локальный индекс популярных имён отвечает мгновенно,
+        # тогда как поиск по базе на 138 млн записей стоит заметно дороже.
+        # Как фамилию индекс не подтверждает — в нём только имена.
+        if role in ("any", "first") and is_known_name(word_clean):
             return True
-            
+
+        if not self.nd:
+            return False
+
+        keys = ("first_name", "last_name") if role == "any" else (role + "_name",)
+
+        for variant in translit_variants(word_clean.lower()):
+            try:
+                res = self.nd.search(variant.title())
+            except Exception:
+                continue
+            if res and any(res.get(key) for key in keys):
+                return True
+
         return False
+
+    def _merge_oversegmented_tail(self, parts):
+        """Склеивает фамилию, которую разбило на куски.
+
+        `mohammedlahlali` сегментатор делит на ['mohammed', 'lah', 'lali'] —
+        и получается «Mohammed Lah Lali». Каждый кусок по отдельности где-то
+        в мире является именем, поэтому старая проверка «есть в базе» это
+        пропускала. Проверяем ролями: если хвостовые куски не годятся как
+        фамилии, а их склейка годится — склеиваем.
+        """
+        if len(parts) < 3 or not self.nd:
+            return parts
+        head, tail = parts[0], parts[1:]
+        merged = "".join(tail)
+        if len(merged) < 4 or not self._is_valid_name(merged, role="last"):
+            return parts
+
+        # Признак развала: куски короткие. База имён огромна, и в ней найдётся
+        # фамилия почти на любые три буквы — 'Lah' и 'Lali' там есть обе.
+        # Поэтому решает не «есть ли кусок в базе», а его длина.
+        if all(len(part) <= 4 for part in tail):
+            return [head, merged]
+
+        # Ни один хвостовой кусок не годится в фамилии, а склейка годится
+        if not any(self._is_valid_name(part, role="last") for part in tail):
+            return [head, merged]
+
+        return parts
+
+    def _finalize(self, parts, email):
+        """Общая проверка разобранных кусков имени для всех трёх стратегий."""
+        if not parts:
+            return self._fallback_osint(email)
+        if len(parts) > 3:
+            return self._fallback_osint(email)
+        if self._has_business_words(parts):
+            return self._fallback_osint(email)
+
+        parts = self._merge_oversegmented_tail(parts)
+
+        first_part = parts[0]
+        # Инициал вместо имени (j.smith) — судим по второму куску
+        is_initial = len(first_part) == 1 and len(parts) > 1
+        name_to_check = parts[1] if is_initial else first_part
+        role = "last" if is_initial else "first"
+
+        if self._is_generic_word(name_to_check):
+            return self._fallback_osint(email)
+
+        if self.nd and not self._is_valid_name(name_to_check, role=role):
+            # Имя может быть записано как фамилия и наоборот — даём второй шанс
+            if not self._is_valid_name(name_to_check, role="any"):
+                return self._fallback_osint(email)
+
+        return " ".join(part.title() for part in parts)
 
     def extract_name(self, email):
         """
@@ -145,44 +232,14 @@ class NameExtractor:
             clean_parts = [part.title() for part in parts if part.strip()]
             
             if clean_parts:
-                if len(clean_parts) > 3:
-                    return self._fallback_osint(email)
-                    
-                if self._has_business_words(clean_parts):
-                    return self._fallback_osint(email)
-                    
-                first_part = clean_parts[0]
-                name_to_check = clean_parts[1] if len(first_part) == 1 and len(clean_parts) > 1 else first_part
-
-                if self._is_generic_word(name_to_check):
-                    return self._fallback_osint(email)
-                    
-                if self.nd and not self._is_valid_name(name_to_check):
-                    return self._fallback_osint(email)
-                    
-                return " ".join(clean_parts)
+                return self._finalize(clean_parts, email)
                 
         # ----------------------------------------------------
         # Phase 1.5: Check for CamelCase (JohnDoe)
         # ----------------------------------------------------
         camel_case_parts = re.findall(r'[A-Z][a-z]+', username_clean)
         if len(camel_case_parts) >= 2 and ''.join(camel_case_parts) == username_clean:
-            if len(camel_case_parts) > 3:
-                return self._fallback_osint(email)
-                
-            if self._has_business_words(camel_case_parts):
-                return self._fallback_osint(email)
-                
-            first_part = camel_case_parts[0]
-            name_to_check = camel_case_parts[1] if len(first_part) == 1 and len(camel_case_parts) > 1 else first_part
-
-            if self._is_generic_word(name_to_check):
-                return self._fallback_osint(email)
-                
-            if self.nd and not self._is_valid_name(name_to_check):
-                return self._fallback_osint(email)
-                
-            return " ".join(camel_case_parts)
+            return self._finalize(camel_case_parts, email)
             
         # ----------------------------------------------------
         # Phase 2: Word segmentation for merged names (robertanderson)
@@ -190,31 +247,25 @@ class NameExtractor:
         segmented = wordsegment.segment(username_clean.lower())
         
         if segmented:
-            # Reject if it segments into more than 3 words (highly likely a phrase or business name)
-            if len(segmented) > 3:
-                return self._fallback_osint(email)
-                
-            if self._has_business_words(segmented):
-                return self._fallback_osint(email)
-                
-            first_word = segmented[0]
-            name_to_check = segmented[1] if len(first_word) == 1 and len(segmented) > 1 else first_word
-            
-            # Reject if the check word is a generic dictionary word
-            if self._is_generic_word(name_to_check):
-                return self._fallback_osint(email)
-                
-            if self.nd and not self._is_valid_name(name_to_check):
-                return self._fallback_osint(email)
-            
-            extracted = " ".join(part.title() for part in segmented)
-            return extracted
+            return self._finalize(segmented, email)
             
         return self._fallback_osint(email)
         
+    def last_profile(self):
+        """Профиль Gravatar, полученный этим потоком при последнем разборе.
+
+        Один запрос отдаёт и имя, и локацию, и привязанные соцсети — незачем
+        ходить за ними второй раз. Хранение потоковое: воркеров сотни, общий
+        атрибут они бы перетирали друг у друга.
+        """
+        return getattr(self._osint_local, "profile", {}) or {}
+
     def _fallback_osint(self, email):
+        self._osint_local.profile = {}
         if self.enable_osint and self.osint_operator:
-            name = self.osint_operator.search_name(email)
-            if name:
-                return name
+            profile = self.osint_operator.get_profile(email)
+            if profile:
+                self._osint_local.profile = profile
+                if profile.get("name"):
+                    return profile["name"]
         return ""
