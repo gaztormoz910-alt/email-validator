@@ -9,7 +9,7 @@ import sys, os, socket, threading, time, struct
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.stdout.reconfigure(encoding='utf-8')
 from core.network import (NetworkValidator, SocksSMTP, _parse_proxy, _proxy_scheme,
-                          _PROXY_TYPES, check_single_proxy, PROXY_MAX_CONSECUTIVE_FAILS)
+                          _PROXY_TYPES, probe_proxy_target, PROXY_MAX_CONSECUTIVE_FAILS)
 import socks
 
 
@@ -128,8 +128,9 @@ for line in srcp.splitlines():
         print("     ", s)
 t = TrapProxy()
 t.start()
-res = check_single_proxy("socks5://u:p@127.0.0.1:%d" % t.port, 6)
-print("   check_single_proxy -> %s" % res)
+res = probe_proxy_target("socks5://u:p@127.0.0.1:%d" % t.port,
+                         "gmail-smtp-in.l.google.com", 6)
+print("   probe_proxy_target -> %s" % (res,))
 conn = [x for x in t.log if isinstance(x, tuple) and x[0] == "CONNECT"]
 if conn:
     req = conn[0][1]

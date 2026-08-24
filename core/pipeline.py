@@ -1,4 +1,5 @@
 # core/pipeline.py
+import os
 import threading
 import time
 import json
@@ -18,8 +19,11 @@ from core.parser.ml_predictor import MLPredictor
 from core.disposable import is_disposable
 from core.gravatar import GravatarChecker
 from core.scoring import calculate_engagement_score
-from core.provider import classify_domain
-from core.heuristics import looks_machine_generated, is_parked_domain, is_role_based
+from core.provider import (classify_domain, country_from_domain,
+                           country_from_location, extend_free_domains,
+                           is_free_mail_domain)
+from core.heuristics import (extract_birth_year, looks_machine_generated,
+                             is_parked_domain, is_role_based)
 from core.parser_pipeline import GLOBAL_VERIFIED_DOMAINS
 
 
@@ -93,6 +97,20 @@ class ValidationPipeline:
         self._domain_age_lock = threading.Lock()
         self._http_alive_cache = {}
         self._http_alive_lock = threading.Lock()
+        # Замки «один в полёте» на домен. Без них сто потоков, наткнувшись на
+        # новый домен одновременно, делают сто одинаковых запросов WHOIS —
+        # кэш спасает только тех, кто пришёл после первого ответа.
+        self._inflight = {}
+        self._inflight_guard = threading.Lock()
+
+    def _domain_gate(self, key):
+        """Замок на конкретный домен: остальные ждут результата, а не дублируют запрос."""
+        with self._inflight_guard:
+            gate = self._inflight.get(key)
+            if gate is None:
+                gate = threading.Lock()
+                self._inflight[key] = gate
+            return gate
         
     def _http_proxies(self):
         """Прокси для HTTP-проверок (Gravatar, RDAP, HEAD).
@@ -112,10 +130,19 @@ class ValidationPipeline:
         return None
 
     def _get_domain_age_days(self, domain):
-        """Получить возраст домена в днях через WHOIS/RDAP. Кэшируется."""
+        """Возраст домена в днях через WHOIS/RDAP. Кэшируется, запрос не дублируется."""
         with self._domain_age_lock:
             if domain in self._domain_age_cache:
                 return self._domain_age_cache[domain]
+
+        with self._domain_gate("age:" + domain):
+            # Пока ждали замок, сосед мог всё посчитать — проверяем кэш снова
+            with self._domain_age_lock:
+                if domain in self._domain_age_cache:
+                    return self._domain_age_cache[domain]
+            return self._fetch_domain_age(domain)
+
+    def _fetch_domain_age(self, domain):
         proxies = self._http_proxies()
         try:
             # Библиотека whois ходит по 43 порту напрямую и прокси не умеет.
@@ -164,10 +191,18 @@ class ValidationPipeline:
         return -1
 
     def _check_http_alive(self, domain):
-        """Проверить, есть ли живой сайт на домене (HEAD запрос). Кэшируется."""
+        """Есть ли живой сайт на домене (HEAD). Кэшируется, запрос не дублируется."""
         with self._http_alive_lock:
             if domain in self._http_alive_cache:
                 return self._http_alive_cache[domain]
+
+        with self._domain_gate("http:" + domain):
+            with self._http_alive_lock:
+                if domain in self._http_alive_cache:
+                    return self._http_alive_cache[domain]
+            return self._fetch_http_alive(domain)
+
+    def _fetch_http_alive(self, domain):
         # Без прокси этот запрос оставляет реальный IP в логах самой проверяемой
         # компании — поэтому, если прокси заданы, идём через них.
         proxies = self._http_proxies()
@@ -192,6 +227,186 @@ class ValidationPipeline:
         with self._http_alive_lock:
             self._http_alive_cache[domain] = False
         return False
+
+    def _enrich_and_score(self, email, data, res, status_display,
+                          original_smtp_status, is_role, enable_ai):
+        """Обогащение и скоринг одного адреса.
+
+        Раньше этот код был скопирован дважды — в первый проход и в
+        перепроверку — и копии успели разойтись. Теперь он один.
+        """
+        domain = email.rsplit("@", 1)[1].lower() if "@" in email else ""
+        mx_host = res.get("mx_record", "")
+
+        # --- Имя -----------------------------------------------------------
+        name = data.get("name", "")
+        name_source = "файл" if name else ""
+        if not name:
+            name = self.name_extractor.extract_name(email) or ""
+            if name:
+                name_source = "адрес"
+            if name and enable_ai and not self.ml_predictor.is_person(name):
+                name, name_source = "", ""   # NER распознал организацию, не человека
+
+        # --- Страна --------------------------------------------------------
+        # Порядок принципиален. Домен знает страну ТОЧНО (web.de — Германия),
+        # а распределение имени по странам размазано: Ivan даёт Italy 0.235
+        # при Mexico 0.135. Раньше имя стояло выше домена и превращало
+        # bogdan.petrov@yandex.ru в итальянца.
+        country = data.get("country", "")
+        country_source = "файл" if country else ""
+        if not country:
+            country = country_from_domain(domain)
+            if country:
+                country_source = "домен"
+        if not country:
+            # Домен молчит (.com/.net). Профиль Gravatar, если он был получен
+            # при разборе имени, знает город и страну точнее любой догадки.
+            location = (self.name_extractor.last_profile().get("location") or "").strip()
+            if location:
+                country = country_from_location(location) or ""
+                if country:
+                    country_source = "Gravatar"
+        if not country and name:
+            # Последняя попытка — по имени, и только при явной уверенности
+            country = self.ml_predictor.predict_country(name)
+            if country:
+                country_source = "имя"
+
+        # --- Пол -----------------------------------------------------------
+        gender = data.get("gender", "")
+        gender_source = "файл" if gender else ""
+        if not gender:
+            # Страна повышает точность на неоднозначных именах:
+            # Andrea в Италии — мужское, в Германии — женское.
+            gender = self.ml_predictor.predict_gender(name, country)
+            if gender:
+                gender_source = "имя"
+
+        birth_year = data.get("birth_year", "") or extract_birth_year(email) or ""
+
+        data["name"] = name
+        data["gender"] = gender
+        data["country"] = country
+        data["birth_year"] = birth_year
+        # Откуда взято — чтобы в выгрузке отличать данные из файла от догадки
+        data["name_source"] = name_source
+        accounts = self.name_extractor.last_profile().get("accounts") or []
+        if accounts:
+            data["social_accounts"] = ", ".join(accounts[:5])
+        data["gender_source"] = gender_source
+        data["country_source"] = country_source
+
+        # --- Сигналы живости ------------------------------------------------
+        has_avatar = False
+        if status_display in ("Valid", "Risky", "Role-based"):
+            try:
+                has_avatar = self.gravatar_checker.has_gravatar(email)
+            except Exception:
+                pass
+
+        dns_score = 0
+        try:
+            dns_info = self.network.check_dns_health(domain, mx_record=mx_host)
+            dns_score = dns_info.get("score", 0)
+        except Exception:
+            pass
+
+        in_dnsbl = False
+        has_ptr = None  # None = не проверено, чтобы скоринг не штрафовал вслепую
+        has_starttls = res.get("has_starttls", None)
+        if mx_host and mx_host != "N/A":
+            try:
+                in_dnsbl = self.network.check_dnsbl(mx_host)
+            except Exception:
+                pass
+            try:
+                has_ptr = self.network.check_ptr(mx_host)
+            except Exception:
+                pass
+
+        # WHOIS и HTTP-HEAD стоят до 1.9 с и до 6.8 с на новый домен. Тратить
+        # их на адрес, по которому вердикта нет, бессмысленно: эти сигналы
+        # дают 3-5 баллов, а балл начисляется только Valid и Risky.
+        domain_age = -1
+        has_live_site = True
+        if status_display in ("Valid", "Risky", "Role-based"):
+            try:
+                domain_age = self._get_domain_age_days(domain)
+            except Exception:
+                pass
+            try:
+                if domain not in GLOBAL_VERIFIED_DOMAINS and not is_free_mail_domain(domain):
+                    has_live_site = self._check_http_alive(domain)
+            except Exception:
+                pass
+
+        score_result = calculate_engagement_score(
+            email=email,
+            smtp_status=status_display,
+            smtp_reason=res.get("reason", ""),
+            has_gravatar=has_avatar,
+            is_disposable=False,  # Уже отсеяны выше
+            dns_health_score=dns_score,
+            domain_age_days=domain_age,
+            name_extracted=name,
+            is_role_based=is_role,
+            server_outdated=res.get("server_outdated", False),
+            has_ptr=has_ptr,
+            has_starttls=has_starttls,
+            in_dnsbl=in_dnsbl,
+            has_live_website=has_live_site,
+            original_smtp_status=original_smtp_status,
+            machine_generated=looks_machine_generated(email),
+            # Парковка могла быть и на втором MX, и на A-записи без MX
+            is_parked_domain=is_parked_domain(res.get("mx_records") or mx_host),
+        )
+
+        data["engagement_score"] = score_result["score"]
+        data["engagement_grade"] = score_result["grade"]
+        data["provider_type"] = score_result["provider_type"]
+        data["has_gravatar"] = has_avatar
+
+        # Провайдера уточняем теперь, когда известна MX-запись: по ней видно,
+        # сидит ли свой домен на Google Workspace или Microsoft 365.
+        prov_name, dom_type = classify_domain(email, mx_host)
+        data["provider_name"] = prov_name
+        data["domain_type"] = dom_type
+
+        # В кэш уходит SMTP-статус, а не отображаемый: ролевой ящик
+        # показывается как Role-based, но доказан-то он как Valid.
+        if self.cache:
+            self.cache.put(email, original_smtp_status, res.get("reason", ""),
+                           mx_host or "N/A", data)
+
+    def _start_profile_refresher(self, timeout, workers, interval=600):
+        """Фоновое обновление профиля прокси раз в interval секунд."""
+        self._refresh_stop = threading.Event()
+
+        def loop():
+            while not self._refresh_stop.wait(interval):
+                if not self.is_running or not self.network:
+                    return
+                try:
+                    stats = self.network.refresh_proxy_profiles(
+                        timeout=timeout, workers=workers)
+                except Exception:
+                    continue
+                if not stats.get("checked"):
+                    continue
+                if stats["ip_changed"] or stats["ptr_lost"] or stats["ptr_gained"]:
+                    self.callbacks['on_log'](
+                        f"[PROXY] Профиль обновлён: сменили IP — {stats['ip_changed']}, "
+                        f"потеряли PTR — {stats['ptr_lost']}, "
+                        f"получили PTR — {stats['ptr_gained']}.", "info")
+
+        self._refresh_thread = threading.Thread(target=loop, daemon=True)
+        self._refresh_thread.start()
+
+    def _stop_profile_refresher(self):
+        stop = getattr(self, "_refresh_stop", None)
+        if stop is not None:
+            stop.set()
 
     def setup(self, timeout=5, enable_ai=False, proxies=None, threads=100, use_cache=True):
         # Гибридный режим: Whitelist + DNS-проверка неизвестных доменов
@@ -229,9 +444,25 @@ class ValidationPipeline:
         except Exception as e:
             self.callbacks['on_log'](f"[DEAD] Обновление списков не удалось ({type(e).__name__}), использую локальные.", "dead")
 
+        # Список бесплатных почтовиков. Он НЕ для отбраковки, а для скоринга:
+        # без него сотни бесплатных сервисов считаются корпоративными и
+        # получают +5, которого не получает gmail.com.
+        try:
+            free_path = os.path.join("data", "free_providers.txt")
+            if os.path.exists(free_path):
+                with open(free_path, "r", encoding="utf-8") as f:
+                    added = extend_free_domains(line.strip() for line in f
+                                                if line.strip() and not line.startswith("#"))
+                if added:
+                    self.callbacks['on_log'](
+                        f"[INFO] Бесплатных почтовиков добавлено: {added}. "
+                        "Скоринг больше не путает их с корпоративными.", "info")
+        except Exception:
+            pass
+
         # Подключаем SpamFilter из внешних файлов
         try:
-            self.filter = SpamFilter()
+            self.filter = SpamFilter(log_callback=self.callbacks.get('on_log'))
             self.callbacks['on_log'](f"[INFO] SpamFilter загружен ({self.filter.get_count() if hasattr(self.filter, 'get_count') else '?'} доменов).", "info")
             # Сливаем свежие списки во встроенную базу: она захардкожена и сама
             # не обновляется, зато умеет проверять ПОДДОМЕНЫ (foo.mailinator.com),
@@ -353,6 +584,10 @@ class ValidationPipeline:
         self.network = NetworkValidator(timeout=timeout, proxies=proxies)
         if proxy_profiles:
             self.network.set_proxy_profiles(proxy_profiles)
+            # Профиль протухает: у ротирующегося прокси выходной IP меняется
+            # по ходу прогона, и маршрутизация продолжает считать, что PTR
+            # на месте. Обновляем в фоне, чтобы не держать воркеры.
+            self._start_profile_refresher(timeout=timeout, workers=threads)
         
         if enable_ai:
             self.callbacks['on_log']("[INFO] Прогрев и обучение Нейросети (TensorFlow + NaiveBayes)...", "info")
@@ -393,7 +628,8 @@ class ValidationPipeline:
         # Предзагрузка тяжелых модулей один раз (O(1) вместо O(N) в потоках)
         if not self.name_extractor:
             self.callbacks['on_log']("[INFO] Загрузка модуля извлечения имен...", "info")
-            self.name_extractor = NameExtractor(enable_osint=enable_osint)
+            self.name_extractor = NameExtractor(enable_osint=enable_osint,
+                                                proxy_provider=self._http_proxies)
         if not self.ml_predictor:
             self.callbacks['on_log']("[INFO] Загрузка предиктора пола/страны...", "info")
             self.ml_predictor = MLPredictor(enable_ml=enable_ai)
@@ -545,123 +781,8 @@ class ValidationPipeline:
                 if is_role:
                     status_display = "Role-based"
                 
-                # Enrichment для ВСЕХ статусов (не только Valid)
-                # Приоритет: данные из файла > ML-предсказание > пустое поле
-                name = data.get("name", "")
-                gender = data.get("gender", "")
-                country = data.get("country", "")
-                
-                if not name or not gender or not country:
-                    if not name:
-                        name = self.name_extractor.extract_name(email)
-                        
-                    # ML/AI Name Validation (NER)
-                    if name and enable_ai:
-                        is_human = self.ml_predictor.is_person(name)
-                        if not is_human:
-                            name = "" # ИИ понял, что это не человек (например ORG)
-                    
-                    pred_gender, pred_country_from_email = self.ml_predictor.predict(name, email=email)
-                    
-                    pred_country_from_name = ""
-                    if name and enable_ai:
-                        pred_country_from_name = self.ml_predictor.predict_country(name)
-                    
-                    if not gender or gender == "":
-                        gender = pred_gender
-                    if not country or country == "":
-                        country = pred_country_from_name if pred_country_from_name else pred_country_from_email
-                        
-                data["name"] = name
-                data["gender"] = gender
-                data["country"] = country
-
-                # Gravatar-проверка (бонусный сигнал реального человека)
-                has_avatar = False
-                if status_display in ("Valid", "Risky", "Role-based"):
-                    try:
-                        has_avatar = self.gravatar_checker.has_gravatar(email)
-                    except Exception:
-                        pass
-                
-                # DNS Health Score (для Engagement Score)
-                dns_score = 0
-                try:
-                    domain = email.split("@")[1].lower()
-                    dns_info = self.network.check_dns_health(domain)
-                    dns_score = dns_info.get("score", 0)
-                except Exception:
-                    pass
-                
-                # Новые сигналы: DNSBL, PTR, STARTTLS
-                in_dnsbl = False
-                has_ptr = None  # None = не проверено, чтобы скоринг не штрафовал вслепую
-                has_starttls = res.get("has_starttls", None)
-                mx_host = res.get("mx_record", "")
-                if mx_host and mx_host != "N/A":
-                    try:
-                        in_dnsbl = self.network.check_dnsbl(mx_host)
-                    except Exception:
-                        pass
-                    try:
-                        has_ptr = self.network.check_ptr(mx_host)
-                    except Exception:
-                        pass
-                
-                # WHOIS: возраст домена
-                domain_age = -1
-                try:
-                    domain = email.split("@")[1].lower()
-                    domain_age = self._get_domain_age_days(domain)
-                except Exception:
-                    pass
-                
-                # HTTP-пинг: живой ли сайт (только для корпоративных доменов)
-                has_live_site = True
-                try:
-                    domain = email.split("@")[1].lower()
-                    if domain not in GLOBAL_VERIFIED_DOMAINS:
-                        has_live_site = self._check_http_alive(domain)
-                except Exception:
-                    pass
-                
-                # Вычисление Engagement Score (с ВСЕМИ новыми сигналами)
-                score_result = calculate_engagement_score(
-                    email=email,
-                    smtp_status=status_display,
-                    smtp_reason=res.get("reason", ""),
-                    has_gravatar=has_avatar,
-                    is_disposable=False,  # Уже отсеяны выше
-                    dns_health_score=dns_score,
-                    domain_age_days=domain_age,
-                    name_extracted=name,
-                    is_role_based=is_role,
-                    server_outdated=res.get("server_outdated", False),
-                    has_ptr=has_ptr,
-                    has_starttls=has_starttls,
-                    in_dnsbl=in_dnsbl,
-                    has_live_website=has_live_site,
-                    original_smtp_status=original_smtp_status,
-                    machine_generated=looks_machine_generated(email),
-                    is_parked_domain=is_parked_domain(res.get("mx_record", "")),
-                )
-                
-                data["engagement_score"] = score_result["score"]
-                data["engagement_grade"] = score_result["grade"]
-                data["provider_type"] = score_result["provider_type"]
-                data["has_gravatar"] = has_avatar
-
-                # Уточняем провайдера теперь, когда известна MX-запись:
-                # по ней видно, сидит ли свой домен на Google Workspace / Microsoft 365.
-                prov_name, dom_type = classify_domain(email, res.get("mx_record", ""))
-                data["provider_name"] = prov_name
-                data["domain_type"] = dom_type
-
-                # В кэш уходит SMTP-статус, а не отображаемый: ролевой ящик
-                # показывается как Role-based, но доказан-то он как Valid.
-                if self.cache:
-                    self.cache.put(email, original_smtp_status, res.get("reason", ""),
-                                   res.get("mx_record", "N/A"), data)
+                self._enrich_and_score(email, data, res, status_display,
+                                       original_smtp_status, is_role, enable_ai)
 
                 self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
             else:
@@ -803,108 +924,8 @@ class ValidationPipeline:
                     if is_role:
                         status_display = "Role-based"
                     
-                    # Enrichment для ВСЕХ статусов (не только Valid)
-                    name = data.get("name", "")
-                    gender = data.get("gender", "")
-                    country = data.get("country", "")
-                    if not name or not gender or not country:
-                        if not name:
-                            name = self.name_extractor.extract_name(email)
-                        if name and enable_ai:
-                            is_human = self.ml_predictor.is_person(name)
-                            if not is_human:
-                                name = ""
-                        pred_gender, pred_country_from_email = self.ml_predictor.predict(name, email=email)
-                        pred_country_from_name = ""
-                        if name and enable_ai:
-                            pred_country_from_name = self.ml_predictor.predict_country(name)
-                        if not gender or gender == "":
-                            gender = pred_gender
-                        if not country or country == "":
-                            country = pred_country_from_name if pred_country_from_name else pred_country_from_email
-                    data["name"] = name
-                    data["gender"] = gender
-                    data["country"] = country
-                    
-                    # Gravatar + Engagement Score
-                    has_avatar = False
-                    if status_display in ("Valid", "Risky", "Role-based"):
-                        try:
-                            has_avatar = self.gravatar_checker.has_gravatar(email)
-                        except Exception:
-                            pass
-                    
-                    dns_score = 0
-                    try:
-                        domain = email.split("@")[1].lower()
-                        dns_info = self.network.check_dns_health(domain)
-                        dns_score = dns_info.get("score", 0)
-                    except Exception:
-                        pass
-                    
-                    # Новые сигналы для retry
-                    in_dnsbl = False
-                    has_ptr = None  # None = не проверено, чтобы скоринг не штрафовал вслепую
-                    has_starttls = res.get("has_starttls", None)
-                    mx_host = res.get("mx_record", "")
-                    if mx_host and mx_host != "N/A":
-                        try:
-                            in_dnsbl = self.network.check_dnsbl(mx_host)
-                        except Exception:
-                            pass
-                        try:
-                            has_ptr = self.network.check_ptr(mx_host)
-                        except Exception:
-                            pass
-                    
-                    domain_age = -1
-                    try:
-                        domain = email.split("@")[1].lower()
-                        domain_age = self._get_domain_age_days(domain)
-                    except Exception:
-                        pass
-                    
-                    has_live_site = True
-                    try:
-                        domain = email.split("@")[1].lower()
-                        if domain not in GLOBAL_VERIFIED_DOMAINS:
-                            has_live_site = self._check_http_alive(domain)
-                    except Exception:
-                        pass
-                    
-                    score_result = calculate_engagement_score(
-                        email=email,
-                        smtp_status=status_display,
-                        smtp_reason=res.get("reason", ""),
-                        has_gravatar=has_avatar,
-                        is_disposable=False,
-                        dns_health_score=dns_score,
-                        domain_age_days=domain_age,
-                        name_extracted=name,
-                        is_role_based=is_role,
-                        server_outdated=res.get("server_outdated", False),
-                        has_ptr=has_ptr,
-                        has_starttls=has_starttls,
-                        in_dnsbl=in_dnsbl,
-                        has_live_website=has_live_site,
-                        original_smtp_status=original_smtp_status,
-                        machine_generated=looks_machine_generated(email),
-                        is_parked_domain=is_parked_domain(res.get("mx_record", "")),
-                    )
-                    
-                    data["engagement_score"] = score_result["score"]
-                    data["engagement_grade"] = score_result["grade"]
-                    data["provider_type"] = score_result["provider_type"]
-                    data["has_gravatar"] = has_avatar
-
-                    prov_name, dom_type = classify_domain(email, res.get("mx_record", ""))
-                    data["provider_name"] = prov_name
-                    data["domain_type"] = dom_type
-                    data["validated_at"] = _utc_now().strftime("%Y-%m-%d %H:%M")
-
-                    if self.cache:
-                        self.cache.put(email, original_smtp_status, res.get("reason", ""),
-                                       res.get("mx_record", "N/A"), data)
+                    self._enrich_and_score(email, data, res, status_display,
+                                           original_smtp_status, is_role, enable_ai)
 
                     self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
                     with retry_lock:
@@ -976,6 +997,8 @@ class ValidationPipeline:
                     self.callbacks['on_log'](f"[DEAD]    {dom} — {cnt} из {cnt} valid", "dead")
         except Exception:
             pass
+
+        self._stop_profile_refresher()
 
         if self.cache:
             with self._cache_lock:
