@@ -41,7 +41,7 @@ IMPORT_TO_PACKAGE = {
 }
 
 # Собственные пакеты проекта и точки входа
-LOCAL = {"core", "ui", "tools", "main", "cli", "engine"}
+LOCAL = {"core", "ui", "tools", "api", "main", "cli", "engine"}
 
 # Папки, которые описывают не продукт, а его проверку
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "tor_bin", ".unlazy",

@@ -1,109 +1,215 @@
 {
   "_comment": "Изъяны, названные в первом аудите (оценки 82 и 89, коммит 37098da), и их нынешнее состояние. verify_gaps_closed.py проверяет КАЖДУЮ строку вызовом кода: закрытый изъян обязан быть закрыт, открытый обязан оставаться открытым. Балл в audit_rubric.json не имеет права расти без закрытой строки здесь.",
-
   "gaps": [
-    {"id": "invalid_heuristic", "area": "smtp_verdict", "status": "closed",
-     "was": "invalid ставился по общей эвристике recipient|mailbox|user|address",
-     "now": "требуется слово-отрицание, временные формулировки не хоронят ящик"},
-
-    {"id": "control_rcpt", "area": "smtp_verdict", "status": "closed",
-     "was": "нет подтверждающего второго RCPT в той же сессии",
-     "now": "при 250 на реальный адрес в той же сессии проверяется выдуманный"},
-
-    {"id": "postmaster_probe", "area": "catchall", "status": "closed",
-     "was": "нет пробы postmaster@",
-     "now": "сервер, отвергающий postmaster@, теряет право хоронить адреса"},
-
-    {"id": "mx_cross_check", "area": "catchall", "status": "open",
-     "was": "нет сверки ответов разных MX",
-     "now": "по-прежнему нет: спрашивается один MX за раз"},
-
-    {"id": "niche_providers", "area": "provider_coverage", "status": "open",
-     "was": "нет отдельных путей для Zoho, QQ, 163, Naver",
-     "now": "по-прежнему нет отдельной обработки"},
-
-    {"id": "private_relay_validation", "area": "provider_coverage", "status": "open",
-     "was": "Apple Private Relay не выделен при валидации",
-     "now": "в скоринге и одноразовых учтён, в маршрутизации проверки — нет"},
-
-    {"id": "country_threshold_switch", "area": "enrichment", "status": "closed",
-     "was": "выбор между заполненностью и точностью был правкой исходника",
-     "now": "режим переключается функцией и переключателем в окне"},
-
-    {"id": "osint_breadth", "area": "enrichment", "status": "open",
-     "was": "OSINT ограничен Gravatar, нет компании и должности",
-     "now": "источник по-прежнему один"},
-
-    {"id": "weights_calibration", "area": "scoring", "status": "closed",
-     "was": "веса зашиты в код и никогда не сверялись с отскоками",
-     "now": "веса вынесены в таблицу и файл, есть инструмент калибровки по lift"},
-
-    {"id": "exit_ip_dedup", "area": "proxy_ip_profile", "status": "closed",
-     "was": "прокси с одинаковым выходным IP не схлопывались, ротация фиктивна",
-     "now": "группировка по выходному IP и честная сводка ротации"},
-
-    {"id": "asn_and_geo", "area": "proxy_ip_profile", "status": "closed",
-     "was": "нет ASN и гео выходного IP, датацентровый неотличим от жилого",
-     "now": "ASN, страна и тип адреса определяются и попадают в профиль"},
-
-    {"id": "spamhaus", "area": "proxy_ip_profile", "status": "closed",
-     "was": "Spamhaus исключён, потому что отклоняет публичные DNS",
-     "now": "работает через свой резолвер и только пройдя санити-контракт"},
-
-    {"id": "port25_diagnosis", "area": "proxy_liveness", "status": "closed",
-     "was": "живой прокси с закрытым 25 портом выглядел как мёртвый",
-     "now": "три диагноза: live, port25_blocked, dead"},
-
-    {"id": "direct_probe_yahoo_icloud", "area": "proxy_mail_fitness", "status": "closed",
-     "was": "пригодность к Yahoo и iCloud выводилась из PTR и списков",
-     "now": "обе цели пробуются напрямую до MAIL FROM"},
-
-    {"id": "geo_routing", "area": "proxy_routing", "status": "closed",
-     "was": "нет привязки гео прокси к гео домена получателя",
-     "now": "при равном здоровье выбирается прокси из страны домена"},
-
-    {"id": "per_proxy_concurrency", "area": "proxy_health", "status": "closed",
-     "was": "лимит соединений стоял на MX, но не на самом прокси",
-     "now": "у каждого прокси свой слот, лимит соблюдается под нагрузкой"},
-
-    {"id": "ip_load_budget_enforced", "area": "proxy_health", "status": "open",
-     "was": "нагрузка на выходной IP не считалась вовсе",
-     "now": "считается и влияет на выбор, но мягкий потолок только СООБЩАЕТ и не останавливает"},
-
-    {"id": "latency_resampling", "area": "proxy_health", "status": "open",
-     "was": "задержка меряется однократно",
-     "now": "переснимается фоново раз в 600с, между обновлениями значение статично"},
-
-    {"id": "whois_proxying", "area": "proxy_leaks", "status": "open",
-     "was": "WHOIS по 43 порту не проксируется и пропускается",
-     "now": "по-прежнему пропускается при заданных прокси"},
-
-    {"id": "blocking_pause", "area": "throughput", "status": "closed",
-     "was": "перепроверка ждала глухой паузой 90 секунд",
-     "now": "у каждой записи свой срок, блокирующего ожидания нет"},
-
-    {"id": "dedup_in_ram", "area": "throughput", "status": "closed",
-     "was": "множество увиденных адресов держалось в ОЗУ",
-     "now": "дедуп идёт через диск"},
-
-    {"id": "run_resume", "area": "throughput", "status": "closed",
-     "was": "прерванный прогон начинался заново",
-     "now": "сделанное помечается, прогон продолжается с места остановки"},
-
-    {"id": "ui_full_scan", "area": "throughput", "status": "closed",
-     "was": "интерфейс перебирал всю базу на каждом тике",
-     "now": "страница собирается по индексу и обрывается на нужном числе строк"},
-
-    {"id": "requirements", "area": "engineering", "status": "closed",
-     "was": "нет requirements.txt, окружение невоспроизводимо",
-     "now": "есть и сверяется с реальными импортами оракулом"},
-
-    {"id": "monoliths", "area": "engineering", "status": "open",
-     "was": "network.py и gui.py — монолиты",
-     "now": "стали ещё больше: оба выросли вместе с новыми возможностями"},
-
-    {"id": "rest_api", "area": "product", "status": "open",
-     "was": "нет REST API для встраивания",
-     "now": "по-прежнему нет"}
+    {
+      "id": "invalid_heuristic",
+      "area": "smtp_verdict",
+      "status": "closed",
+      "was": "invalid ставился по общей эвристике recipient|mailbox|user|address",
+      "now": "требуется слово-отрицание, временные формулировки не хоронят ящик"
+    },
+    {
+      "id": "control_rcpt",
+      "area": "smtp_verdict",
+      "status": "closed",
+      "was": "нет подтверждающего второго RCPT в той же сессии",
+      "now": "при 250 на реальный адрес в той же сессии проверяется выдуманный"
+    },
+    {
+      "id": "postmaster_probe",
+      "area": "catchall",
+      "status": "closed",
+      "was": "нет пробы postmaster@",
+      "now": "сервер, отвергающий postmaster@, теряет право хоронить адреса"
+    },
+    {
+      "id": "mx_cross_check",
+      "area": "catchall",
+      "status": "closed",
+      "was": "нет сверки ответов разных MX",
+      "now": "приговор invalid сверяется со вторым MX домена перед возвратом"
+    },
+    {
+      "id": "niche_providers",
+      "area": "provider_coverage",
+      "status": "closed",
+      "was": "нет отдельных путей для Zoho, QQ, 163, Naver",
+      "now": "Zoho, QQ, 163 и Naver в маршрутизации и в списке бесплатных"
+    },
+    {
+      "id": "private_relay_validation",
+      "area": "provider_coverage",
+      "status": "closed",
+      "was": "Apple Private Relay не выделен при валидации",
+      "now": "Private Relay требует чистого IP наравне с iCloud"
+    },
+    {
+      "id": "country_threshold_switch",
+      "area": "enrichment",
+      "status": "closed",
+      "was": "выбор между заполненностью и точностью был правкой исходника",
+      "now": "режим переключается функцией и переключателем в окне"
+    },
+    {
+      "id": "osint_breadth",
+      "area": "enrichment",
+      "status": "open",
+      "was": "OSINT ограничен Gravatar, нет компании и должности",
+      "now": "источник по-прежнему один"
+    },
+    {
+      "id": "weights_calibration",
+      "area": "scoring",
+      "status": "closed",
+      "was": "веса зашиты в код и никогда не сверялись с отскоками",
+      "now": "веса вынесены в таблицу и файл, есть инструмент калибровки по lift"
+    },
+    {
+      "id": "exit_ip_dedup",
+      "area": "proxy_ip_profile",
+      "status": "closed",
+      "was": "прокси с одинаковым выходным IP не схлопывались, ротация фиктивна",
+      "now": "группировка по выходному IP и честная сводка ротации"
+    },
+    {
+      "id": "asn_and_geo",
+      "area": "proxy_ip_profile",
+      "status": "closed",
+      "was": "нет ASN и гео выходного IP, датацентровый неотличим от жилого",
+      "now": "ASN, страна и тип адреса определяются и попадают в профиль"
+    },
+    {
+      "id": "spamhaus",
+      "area": "proxy_ip_profile",
+      "status": "closed",
+      "was": "Spamhaus исключён, потому что отклоняет публичные DNS",
+      "now": "работает через свой резолвер и только пройдя санити-контракт"
+    },
+    {
+      "id": "port25_diagnosis",
+      "area": "proxy_liveness",
+      "status": "closed",
+      "was": "живой прокси с закрытым 25 портом выглядел как мёртвый",
+      "now": "три диагноза: live, port25_blocked, dead"
+    },
+    {
+      "id": "direct_probe_yahoo_icloud",
+      "area": "proxy_mail_fitness",
+      "status": "closed",
+      "was": "пригодность к Yahoo и iCloud выводилась из PTR и списков",
+      "now": "обе цели пробуются напрямую до MAIL FROM"
+    },
+    {
+      "id": "geo_routing",
+      "area": "proxy_routing",
+      "status": "closed",
+      "was": "нет привязки гео прокси к гео домена получателя",
+      "now": "при равном здоровье выбирается прокси из страны домена"
+    },
+    {
+      "id": "per_proxy_concurrency",
+      "area": "proxy_health",
+      "status": "closed",
+      "was": "лимит соединений стоял на MX, но не на самом прокси",
+      "now": "у каждого прокси свой слот, лимит соблюдается под нагрузкой"
+    },
+    {
+      "id": "ip_load_budget_enforced",
+      "area": "proxy_health",
+      "status": "closed",
+      "was": "нагрузка на выходной IP не считалась вовсе",
+      "now": "перегруженный выходной IP исключается из выбора"
+    },
+    {
+      "id": "latency_resampling",
+      "area": "proxy_health",
+      "status": "closed",
+      "was": "задержка меряется однократно",
+      "now": "задержка измеряется на каждом соединении и сглаживается"
+    },
+    {
+      "id": "whois_proxying",
+      "area": "proxy_leaks",
+      "status": "closed",
+      "was": "WHOIS по 43 порту не проксируется и пропускается",
+      "now": "WHOIS говорится вручную через SOCKS, дата регистрации приходит"
+    },
+    {
+      "id": "blocking_pause",
+      "area": "throughput",
+      "status": "closed",
+      "was": "перепроверка ждала глухой паузой 90 секунд",
+      "now": "у каждой записи свой срок, блокирующего ожидания нет"
+    },
+    {
+      "id": "dedup_in_ram",
+      "area": "throughput",
+      "status": "closed",
+      "was": "множество увиденных адресов держалось в ОЗУ",
+      "now": "дедуп идёт через диск"
+    },
+    {
+      "id": "run_resume",
+      "area": "throughput",
+      "status": "closed",
+      "was": "прерванный прогон начинался заново",
+      "now": "сделанное помечается, прогон продолжается с места остановки"
+    },
+    {
+      "id": "ui_full_scan",
+      "area": "throughput",
+      "status": "closed",
+      "was": "интерфейс перебирал всю базу на каждом тике",
+      "now": "страница собирается по индексу и обрывается на нужном числе строк"
+    },
+    {
+      "id": "requirements",
+      "area": "engineering",
+      "status": "closed",
+      "was": "нет requirements.txt, окружение невоспроизводимо",
+      "now": "есть и сверяется с реальными импортами оракулом"
+    },
+    {
+      "id": "monoliths",
+      "area": "engineering",
+      "status": "open",
+      "was": "network.py и gui.py — монолиты",
+      "now": "стали ещё больше: оба выросли вместе с новыми возможностями"
+    },
+    {
+      "id": "rest_api",
+      "area": "product",
+      "status": "closed",
+      "was": "нет REST API для встраивания",
+      "now": "есть HTTP API на стандартной библиотеке, без новых зависимостей"
+    },
+    {
+      "id": "local_part_rules",
+      "area": "smtp_verdict",
+      "status": "closed",
+      "was": "правил имени пользователя у провайдеров не было вовсе",
+      "now": "62 домена с правилами; невозможное отсеивается без сети"
+    },
+    {
+      "id": "junk_stripping",
+      "area": "smtp_verdict",
+      "status": "closed",
+      "was": "мусорный символ в начале строки давал ложный invalid живому адресу",
+      "now": "обёртка счищается, адрес из файла владельца восстанавливается"
+    },
+    {
+      "id": "lazy_proxy_input",
+      "area": "throughput",
+      "status": "closed",
+      "was": "список прокси материализовался целиком до первого соединения",
+      "now": "вход читается генератором, очередь чекера ограничена по размеру"
+    },
+    {
+      "id": "gui_sync_counting",
+      "area": "throughput",
+      "status": "closed",
+      "was": "окно считало строки гигантского файла в главном потоке и замирало",
+      "now": "подсчёт ушёл в фоновый поток, подпись обновляется по готовности"
+    }
   ]
 }
