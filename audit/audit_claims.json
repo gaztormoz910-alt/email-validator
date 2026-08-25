@@ -1,17 +1,18 @@
 {
   "_comment": "Числовые и поведенческие утверждения из отчёта аудита 2026-08-25. Скрипт verify_audit_claims.py измеряет реальность и сверяет с этим файлом. Расхождение = провал гейта, а не тихая правка отчёта.",
   "inventory": {
-    "py_files_total": 78,
-    "py_lines_total": 16047,
-    "core_modules": 17,
-    "parser_modules": 8,
-    "tests_files": 18,
+    "py_files_total": 84,
+    "py_lines_total": 20020,
+    "core_modules": 19,
+    "parser_modules": 7,
+    "tests_files": 25,
     "entrypoints": [
       "main.py",
       "cli.py"
     ],
     "biggest_module": "core/network.py",
-    "biggest_module_lines": 2045
+    "biggest_module_lines": 2523,
+    "_note": "Числа обновлены после внедрения улучшений: из корня убраны 13 отладочных файлов (остались в истории git), добавлены core/proxy_profile.py, core/runstate.py, ui/result_store.py, ui/log_buffer.py и новые наборы тестов."
   },
   "smtp": {
     "dnsbl_zones": 7,
@@ -61,7 +62,7 @@
   "proxy": {
     "max_consecutive_fails": 3,
     "min_distinct_hosts_for_ban": 2,
-    "probe_targets": 2,
+    "probe_targets": 4,
     "supported_schemes": [
       "socks5",
       "socks4",
@@ -81,7 +82,8 @@
     "worker_cap": 300,
     "async_worker_cap": 500,
     "refresh_interval_sec": 600,
-    "dirty_rdns_keywords": 17
+    "dirty_rdns_keywords": 17,
+    "_note": "Целей пробы стало 4: к Gmail и Outlook добавлены прямые пробы Yahoo и iCloud — их пригодность больше не выводится косвенно из PTR и списков."
   },
   "tests": {
     "pytest_tests_min": 300,

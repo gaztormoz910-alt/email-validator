@@ -39,6 +39,9 @@ AUDIT_TOOLING = {
     "verify_enrichment.py",
     "verify_rubric.py",
     "verify_competitor_facts.py",
+    "verify_gui_builds.py",
+    "verify_no_blocking_sleep.py",
+    "verify_requirements.py",
 }
 
 _failures = []

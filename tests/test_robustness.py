@@ -103,6 +103,31 @@ class TestNoCrashOnGarbage(unittest.TestCase):
         self.assertEqual(crashes, [], "функции падают на мусоре: " + str(crashes[:6]))
 
 
+class TestScoringWeightKeys(unittest.TestCase):
+    """W() отдаёт ноль на неизвестный ключ — значит опечатку ловим здесь.
+
+    Пока W() падал с KeyError, опечатка в имени сигнала обнаруживалась сразу,
+    но ценой убитого рабочего потока посреди прогона. Теперь она молчит и
+    просто обнуляет сигнал, поэтому проверка перенесена сюда: разбираем сам
+    исходник и требуем, чтобы каждое имя, с которым вызывается W(), было
+    описано в таблице весов.
+    """
+
+    def test_every_weight_key_used_in_scoring_is_declared(self):
+        import re
+        source = inspect.getsource(S)
+        used = set(re.findall(r'\bW\(\s*["\']([A-Za-z0-9_]+)["\']\s*\)', source))
+        self.assertTrue(used, "в scoring.py не найдено ни одного вызова W() — "
+                              "проверка перестала что-либо проверять")
+        unknown = sorted(used - set(S.DEFAULT_WEIGHTS))
+        self.assertEqual(unknown, [],
+                         "эти сигналы весят ноль из-за опечатки в имени: " + str(unknown))
+
+    def test_unknown_key_is_zero_and_does_not_raise(self):
+        self.assertEqual(S.W("такого-сигнала-нет"), 0)
+        self.assertEqual(S.W(None), 0)
+
+
 class TestScoringInvariants(unittest.TestCase):
     """Свойства скоринга, которые обязаны держаться при любых входах."""
 

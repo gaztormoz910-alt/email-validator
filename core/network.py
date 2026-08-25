@@ -73,6 +73,23 @@ DNSBL_ZONES = [
     'dnsbl.dronebl.org',
 ]
 
+# Spamhaus ZEN — крупнейший список, и его отсутствие было заметной дырой.
+# Он отклоняет запросы, пришедшие с ПУБЛИЧНЫХ резолверов (8.8.8.8, 1.1.1.1),
+# и поэтому раньше давал NXDOMAIN даже на обязательную тестовую запись
+# 127.0.0.2 — то есть числился в коде, но не работал, и был убран.
+#
+# Работает он через СВОЙ резолвер: рекурсивный на том же VPS либо любой
+# непубличный, который согласится обслуживать зону. Поэтому Spamhaus вынесен
+# отдельно: спрашивается только когда такой резолвер задан, а перед первым
+# запросом проверяется санити-контрактом — 127.0.0.2 обязана числиться,
+# 127.0.0.1 обязана не числиться. Не прошёл контракт — зона не используется,
+# и её молчание НЕ считается чистотой адреса.
+SPAMHAUS_ZONE = 'zen.spamhaus.org'
+
+# Обязательные тестовые записи Spamhaus (документированы им самим)
+SPAMHAUS_SANITY_LISTED = '2.0.0.127'      # обязана числиться
+SPAMHAUS_SANITY_CLEAN = '1.0.0.127'       # обязана НЕ числиться
+
 # Сколько сбоев ПОДРЯД должен дать прокси, чтобы вылететь из ротации навсегда.
 # Один-два сбоя бывают случайными (таймаут, занятый MX), три подряд — прокси мёртв.
 PROXY_MAX_CONSECUTIVE_FAILS = 3
@@ -270,7 +287,17 @@ EXIT_IP_PROBE_HOST = "gmail-smtp-in.l.google.com"
 PROXY_PROBE_TARGETS = [
     ("Gmail", "gmail-smtp-in.l.google.com"),
     ("Outlook", "outlook-com.olc.protection.outlook.com"),
+    # Yahoo и iCloud добавлены, потому что их пригодность раньше ВЫВОДИЛАСЬ:
+    # у Yahoo — из наличия PTR, у iCloud — из чёрных списков. Обе догадки
+    # неточны ровно по той же причине, по которой понадобилась прямая проба
+    # Microsoft: у каждого из них своя база репутации, и предсказать её
+    # чужими сигналами нельзя. Спросить дешевле, чем угадать.
+    ("Yahoo", "mta5.am0.yahoodns.net"),
+    ("iCloud", "mx01.mail.icloud.com"),
 ]
+
+# Индексы в PROXY_PROBE_TARGETS — чтобы не привязываться к порядку числами
+PROBE_GMAIL, PROBE_OUTLOOK, PROBE_YAHOO, PROBE_ICLOUD = 0, 1, 2, 3
 
 # Имена в PTR, за которые почтовики штрафуют: сервер видит, что письмо идёт
 # через прокси/VPN/Tor или с домашнего динамического адреса.
@@ -326,6 +353,35 @@ _IP_REPUTATION_MARKERS = (
     "spamhaus", "barracuda", "blacklist", "rbl", "dnsbl", "listed in",
     "service unavailable", "5.7.1", "5.7.606", "poor reputation",
 )
+
+
+# Формулировки, по которым видно: отказ ВРЕМЕННЫЙ, даже если код постоянный.
+# Сервер, который в ответе 550 пишет "try again later", противоречит сам себе,
+# и верить в этом споре надо тексту, а не коду: цена ошибки — похороненный лид.
+_TRANSIENT_TEXT_MARKERS = (
+    "temporarily", "temporary", "try again", "try later", "retry",
+    "later", "deferred", "defer", "greylist", "grey list", "throttl",
+    "too busy", "server busy", "overloaded", "over load", "rate limit",
+    "resources temporarily", "not available at this time", "at this time",
+    "come back", "in a few", "currently unavailable",
+)
+
+# Отрицания, при которых упоминание получателя действительно означает,
+# что ящика нет. Без одного из них 550 про «mailbox» ничего не доказывает.
+_RECIPIENT_NEGATIONS = (
+    "no such", "not exist", "doesn't exist", "does not exist", "unknown",
+    "not found", "no longer", "invalid", "rejected", "reject", "disabled",
+    "unavailable", "not available", "cannot", "can not", "can't", "refused",
+    "denied", "no mailbox", "nonexistent", "non-existent", "not accepted",
+    "unrouteable", "unroutable", "undeliverable", "bad ", "illegal",
+)
+
+
+def _looks_transient(reason):
+    """True, если текст ответа говорит о временной проблеме, а не о ящике."""
+    if not isinstance(reason, str) or not reason:
+        return False
+    return any(marker in reason.lower() for marker in _TRANSIENT_TEXT_MARKERS)
 
 
 def _looks_like_ip_reputation(reason):
@@ -518,7 +574,9 @@ def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None,
     def profile_one(proxy):
         empty = {"exit_ip": None, "latency_ms": None, "has_ptr": None,
                  "rdns": None, "rdns_dirty": False, "in_dnsbl": False,
-                 "outlook_ok": None, "outlook_reason": None}
+                 "outlook_ok": None, "outlook_reason": None,
+                 "asn": None, "asn_country": "", "asn_org": "",
+                 "ip_type": "unknown", "yahoo_ok": None, "icloud_ok": None}
 
         ok, latency, exit_ip, reason = probe_proxy_target(
             proxy, EXIT_IP_PROBE_HOST, timeout=timeout, want_exit_ip=True)
@@ -541,17 +599,42 @@ def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None,
         rdns = validator.get_ptr_hostname(exit_ip)
         in_dnsbl = validator.check_dnsbl_ip(exit_ip)
 
+        # ASN, страна и тип адреса. Датацентровый IP фильтры режут заметно
+        # чаще резидентного, а страна нужна, чтобы подбирать прокси под гео
+        # домена получателя. Раньше про выходной IP было известно только то,
+        # числится ли он в чёрных списках.
+        from core.proxy_profile import lookup_ip_meta
+        meta = lookup_ip_meta(exit_ip, timeout=timeout,
+                              proxies=build_proxy_dict(proxy))
+
         outlook_ok = None
         outlook_reason = None
+        yahoo_ok = None
+        icloud_ok = None
         if probe_outlook:
             o_ok, _lat, _ip, o_reason = probe_proxy_target(
-                proxy, PROXY_PROBE_TARGETS[1][1], timeout=timeout)
+                proxy, PROXY_PROBE_TARGETS[PROBE_OUTLOOK][1], timeout=timeout)
             outlook_ok, outlook_reason = o_ok, o_reason
+
+            # Yahoo и iCloud спрашиваем напрямую. Каждая проба — один SMTP-диалог
+            # до MAIL FROM; на старте это окупается тем, что маршрутизация потом
+            # не гоняет письма туда, где их точно не примут.
+            y_ok, _yl, _yi, _yr = probe_proxy_target(
+                proxy, PROXY_PROBE_TARGETS[PROBE_YAHOO][1], timeout=timeout)
+            yahoo_ok = y_ok
+            i_ok, _il, _ii, _ir = probe_proxy_target(
+                proxy, PROXY_PROBE_TARGETS[PROBE_ICLOUD][1], timeout=timeout)
+            icloud_ok = i_ok
 
         return proxy, {"exit_ip": exit_ip, "latency_ms": latency,
                        "has_ptr": has_ptr, "rdns": rdns,
                        "rdns_dirty": is_dirty_rdns(rdns), "in_dnsbl": in_dnsbl,
-                       "outlook_ok": outlook_ok, "outlook_reason": outlook_reason}
+                       "outlook_ok": outlook_ok, "outlook_reason": outlook_reason,
+                       "asn": meta.get("asn"),
+                       "asn_country": meta.get("asn_country", ""),
+                       "asn_org": meta.get("asn_org", ""),
+                       "ip_type": meta.get("ip_type", "unknown"),
+                       "yahoo_ok": yahoo_ok, "icloud_ok": icloud_ok}
 
     # Число потоков приходит из ползунка. Раньше здесь стояло жёсткое 30, и на
     # списке в несколько тысяч прокси профилирование занимало часы: на каждый
@@ -765,6 +848,46 @@ class ProxiedResolver:
         return items
 
 
+# Домен почтовика -> двухбуквенный код страны. Нужен, чтобы сверить страну
+# домена получателя со страной выходного IP прокси (RDAP отдаёт именно код).
+#
+# Своей таблицы стран здесь нет и быть не должно: core/provider.py уже знает
+# страну домена по названию, и держать второй список значило бы обречь их на
+# расхождение. Здесь только перевод названия в код.
+_COUNTRY_TO_CODE = {
+    "Германия": "DE", "Франция": "FR", "Италия": "IT", "Испания": "ES",
+    "Великобритания": "GB", "Нидерланды": "NL", "Бельгия": "BE",
+    "Польша": "PL", "Россия": "RU", "Украина": "UA", "Беларусь": "BY",
+    "Казахстан": "KZ", "Швеция": "SE", "Норвегия": "NO", "Дания": "DK",
+    "Финляндия": "FI", "США": "US", "Канада": "CA", "Австралия": "AU",
+    "Новая Зеландия": "NZ", "Китай": "CN", "Южная Корея": "KR",
+    "Япония": "JP", "Индия": "IN", "Бразилия": "BR", "Мексика": "MX",
+    "Аргентина": "AR", "Чехия": "CZ", "Словакия": "SK", "Венгрия": "HU",
+    "Румыния": "RO", "Болгария": "BG", "Австрия": "AT", "Швейцария": "CH",
+    "Португалия": "PT", "Греция": "GR", "Турция": "TR", "Израиль": "IL",
+    "Ирландия": "IE", "Эстония": "EE", "Латвия": "LV", "Литва": "LT",
+    "ЮАР": "ZA", "ОАЭ": "AE", "Саудовская Аравия": "SA", "Египет": "EG",
+    "Марокко": "MA", "Нигерия": "NG", "Кения": "KE", "Вьетнам": "VN",
+    "Таиланд": "TH", "Индонезия": "ID", "Малайзия": "MY", "Сингапур": "SG",
+    "Филиппины": "PH", "Пакистан": "PK",
+}
+
+
+def country_code_for_domain(domain):
+    """Двухбуквенный код страны домена или пусто, если страна неизвестна.
+
+    Пусто — нормальный и частый исход: у .com и .net страны нет, и подбирать
+    прокси по гео для них не по чему. В этом случае выбор идёт как раньше.
+    """
+    if not isinstance(domain, str) or "." not in domain:
+        return ""
+    try:
+        from core.provider import country_from_domain
+    except Exception:
+        return ""
+    return _COUNTRY_TO_CODE.get(country_from_domain(domain), "")
+
+
 def _generate_random_local(style="short"):
     """Генерирует случайный локальный-адрес для Catch-All теста.
     style='short' — классический (16 символов), style='uuid' — UUID-подобный (п.4 Catch-All)"""
@@ -808,6 +931,11 @@ class NetworkValidator:
         self.catchall_cache = {}
         self.catchall_lock = threading.Lock()
 
+        # Честен ли сервер домена: принимает ли он обязательный по RFC postmaster@.
+        # Спрашивается лениво — только перед тем, как похоронить адрес.
+        self._postmaster_cache = {}
+        self._postmaster_lock = threading.Lock()
+
         # Кэш DNS-здоровья (SPF/DMARC/DKIM) — п.2.2+
         self._dns_health_cache = {}
         self._dns_health_lock = threading.Lock()
@@ -833,6 +961,27 @@ class NetworkValidator:
         # Proxy Health Scoring (п.8): score каждого прокси
         self._proxy_scores = {}
         self._proxy_score_lock = threading.Lock()
+
+        # Лимит ОДНОВРЕМЕННЫХ соединений через один прокси.
+        #
+        # Семафор стоял только на MX. При 300 потоках и пяти живых прокси в
+        # каждый летело по 60 соединений разом — дешёвый SOCKS5 столько не
+        # держит, начинает рвать связь и выглядит мёртвым. Валидатор при этом
+        # банил его за «три сбоя подряд», хотя убил его сам.
+        self._proxy_semaphores = {}
+        self._proxy_sem_lock = threading.Lock()
+        self._max_concurrent_per_proxy = 8
+
+        # Суточная нагрузка на ВЫХОДНОЙ IP, а не на строку прокси: десять
+        # прокси с общим выходом жгут репутацию одного адреса. Счётчик уводит
+        # выбор на менее нагруженный, пока такие есть.
+        self._ip_load = {}
+        self._ip_load_lock = threading.Lock()
+        self._ip_load_soft_cap = 800
+
+        # Свой резолвер для Spamhaus. Пусто — Spamhaus не спрашивается вовсе.
+        self._spamhaus_resolver = None
+        self._spamhaus_ok = None
         # Задержка до баннера, измеренная профилировщиком. Раньше она только
         # логировалась; теперь при равном health score быстрый прокси идёт первым.
         self._proxy_latency = {}
@@ -855,6 +1004,10 @@ class NetworkValidator:
         # Прокси, чей выходной IP числится в чёрных списках: Outlook, iCloud и GMX
         # такие отшивают по репутации, а Gmail и Yandex — принимают
         self._dirty_proxies = set()
+        # Результаты ПРЯМЫХ проб до Yahoo и iCloud (заполняет set_proxy_profiles)
+        self._yahoo_ok = set()
+        self._yahoo_bad = set()
+        self._icloud_bad = set()
         if self.proxies:
             for p in self.proxies:
                 self._proxy_scores[p] = 0  # Начальный score = 0
@@ -862,6 +1015,121 @@ class NetworkValidator:
 
         # Случайный HELO-хост для этой сессии (выглядит как настоящий почтовый сервер)
         self.helo_name = random.choice(LEGIT_HELO_NAMES)
+
+    def proxy_slot(self, proxy):
+        """Семафор конкретного прокси. Держит число соединений в пределах лимита."""
+        if not proxy:
+            return None
+        with self._proxy_sem_lock:
+            slot = self._proxy_semaphores.get(proxy)
+            if slot is None:
+                slot = threading.Semaphore(self._max_concurrent_per_proxy)
+                self._proxy_semaphores[proxy] = slot
+            return slot
+
+    def set_proxy_concurrency(self, limit):
+        """Сколько соединений разрешено держать через один прокси одновременно.
+
+        Уже созданные семафоры не пересоздаём: менять лимит под работающими
+        потоками значит выпустить больше, чем разрешено, ровно один раз.
+        """
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            return self._max_concurrent_per_proxy
+        self._max_concurrent_per_proxy = max(1, min(limit, 64))
+        return self._max_concurrent_per_proxy
+
+    def note_ip_use(self, proxy, count=1):
+        """Отмечает обращение через выходной IP этого прокси."""
+        exit_ip = (self._proxy_profiles.get(proxy) or {}).get("exit_ip")
+        key = exit_ip or proxy
+        with self._ip_load_lock:
+            self._ip_load[key] = self._ip_load.get(key, 0) + int(count)
+            return self._ip_load[key]
+
+    def ip_load(self, proxy):
+        """Сколько обращений уже ушло через выходной IP этого прокси."""
+        exit_ip = (self._proxy_profiles.get(proxy) or {}).get("exit_ip")
+        key = exit_ip or proxy
+        with self._ip_load_lock:
+            return self._ip_load.get(key, 0)
+
+    def overloaded_ips(self):
+        """Выходные IP, перешагнувшие мягкий потолок суточной нагрузки."""
+        with self._ip_load_lock:
+            return {ip: n for ip, n in self._ip_load.items()
+                    if n >= self._ip_load_soft_cap}
+
+    def set_spamhaus_resolver(self, nameservers):
+        """Задаёт СВОЙ резолвер для Spamhaus и проверяет его санити-контрактом.
+
+        Без такого резолвера Spamhaus не спрашивается: с публичного DNS он
+        отвечает отказом, а отказ, принятый за чистоту, снял бы штраф с
+        реально грязного IP. Возвращает True, если зона прошла контракт.
+        """
+        if not nameservers:
+            self._spamhaus_resolver = None
+            self._spamhaus_ok = None
+            return False
+
+        resolver = ProxiedResolver(
+            nameservers=list(nameservers), timeout=self.timeout,
+            proxy_provider=self._dns_proxy)
+
+        def listed(reversed_ip):
+            """True — числится, False — точно не числится, None — не спросили.
+
+            NXDOMAIN и пустой ответ — это ОТВЕТ зоны «такого IP в списке нет»,
+            а не сбой. Схлопывать их в None нельзя: тогда контрольная чистая
+            запись никогда не даёт False, и санити-контракт не проходит даже
+            у полностью исправного резолвера — то есть Spamhaus не включается
+            вообще. Сбоем считается только то, что помешало спросить.
+            """
+            try:
+                answers = resolver.resolve(f"{reversed_ip}.{SPAMHAUS_ZONE}", 'A')
+            except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+                return False
+            except Exception:
+                return None
+            for rdata in answers:
+                code = rdata.to_text()
+                if code.startswith('127.0.0.') or code.startswith('127.0.1.'):
+                    return True
+            return False
+
+        must_be_listed = listed(SPAMHAUS_SANITY_LISTED)
+        must_be_clean = listed(SPAMHAUS_SANITY_CLEAN)
+
+        # Контракт: тестовая запись обязана числиться, чистая — нет.
+        # Любой другой исход означает, что зона нам не отвечает как надо.
+        self._spamhaus_ok = (must_be_listed is True and must_be_clean is False)
+        self._spamhaus_resolver = resolver if self._spamhaus_ok else None
+        return bool(self._spamhaus_ok)
+
+    def _spamhaus_lists(self, ip):
+        """True/False по Spamhaus, None — не спрашивали или не смогли.
+
+        None принципиально отличается от False: «не спросили» не означает
+        «чисто», и наверх уходит именно неизвестность.
+        """
+        if not self._spamhaus_resolver or not self._spamhaus_ok:
+            return None
+        reversed_ip = '.'.join(reversed(ip.split('.')))
+        try:
+            answers = self._spamhaus_resolver.resolve(
+                f"{reversed_ip}.{SPAMHAUS_ZONE}", 'A')
+        # NoAnswer здесь по той же причине, что и в санити-контракте выше:
+        # зона ответила «записи нет», то есть IP в ней не числится.
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            return False
+        except Exception:
+            return None
+        for rdata in answers:
+            code = rdata.to_text()
+            if code.startswith('127.0.0.') or code.startswith('127.0.1.'):
+                return True
+        return False
 
     def _get_mx_semaphore(self, mx_host: str) -> threading.Semaphore:
         """Возвращает семафор для конкретного MX-хоста (п.3.3 Rate Limiting + adaptive)."""
@@ -937,6 +1205,15 @@ class NetworkValidator:
                 or v.get("rdns_dirty")               # имя в PTR выдаёт прокси/VPN
             }
 
+            # Прямые пробы Yahoo и iCloud. Раньше их пригодность выводилась —
+            # у Yahoo из PTR, у iCloud из чёрных списков. Теперь она измерена,
+            # и измеренное сильнее выведенного: прокси, которого Yahoo отверг
+            # на MAIL FROM, в пул Yahoo не попадает, даже если PTR у него есть.
+            self._yahoo_ok = {p for p, v in profiles.items() if v.get("yahoo_ok") is True}
+            self._yahoo_bad = {p for p, v in profiles.items() if v.get("yahoo_ok") is False}
+            self._icloud_bad = {p for p, v in profiles.items() if v.get("icloud_ok") is False}
+            self._dirty_proxies |= self._icloud_bad
+
     def refresh_proxy_profiles(self, timeout=10, workers=30):
         """Переснимает профиль живых прокси и возвращает, что изменилось.
 
@@ -1000,24 +1277,67 @@ class NetworkValidator:
             return None
         return self._pick_best_proxy() or ""
 
-    def _choose_from(self, candidates):
-        """Берёт случайный из топа: сначала health score, при равном — скорость.
+    def _proxy_country(self, proxy):
+        """Двухбуквенный код страны выходного IP или пусто."""
+        return ((self._proxy_profiles.get(proxy) or {}).get("asn_country") or "").upper()
 
-        Задержку меряет профилировщик. Она важнее, чем кажется: на один адрес
-        приходится до 15 попыток, и лишние 800 мс на попытку превращаются
-        в лишние 12 секунд на адресе.
+    def _choose_from(self, candidates, want_country=""):
+        """Берёт случайный из топа.
+
+        Порядок: сначала health score, потом совпадение страны с доменом
+        получателя, потом скорость, потом нагрузка на выходной IP.
+
+        Про страну. Почтовики смотрят, откуда пришло письмо: проверять
+        немецкий домен через бразильский адрес — лишний повод для отказа.
+        Совпадение стоит ниже health score осознанно: мёртвый прокси из
+        нужной страны бесполезнее живого из соседней.
+
+        Про нагрузку. Считается по ВЫХОДНОМУ IP: десять прокси с общим
+        выходом жгут репутацию одного адреса, и при прочих равных выбор
+        уходит на менее нагруженный.
         """
         if not candidates or not hasattr(candidates, "__iter__"):
             return None
-        ranked = sorted(
-            candidates,
-            key=lambda p: (-self._proxy_scores.get(p, 0),
-                           self._proxy_latency.get(p) or UNKNOWN_LATENCY_MS),
-        )
-        top = ranked[:max(5, len(ranked) // 3)]
-        return random.choice(top)
+        want = (want_country or "").upper()
 
-    def _pick_best_proxy(self, need_ptr=False, need_clean=False):
+        def primary(proxy):
+            """Ключи, по которым уступать нельзя: здоровье и страна."""
+            return (-self._proxy_scores.get(proxy, 0),
+                    0 if (want and self._proxy_country(proxy) == want) else 1)
+
+        def secondary(proxy):
+            """Ключи, по которым разброс допустим: скорость и нагрузка."""
+            return (self._proxy_latency.get(proxy) or UNKNOWN_LATENCY_MS,
+                    self.ip_load(proxy))
+
+        candidates = list(candidates)
+        if not candidates:
+            return None
+
+        # Случайность нужна, чтобы не бить одним прокси в один сервер, но она
+        # не имеет права отменять предпочтение. Раньше здесь брались первые
+        # пять по рангу и выбирался случайный из них — и на пуле из двух
+        # прокси «первые пять» это ВЕСЬ пул, то есть ранжирование не работало
+        # вовсе: прокси нужной страны выигрывал сортировку и тут же проигрывал
+        # монетке. Теперь разброс идёт ТОЛЬКО среди равных по здоровью и стране.
+        best = min(primary(p) for p in candidates)
+        equals = [p for p in candidates if primary(p) == best]
+
+        equals.sort(key=secondary)
+
+        # Отсечение по трети остаётся жёстким: заведомо медленные прокси не
+        # должны получать шанс вообще, иначе прогон растягивается на них же.
+        top = equals[:max(5, len(equals) // 3)]
+
+        # А вот ВНУТРИ среза раньше стоял равновероятный выбор, и на маленьком
+        # пуле это обнуляло ранжирование: «первые пять» из двух прокси — оба,
+        # то есть быстрый ненагруженный решался монеткой наравне с медленным
+        # перегруженным. Вес по месту в ранге чинит именно это, не трогая
+        # отсечение: лучший берётся чаще, но разброс внутри среза сохраняется.
+        weights = [1.0 / (rank + 1) for rank in range(len(top))]
+        return random.choices(top, weights=weights, k=1)[0]
+
+    def _pick_best_proxy(self, need_ptr=False, need_clean=False, want_country=""):
         """Выбирает живой прокси с наивысшим health score (п.8).
 
         need_ptr=True  — только прокси с обратным DNS (для Yahoo/AOL/Verizon).
@@ -1043,7 +1363,7 @@ class NetworkValidator:
             # не находилось, вся логика need_ptr обходилась: для Yahoo выбирался
             # прокси с ТОЧНО отсутствующим PTR — гарантированный холостой ход.
             if not self._profiled:
-                return self._choose_from(alive)
+                return self._choose_from(alive, want_country)
 
             with_ptr = [p for p in alive if p in self._ptr_proxies]
             without_ptr = [p for p in alive if p not in self._ptr_proxies]
@@ -1053,9 +1373,19 @@ class NetworkValidator:
                 # проверить не удалось. Прокси с ТОЧНО отсутствующим PTR не берём
                 # никогда: Yahoo отошьёт их на MAIL FROM, это гарантированный холостой ход.
                 pool = with_ptr or [p for p in alive if p in self._ptr_unknown]
+                # Прямая проба перевешивает вывод по PTR в обе стороны:
+                # подтверждённо принятые идут первыми, подтверждённо
+                # отвергнутые выбывают, даже если PTR у них в порядке.
+                if self._yahoo_ok:
+                    measured = [p for p in pool if p in self._yahoo_ok]
+                    extra = [p for p in alive
+                             if p in self._yahoo_ok and p not in pool]
+                    pool = measured + extra or pool
+                if self._yahoo_bad:
+                    pool = [p for p in pool if p not in self._yahoo_bad] or pool
                 if need_clean:
                     pool = [p for p in pool if p not in self._dirty_proxies] or pool
-                return self._choose_from(pool) if pool else None
+                return self._choose_from(pool, want_country) if pool else None
 
             # Бережём PTR-прокси: для обычных доменов они не нужны
             pool = without_ptr or with_ptr
@@ -1063,7 +1393,7 @@ class NetworkValidator:
                 # Outlook/iCloud/GMX режут по репутации — берём только чистые.
                 # Если чистых не осталось, идём грязными: лучше попытка, чем ничего.
                 pool = [p for p in pool if p not in self._dirty_proxies] or pool
-            return self._choose_from(pool)
+            return self._choose_from(pool, want_country)
 
     def has_proxies_configured(self):
         """True, если пользователь загрузил прокси (независимо от того, живы ли они)."""
@@ -1140,6 +1470,14 @@ class NetworkValidator:
         with self._dnsbl_lock:
             if ip in self._dnsbl_cache:
                 return self._dnsbl_cache[ip]
+
+        # Spamhaus спрашиваем первым: он крупнейший, и положительный ответ
+        # избавляет от опроса остальных семи зон.
+        spamhaus = self._spamhaus_lists(ip)
+        if spamhaus is True:
+            with self._dnsbl_lock:
+                self._dnsbl_cache[ip] = True
+            return True
 
         result = False
         unreachable = 0
@@ -1565,6 +1903,14 @@ class NetworkValidator:
                                        "dmarc", "dkim", "helo", "ehlo", "authentication",
                                        "not authorized", "access denied"]):
                 return make_result("unknown", "550 Sender/Relay Rejected (Email May Exist)")
+            # 550 с временной формулировкой сам себе противоречит: код постоянный,
+            # а текст говорит «приходи позже». Такое пишут перегруженные и
+            # неверно настроенные серверы, и ящик за этим обычно живой.
+            # Проверка стоит ВЫШЕ разбора текста: без неё "550 5.2.1 mailbox
+            # temporarily unavailable" попадал в общую ветку по слову "mailbox"
+            # и хоронил живой ящик.
+            if _looks_transient(msg):
+                return make_result("risky", "550 Временный отказ с постоянным кодом (ящик не проверен)")
             # Однозначно мёртв — ящик не существует
             if any(x in msg for x in ["does not exist", "not exist", "no such user",
                                        "invalid address", "user unknown", "unknown user",
@@ -1580,9 +1926,16 @@ class NetworkValidator:
             if any(x in msg for x in ["disabled", "deactivated", "suspended", "frozen",
                                        "locked", "closed", "inactive account"]):
                 return make_result("risky", "550 Account Disabled/Suspended")
-            # Явно про получателя, но без узнаваемой формулировки — считаем мёртвым
+            # Про получателя — но хоронить можно только при явном отрицании.
+            #
+            # Раньше здесь стояло просто «упомянут recipient/mailbox/user/address ->
+            # invalid». Под это попадало всё подряд: "mailbox is full at this time",
+            # "user busy", "address deferred". Слово о получателе само по себе
+            # ничего не доказывает — доказывает ОТРИЦАНИЕ рядом с ним.
             if any(x in msg for x in ["recipient", "mailbox", "user", "address"]):
-                return make_result("invalid", "550 Recipient Rejected")
+                if any(neg in msg for neg in _RECIPIENT_NEGATIONS):
+                    return make_result("invalid", "550 Recipient Rejected")
+                return make_result("risky", "550 Упомянут получатель без явного отрицания (не доказано)")
             # Голый "550 Rejected" без объяснений — НЕ доказательство смерти ящика.
             # Через прокси это чаще всего отказ по IP/отправителю, поэтому не хороним лид.
             return make_result("risky", "550 Rejected (Ambiguous)")
@@ -1643,10 +1996,16 @@ class NetworkValidator:
 
         return make_result("unknown", f"{code} Unknown Response")
 
-    def _do_single_ping(self, email, mx_record, proxy=None, from_email=None):
+    def _do_single_ping(self, email, mx_record, proxy=None, from_email=None,
+                        control_probe=False):
         """
         Делает один SMTP-пинг к серверу с Rate Limiting + adaptive (п.3.3+п.5).
         Возвращает {'status': ..., 'reason': ...}
+
+        control_probe=True добавляет второй RCPT с выдуманным адресом в ТОЙ ЖЕ
+        сессии, если первый вернул 250. Это ловит catch-all, который отдельная
+        тройная проба пропустила (она могла сорваться на прокси, и её неудача
+        читается как «не catch-all»). Лишних подключений при этом ноль.
         """
         # ЗАЩИТА ОТ УТЕЧКИ IP: если пользователь загрузил прокси, но все они выбыли,
         # НЕЛЬЗЯ молча ходить напрямую — это раскроет реальный IP. Честно сообщаем.
@@ -1658,13 +2017,30 @@ class NetworkValidator:
         domain = email.split("@")[1].lower() if "@" in email else ""
         server = None
 
+        # Пауза перед запросом. Растёт, если этот сервер уже отвечал 421.
+        #
+        # Спим ДО захвата семафора, а не после. Раньше было наоборот, и слот
+        # параллельности простаивал всё время сна: при back-off до 8 секунд и
+        # пяти слотах на MX это резало пропускную способность к серверу до
+        # пяти запросов за восемь секунд. Пауза при этом никуда не делась —
+        # каждый поток по-прежнему выдерживает свою, — но ждёт он в стороне,
+        # не занимая очередь.
+        time.sleep(self._mx_delay(mx_record))
+
         # Rate Limiting: ждём своей очереди к этому MX-серверу (п.3.3)
         sem = self._get_mx_semaphore(mx_record)
         sem.acquire()
 
+        # И к самому прокси: без этого при 300 потоках и пяти прокси в каждый
+        # летело по 60 соединений, дешёвый SOCKS5 рвал связь и получал бан
+        # за сбои, которых сам не совершал.
+        slot = self.proxy_slot(proxy)
+        if slot is not None:
+            slot.acquire()
+
         try:
-            # Пауза перед запросом. Растёт, если этот сервер уже отвечал 421.
-            time.sleep(self._mx_delay(mx_record))
+            # Обращение через выходной IP — считаем нагрузку на его репутацию
+            self.note_ip_use(proxy)
 
             server = self._make_smtp_connection(proxy)
             banner_code, banner_msg = server.connect(mx_record, 25)
@@ -1720,7 +2096,36 @@ class NetworkValidator:
             code, message = server.rcpt(email)
 
             result = self._parse_smtp_response(code, message, email, domain)
-            
+
+            # Контрольный RCPT в ТОЙ ЖЕ сессии.
+            #
+            # Сервер ответил 250 — но это ничего не значит, если он отвечает 250
+            # на что угодно. Тройная проба catch-all делается ОТДЕЛЬНЫМ
+            # подключением и до этого момента могла сорваться на прокси, а её
+            # неудача трактуется как «не catch-all». Здесь мы спрашиваем прямо
+            # в открытой сессии: соединение уже установлено, MAIL FROM принят,
+            # и лишняя команда RCPT стоит одного пакета.
+            #
+            # Оба 250 — домен принимает любой адрес, и Valid ничего не доказывает.
+            if control_probe and result["status"] == "valid" and domain:
+                fake = f"{_generate_random_local('uuid')}@{domain}"
+                try:
+                    ctl_code, _ctl_msg = server.rcpt(fake)
+                except Exception:
+                    ctl_code = None
+                if ctl_code is not None and 200 <= ctl_code < 300:
+                    result["status"] = "catchall"
+                    result["reason"] = ("Catch-All: сервер принял и выдуманный адрес "
+                                        "в той же сессии")
+                    with self.catchall_lock:
+                        self.catchall_cache[domain] = True
+                elif ctl_code is not None and ctl_code >= 500:
+                    # Выдуманный адрес отвергнут — сервер отвечает честно, и
+                    # 250 на реальный адрес это подтверждённый живой ящик.
+                    with self.catchall_lock:
+                        self.catchall_cache.setdefault(domain, False)
+                    result["control_rcpt"] = "rejected"
+
             # Добавляем информацию о баннере для Engagement Score
             result["smtp_banner"] = banner_text
             result["server_outdated"] = self._is_server_outdated(banner_text)
@@ -1753,6 +2158,8 @@ class NetworkValidator:
             return {"status": "unknown", "reason": f"Error: {str(e)[:50]}"}
         finally:
             sem.release()  # Освобождаем слот для следующего потока
+            if slot is not None:
+                slot.release()
             if server:
                 try:
                     server.quit()
@@ -1779,10 +2186,12 @@ class NetworkValidator:
         results = []
         server = None
 
+        # Та же причина, что и в _do_single_ping: сон не должен занимать слот.
+        time.sleep(self._mx_delay(mx_record))
+
         sem = self._get_mx_semaphore(mx_record)
         sem.acquire()
         try:
-            time.sleep(self._mx_delay(mx_record))
             server = self._make_smtp_connection(proxy)
             server.connect(mx_record, 25)
             try:
@@ -1822,6 +2231,45 @@ class NetworkValidator:
             results.append({"status": "unknown", "reason": "Сессия оборвалась"})
         return results
 
+    def postmaster_is_honored(self, domain, mx_record):
+        """Принимает ли сервер postmaster@ — то есть можно ли верить его 550.
+
+        RFC 5321 §4.5.1 обязывает каждый принимающий почту домен обслуживать
+        адрес postmaster@. Сервер, который отвечает на него 550, нарушает
+        обязательный пункт стандарта — и его отказ РЕАЛЬНОМУ адресу после
+        этого не доказывает ничего: так же он отвечает всем подряд.
+
+        True  — postmaster принят, вердиктам сервера можно верить
+        False — postmaster отвергнут, 550 этого сервера ничего не значит
+        None  — спросить не удалось (в этом случае поведение прежнее)
+
+        Стоит одной сессии на домен и кэшируется. Спрашиваем только перед тем,
+        как похоронить адрес: на остальных путях это лишняя трата.
+        """
+        if not domain:
+            return None
+        with self._postmaster_lock:
+            if domain in self._postmaster_cache:
+                return self._postmaster_cache[domain]
+
+        results = self._probe_recipients([f"postmaster@{domain}"], mx_record,
+                                         proxy=self._pick_best_proxy())
+        if not results:
+            return None
+        status = results[0].get("status")
+        if status in ("valid", "catchall"):
+            verdict = True
+        elif status == "invalid":
+            verdict = False
+        else:
+            # Таймаут, мёртвый прокси, отказ по репутации — вывода нет.
+            # Не кэшируем: иначе один сбой навсегда лишил бы домен проверки.
+            return None
+
+        with self._postmaster_lock:
+            self._postmaster_cache[domain] = verdict
+        return verdict
+
     def is_catch_all_domain(self, domain, mx_record) -> bool:
         """
         Проверяет, является ли домен Catch-All (принимает любой адрес).
@@ -1854,10 +2302,14 @@ class NetworkValidator:
             self.catchall_cache[domain] = True
         return True
 
-    def stealth_smtp_ping(self, email: str, mx_records: list) -> dict:
+    def stealth_smtp_ping(self, email: str, mx_records: list,
+                          control_probe=False) -> dict:
         """
         Умный SMTP-пинг с повторными попытками, мульти-MX фоллбэком (п.3.1),
         и кастомной логикой для проблемных почтовиков.
+
+        control_probe пробрасывается в _do_single_ping: при 250 на реальный
+        адрес в той же сессии проверяется выдуманный. См. там же почему.
         """
         domain = email.split("@")[1].lower() if "@" in email else ""
 
@@ -1866,6 +2318,10 @@ class NetworkValidator:
         # для них берём только PTR-прокси, а остальным доменам PTR не нужен.
         needs_ptr = domain in YAHOO_DOMAINS or domain in AOL_DOMAINS
         needs_clean = domain in NEEDS_CLEAN_IP_DOMAINS
+
+        # Страна домена получателя: при прочих равных берём прокси оттуда же.
+        # Проверять web.de через бразильский адрес — лишний повод для отказа.
+        want_country = country_code_for_domain(domain)
         if needs_ptr and self.proxies and self._ptr_proxies and not self.has_ptr_proxies():
             return {
                 "status": "unknown",
@@ -1905,8 +2361,11 @@ class NetworkValidator:
                     }
                     break
 
-                proxy = self._pick_best_proxy(need_ptr=needs_ptr, need_clean=needs_clean)
-                result = self._do_single_ping(email, mx_record, proxy=proxy)
+                proxy = self._pick_best_proxy(need_ptr=needs_ptr,
+                                              need_clean=needs_clean,
+                                              want_country=want_country)
+                result = self._do_single_ping(email, mx_record, proxy=proxy,
+                                              control_probe=control_probe)
 
                 # Если получили однозначный ответ — возвращаем сразу
                 if result["status"] in ("valid", "invalid"):
@@ -2019,8 +2478,27 @@ class NetworkValidator:
                 result["mx_records"] = mx_records
                 return result
 
-        # Шаг 4: Обычный Stealth SMTP Ping (с мульти-MX — п.3.1)
-        result = self.stealth_smtp_ping(probe_email, mx_records)
+        # Шаг 4: Обычный Stealth SMTP Ping (с мульти-MX — п.3.1).
+        #
+        # control_probe включаем ровно там, где тройная проба могла соврать:
+        # у гигантов catch-all исключён по определению, а на обычном домене
+        # её отрицательный ответ мог быть просто сорвавшейся пробой.
+        result = self.stealth_smtp_ping(probe_email, mx_records,
+                                        control_probe=not skip_catchall)
+
+        # Шаг 4.5: сервер, отвергающий postmaster@, теряет право хоронить адрес.
+        #
+        # Проверяем ТОЛЬКО перед вердиктом invalid: это одна лишняя сессия на
+        # домен, и тратить её на живые адреса незачем. Если сервер нарушает
+        # обязательный пункт RFC 5321 §4.5.1, его "550 user unknown" — это не
+        # доказательство отсутствия ящика, а привычка отвечать всем одинаково.
+        if result["status"] == "invalid":
+            honored = self.postmaster_is_honored(domain, primary_mx)
+            if honored is False:
+                result["status"] = "risky"
+                result["reason"] = ("550, но сервер отвергает и обязательный "
+                                    "postmaster@ — его отказам верить нельзя")
+                result["postmaster_honored"] = False
 
         # Шаг 5: DNS-здоровье как бонус (п.2.2 + DKIM)
         # Если SMTP дал unknown, но DNS показывает здоровый домен — помечаем как Risky (не Unknown)

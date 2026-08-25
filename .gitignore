@@ -20,3 +20,12 @@ data/validation_cache.sqlite-shm
 .unlazy/
 .unlazy-hook-state.json
 .claude/settings.local.json
+
+# Состояние прогона: дедуп, журнал сделанного и очередь повторов. Внутри —
+# ключи адресов твоей базы, и это локальное состояние одной машины.
+data/run_state.sqlite
+data/run_state.sqlite-wal
+data/run_state.sqlite-shm
+
+# Откалиброванные веса скоринга: результат ТВОЕЙ рассылки, не общий код.
+data/scoring_weights.json
