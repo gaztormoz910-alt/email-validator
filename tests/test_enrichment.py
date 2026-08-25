@@ -121,14 +121,32 @@ class TestCountryByNameThreshold(unittest.TestCase):
         if not self.ml.nd:
             self.skipTest("names_dataset не установлен")
 
-    def test_smeared_distribution_gives_nothing(self):
-        # Ivan: Italy 0.235 при Mexico 0.135 — это шум, а не знание
-        for name in ["Ivan", "Bogdan", "Aiko"]:
-            with self.subTest(name=name):
-                self.assertEqual(self.ml.predict_country(name), "")
-
     def test_confident_distribution_passes(self):
         self.assertEqual(self.ml.predict_country("Svetlana"), "Россия")
+
+    def test_weak_distribution_is_still_answered_by_owner_choice(self):
+        """Пороги обнулены по решению владельца — колонка заполняется всегда.
+
+        Замерено на 1600 частых именах: верно 65.6%, неверно 34.4%, пусто 0%.
+        Ivan и Bogdan теперь получают Италию, и это НЕ баг, а принятая цена
+        полного заполнения. Защита от неё одна и она обязана работать:
+        источник помечается как `имя`, а домен по-прежнему решает первым
+        (см. TestPipelineCountryPriority).
+        """
+        for name in ["Ivan", "Bogdan", "Aiko"]:
+            with self.subTest(name=name):
+                self.assertTrue(self.ml.predict_country(name))
+
+    def test_strict_mode_is_one_line_away(self):
+        """Строгий режим обязан включаться порогами, а не переписыванием кода."""
+        import core.parser.ml_predictor as mp
+        old_share, old_ratio = mp.NAME_COUNTRY_MIN_SHARE, mp.NAME_COUNTRY_MIN_RATIO
+        try:
+            mp.NAME_COUNTRY_MIN_SHARE, mp.NAME_COUNTRY_MIN_RATIO = 0.35, 2.0
+            self.assertEqual(self.ml.predict_country("Bogdan"), "")
+            self.assertEqual(self.ml.predict_country("Svetlana"), "Россия")
+        finally:
+            mp.NAME_COUNTRY_MIN_SHARE, mp.NAME_COUNTRY_MIN_RATIO = old_share, old_ratio
 
     def test_translit_spelling_is_found(self):
         self.assertEqual(self.ml.predict_country("Dmitriy"), "Россия")
@@ -149,8 +167,10 @@ class TestCountryByNameThreshold(unittest.TestCase):
         На живых именах они перекрываются: у Ivan и доля мала, и отрыва нет,
         поэтому отключение любого из них поодиночке ничего не меняет. Чтобы
         каждый порог действительно что-то сторожил, распределение задаётся
-        руками.
+        руками. Проверяется СТРОГИЙ режим — он должен оставаться рабочим,
+        даже когда по умолчанию пороги сняты.
         """
+        import core.parser.ml_predictor as mp
         cases = [
             # (доля лидера, доля второго, ждём ли страну)
             (0.90, 0.05, True),    # и крупный, и оторвался
@@ -160,12 +180,17 @@ class TestCountryByNameThreshold(unittest.TestCase):
             (0.36, 0.10, True),    # ровно по обоим условиям
             (0.34, 0.10, False),   # на волос ниже границы доли
         ]
-        for share, second, expected in cases:
-            with self.subTest(share=share, second=second):
-                self.ml.country_distribution = (
-                    lambda name, s=share, r=second: ("Russian Federation", s, r))
-                got = bool(self.ml.predict_country("Тест"))
-                self.assertEqual(got, expected)
+        old_share, old_ratio = mp.NAME_COUNTRY_MIN_SHARE, mp.NAME_COUNTRY_MIN_RATIO
+        try:
+            mp.NAME_COUNTRY_MIN_SHARE, mp.NAME_COUNTRY_MIN_RATIO = 0.35, 2.0
+            for share, second, expected in cases:
+                with self.subTest(share=share, second=second):
+                    self.ml.country_distribution = (
+                        lambda name, s=share, r=second: ("Russian Federation", s, r))
+                    got = bool(self.ml.predict_country("Тест"))
+                    self.assertEqual(got, expected)
+        finally:
+            mp.NAME_COUNTRY_MIN_SHARE, mp.NAME_COUNTRY_MIN_RATIO = old_share, old_ratio
 
 
 class TestBirthYear(unittest.TestCase):
