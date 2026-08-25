@@ -43,9 +43,44 @@ _GENDER_COUNTRY = {
 # Порядок источников при этом НЕ менялся: домен по-прежнему решает там, где
 # знает, и имя спрашивается только при его молчании (.com, .net и подобные).
 #
-# Вернуть строгий режим — поставить 0.35 и 2.0 обратно.
-NAME_COUNTRY_MIN_SHARE = 0.0
-NAME_COUNTRY_MIN_RATIO = 0.0
+# РЕЖИМ ВЫБИРАЕТСЯ ИЗ ИНТЕРФЕЙСА, а не правкой этого файла. Раньше смена
+# режима означала редактирование исходника — то есть на практике режим был
+# один и навсегда. Теперь их два, и переключатель лежит в боковой панели.
+COUNTRY_MODES = {
+    # Заполненность: колонка заполняется почти всегда, примерно каждая третья
+    # страна — выдумка. Отличить её можно только по country_source == "имя".
+    "coverage": (0.0, 0.0),
+    # Точность: слабое распределение отбрасывается. Замерено на 1600 именах —
+    # верно 49.6%, пусто 41.7%, неверно 8.8% против 65.6/0/34.4 в "coverage".
+    "accuracy": (0.35, 2.0),
+}
+
+DEFAULT_COUNTRY_MODE = "coverage"
+
+NAME_COUNTRY_MIN_SHARE, NAME_COUNTRY_MIN_RATIO = COUNTRY_MODES[DEFAULT_COUNTRY_MODE]
+
+_country_mode = DEFAULT_COUNTRY_MODE
+
+
+def set_country_mode(mode):
+    """Переключает строгость определения страны по имени. Возвращает имя режима.
+
+    Глобальная настройка, а не параметр вызова: предиктор создаётся внутри
+    пайплайна, и протаскивать флаг через пять слоёв ради одной галочки —
+    лишняя связанность. Неизвестное имя режима игнорируется: молча сменить
+    поведение на противоположное хуже, чем не сменить его вовсе.
+    """
+    global NAME_COUNTRY_MIN_SHARE, NAME_COUNTRY_MIN_RATIO, _country_mode
+    if mode not in COUNTRY_MODES:
+        return _country_mode
+    _country_mode = mode
+    NAME_COUNTRY_MIN_SHARE, NAME_COUNTRY_MIN_RATIO = COUNTRY_MODES[mode]
+    return _country_mode
+
+
+def get_country_mode():
+    """Текущий режим определения страны по имени."""
+    return _country_mode
 
 
 _COUNTRY_RU = {
@@ -238,6 +273,10 @@ class MLPredictor:
         leader, share, second = self.country_distribution(name)
         if not leader:
             return ""
+        # Пороги читаются из глобальных констант модуля НА КАЖДОМ вызове.
+        # set_country_mode() присваивает именно их, поэтому переключатель в
+        # интерфейсе и прямая правка константы работают одинаково — и то и
+        # другое видно предиктору сразу.
         if NAME_COUNTRY_MIN_SHARE and share < NAME_COUNTRY_MIN_SHARE:
             return ""
         if NAME_COUNTRY_MIN_RATIO and second and share < second * NAME_COUNTRY_MIN_RATIO:
