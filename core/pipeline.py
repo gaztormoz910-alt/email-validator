@@ -146,11 +146,24 @@ class ValidationPipeline:
     def _fetch_domain_age(self, domain):
         proxies = self._http_proxies()
         try:
-            # Библиотека whois ходит по 43 порту напрямую и прокси не умеет.
-            # Когда прокси заданы, пропускаем её и идём сразу в RDAP по HTTPS,
-            # который проксируется. Иначе IP утекает регистратору домена.
+            # Библиотека whois ходит по 43 порту голым сокетом и прокси не
+            # умеет. Раньше при заданных прокси её просто пропускали, и возраст
+            # домена оставался только за RDAP. Теперь тот же протокол говорится
+            # вручную через SOCKS: утечки нет, а данные есть.
             if proxies:
-                raise RuntimeError("whois не проксируется — используем RDAP")
+                from core.network import whois_creation_date
+                proxy_line = self.network._pick_best_proxy() if self.network else None
+                if proxy_line:
+                    stamp = whois_creation_date(domain, proxy=proxy_line,
+                                                timeout=10)
+                    if stamp:
+                        dt = datetime.datetime.fromisoformat(
+                            stamp.replace("Z", "+00:00").rstrip("."))
+                        age = (_utc_now() - _as_utc(dt)).days
+                        with self._domain_age_lock:
+                            self._domain_age_cache[domain] = age
+                        return age
+                raise RuntimeError("WHOIS через прокси не ответил — идём в RDAP")
             import whois
             w = whois.whois(domain)
             creation = w.creation_date
@@ -491,21 +504,25 @@ class ValidationPipeline:
 
         proxy_profiles = {}
         if proxies:
-            from core.network import filter_live_proxies, dedupe_proxies
-            # Один прокси, записанный дважды, проверялся бы дважды и занимал
-            # два места в ротации — сначала схлопываем повторы.
-            before = len(proxies)
-            proxies = dedupe_proxies(proxies)
-            if before != len(proxies):
-                self.callbacks['on_log'](
-                    f"[INFO] Убрано повторов в списке прокси: {before - len(proxies)} "
-                    f"(осталось {len(proxies)}).", "info")
-            self.callbacks['on_log'](f"[INFO] Тестирование {len(proxies)} прокси-серверов (потоков: {threads}, таймаут: {timeout}с)...", "info")
+            from core.network import filter_live_proxies, dedupe_proxies_stream
+            # Прокси приходят ЛЕНИВО: на входе может быть и список, и генератор
+            # из файла в миллионы строк. Длину заранее не спрашиваем — это
+            # прочитало бы весь вход в память ради одного числа.
+            #
+            # Повторы схлопываются по ходу чтения: один прокси, записанный
+            # дважды, проверялся бы дважды и занимал два места в ротации.
+            proxies = dedupe_proxies_stream(proxies)
+            self.callbacks['on_log'](
+                f"[INFO] Тестирование прокси-серверов потоком "
+                f"(потоков: {threads}, таймаут: {timeout}с)...", "info")
             # Теперь таймаут строго подчиняется твоему ползунку (никаких ограничений!)
-            live_proxies = filter_live_proxies(proxies, timeout=timeout, threads=threads, progress_callback=self.callbacks['on_progress'], log_callback=self.callbacks.get('on_log'))
-            self.callbacks['on_log'](f"[INFO] Проверка завершена. Найдено рабочих прокси: {len(live_proxies)} из {len(proxies)}.", "info")
+            live_proxies, total_seen = filter_live_proxies(
+                proxies, timeout=timeout, threads=threads,
+                progress_callback=self.callbacks['on_progress'],
+                log_callback=self.callbacks.get('on_log'))
+            self.callbacks['on_log'](f"[INFO] Проверка завершена. Найдено рабочих прокси: {len(live_proxies)} из {total_seen}.", "info")
             if 'on_proxies_tested' in self.callbacks:
-                self.callbacks['on_proxies_tested'](len(live_proxies), len(proxies))
+                self.callbacks['on_proxies_tested'](len(live_proxies), total_seen)
             if not live_proxies:
                 self.callbacks['on_log']("[DEAD] Внимание: Ни один из загруженных прокси не работает. Валидация скорее всего завершится с ошибками.", "dead")
             proxies = live_proxies

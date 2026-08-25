@@ -1,5 +1,7 @@
 # core/cleaner.py
 
+import re
+
 from .parser_pipeline import GLOBAL_VERIFIED_DOMAINS
 
 # --- Нормализация адресов для дедупликации (п.28 чек-листа) ---
@@ -24,6 +26,43 @@ _PLUS_TAG_DOMAINS = {
     "protonmail.com", "proton.me", "pm.me",
     "fastmail.com", "zoho.com", "yandex.ru", "ya.ru",
 }
+
+
+# Символы, которыми адрес обрастает при выгрузке из чужих систем: кавычки из
+# CSV, угловые скобки из заголовков письма, скобки и запятые из списков,
+# обратная кавычка и звёздочка из markdown, невидимые BOM и неразрывный пробел.
+#
+# Почему счищать их безопасно. Собственная регулярка валидатора допускает в
+# локальной части только [a-zA-Z0-9._%+-]. Всё перечисленное ниже она и так
+# отвергает, то есть адрес с таким символом СЕЙЧАС получает вердикт invalid
+# «Bad Syntax». Счистка может сделать его валидным, но не может испортить уже
+# валидный — там этих символов нет по определению.
+#
+# Это не выдумка на будущее: в файле владельца лежит `hjohnuc@gmail.com с
+# обратной кавычкой в начале, и он получал ложный invalid на живом адресе.
+_JUNK_EDGES = "`'\"<>()[]{},;:|*!?«»“”‘’" \
+              "﻿​‌‍  \t\r\n"
+
+_MAILTO_RE = re.compile(r'^\s*mailto:\s*', re.IGNORECASE)
+
+
+def strip_wrapping_junk(raw: str) -> str:
+    """Снимает обёртку вокруг адреса и приводит его к нижнему регистру.
+
+    'mailto:<John.Doe@Gmail.com>,' -> 'john.doe@gmail.com'
+    '`hjohnuc@gmail.com'           -> 'hjohnuc@gmail.com'
+    """
+    if not isinstance(raw, str):
+        return ""
+    value = _MAILTO_RE.sub("", raw)
+    # Угловые скобки разбираем ПЕРВЫМИ: в выгрузках почтовиков адрес приходит
+    # вместе с отображаемым именем — Ivan Petrov <ivan@corp.com>. Если сначала
+    # обрезать края, закрывающая скобка исчезнет, и имя останется приклеенным.
+    if "<" in value and ">" in value:
+        inner = value[value.rfind("<") + 1:value.rfind(">")]
+        if "@" in inner:
+            value = inner
+    return value.strip(_JUNK_EDGES).lower()
 
 
 def normalize_for_dedup(email: str) -> str:
@@ -151,10 +190,10 @@ class EmailCleaner:
         - Неизвестные домены → пропустить КАК ЕСТЬ (не убивать!)
         - DNS-проверка живости домена делается позже в network.py (get_mx_records)
         """
-        email = email.strip().lower()
-        if "@" not in email:
+        email = strip_wrapping_junk(email)
+        if not email or "@" not in email:
             return None
-            
+
         local_part, domain = email.rsplit("@", 1)
         
         # 0. Зачистка левой части (local_part)

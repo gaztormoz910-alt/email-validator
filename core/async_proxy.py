@@ -19,9 +19,15 @@ import struct
 
 
 class AsyncProxyChecker:
-    def __init__(self, proxies: list, workers: int = 500, timeout: float = 5.0,
+    def __init__(self, proxies, workers: int = 500, timeout: float = 5.0,
                  mode: str = "http", progress_callback=None):
-        """mode: "http" (для парсера) или "smtp" (для валидатора)."""
+        """mode: "http" (для парсера) или "smtp" (для валидатора).
+
+        proxies — список ЛИБО генератор. Генератор нужен для больших файлов:
+        миллион строк прокси, материализованный в список, это сотни мегабайт
+        ОЗУ ещё до первого соединения. При ленивом входе общее число заранее
+        неизвестно, поэтому total считается по мере подачи.
+        """
         self.proxies = proxies
         self.workers = workers
         self.timeout = timeout
@@ -32,7 +38,12 @@ class AsyncProxyChecker:
         self.live_proxies = []
 
         self.checked_count = 0
-        self.total = len(proxies)
+        # len() есть только у последовательности. У генератора его нет, и
+        # спрашивать нельзя — иначе вход прочитается целиком ради одного числа.
+        try:
+            self.total = len(proxies)
+        except TypeError:
+            self.total = 0
 
         # Диагноз по каждому прокси: "live" | "port25_blocked" | "dead"
         self.diagnosis = {}
@@ -248,7 +259,15 @@ class AsyncProxyChecker:
     # --- рабочий цикл ------------------------------------------------------
 
     async def _worker(self):
-        while not self.queue.empty():
+        while True:
+            # Пустая очередь больше не означает «работа кончилась»: подача
+            # ленивая, и следующая порция ещё читается с диска. Выходим только
+            # когда и очередь пуста, И фидер объявил, что вход исчерпан.
+            if self.queue.empty():
+                if getattr(self, "_feed_done", False):
+                    return
+                await asyncio.sleep(0.01)
+                continue
             proxy = await self.queue.get()
             protocol = "socks5"
             ip = ""
@@ -329,14 +348,41 @@ class AsyncProxyChecker:
             return "port25_blocked"
         return "dead"
 
+    # Сколько прокси держим в очереди одновременно. Очередь — это ОЗУ, и
+    # набивать её целым файлом незачем: воркеры разбирают её быстрее, чем
+    # читается диск. Запас в несколько раз больше числа воркеров нужен только
+    # чтобы они не простаивали в ожидании следующей порции.
+    QUEUE_HEADROOM = 8
+
+    async def _feed(self, source):
+        """Подливает прокси в очередь по мере того, как воркеры её разбирают.
+
+        Раньше здесь стоял простой цикл, который клал в очередь ВЕСЬ список
+        сразу, а до него вызывающий код успевал материализовать весь файл.
+        На списке в миллионы строк это десятки гигабайт ОЗУ ещё до первого
+        соединения. Теперь вход читается лениво, а в памяти живёт только
+        текущая порция.
+        """
+        for proxy in source:
+            await self.queue.put(proxy)
+            self.total += 1
+        self._feed_done = True
+
     async def run(self):
-        for proxy in self.proxies:
-            self.queue.put_nowait(proxy)
+        # Вход может быть генератором: тогда его длина заранее неизвестна, и
+        # спрашивать len() нельзя. Число воркеров считаем по потолку, а не по
+        # размеру входа.
+        self._feed_done = False
+        self.queue = asyncio.Queue(maxsize=max(1, self.workers) * self.QUEUE_HEADROOM)
+        self.total = 0
+
+        source = iter(self.proxies)
+        feeder = asyncio.create_task(self._feed(source))
 
         # Потолок воркеров — защита сетевого стека и роутера, а не оптимизация.
         # Плюс разнос старта: открывать все сокеты в одну миллисекунду значит
         # выглядеть для антивируса ровно как сканер портов.
-        safe_workers = min(self.workers, len(self.proxies), 500)
+        safe_workers = min(self.workers, 500)
 
         tasks = []
         for index in range(safe_workers):
@@ -344,6 +390,7 @@ class AsyncProxyChecker:
             if index % 50 == 0:
                 await asyncio.sleep(0.02)
 
+        await feeder
         await self.queue.join()
         for task in tasks:
             task.cancel()

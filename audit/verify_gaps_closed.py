@@ -343,6 +343,126 @@ def open_rest_api():
     return True
 
 
+
+def check_mx_cross_check():
+    """invalid c первого MX сверяется со вторым; расхождение снимает приговор."""
+    v = _validator()
+    answers = {"mx1": "invalid", "mx2": "valid"}
+    v._do_single_ping = (lambda email, mx, proxy=None, from_email=None,
+                         control_probe=False: {"status": answers.get(mx, "unknown"),
+                                               "reason": "тест"})
+    v._pick_best_proxy = lambda **kw: None
+    saved = v.stealth_smtp_ping("a@b.com", ["mx1", "mx2"])["status"] == "risky"
+    answers["mx2"] = "invalid"
+    buried = v.stealth_smtp_ping("a@b.com", ["mx1", "mx2"])["status"] == "invalid"
+    return saved and buried
+
+
+def check_niche_providers():
+    import core.network as N
+    return {"qq.com", "163.com", "naver.com"} <= set(N.NEEDS_CLEAN_IP_DOMAINS)
+
+
+def check_private_relay_validation():
+    import core.network as N
+    return "privaterelay.appleid.com" in N.NEEDS_CLEAN_IP_DOMAINS
+
+
+def check_ip_load_budget_enforced():
+    """Перегруженный прокси не выбирается, пока есть свободный."""
+    v = _validator(proxies=["hot:1", "cold:2"])
+    v.set_proxy_profiles({"hot:1": {"exit_ip": "1.1.1.1", "latency_ms": 10},
+                          "cold:2": {"exit_ip": "2.2.2.2", "latency_ms": 900}})
+    v.note_ip_use("hot:1", v._ip_load_soft_cap + 1)
+    return {v._pick_best_proxy() for _ in range(40)} == {"cold:2"}
+
+
+def check_latency_resampling():
+    """Живой замер меняет задержку, но не заменяет её целиком."""
+    v = _validator(proxies=["p:1"])
+    v.set_proxy_profiles({"p:1": {"exit_ip": "1.1.1.1", "latency_ms": 1000}})
+    v._note_latency("p:1", 0)
+    return 0 < v._proxy_latency["p:1"] < 1000
+
+
+def check_whois_proxying():
+    """WHOIS говорится через SOCKS и разбирает дату регистрации."""
+    import inspect
+    import core.network as N
+    if "socks.socksocket" not in inspect.getsource(N._whois_ask):
+        return False
+    crlf = chr(13) + chr(10)
+    return bool(N._WHOIS_CREATED_RE.search("Creation Date: 1995-08-14T04:00:00Z" + crlf))
+
+
+def check_rest_api():
+    """API отвечает и не выпускается наружу без токена."""
+    from api.server import handle, build_server
+    code, body = handle("/api/validate-single", {"email": "john.doe@gmail.com"})
+    if code != 200 or body.get("provider") != "Gmail":
+        return False
+    try:
+        build_server(host="0.0.0.0", port=0, token="")
+        return False
+    except ValueError:
+        return True
+
+
+def check_local_part_rules():
+    from core.local_rules import (check_local_part, rule_count,
+                                  UNLIKELY, IMPOSSIBLE, OK)
+    return (rule_count() >= 50
+            and check_local_part("ca@gmail.com")[0] == UNLIKELY
+            and check_local_part("@gmail.com")[0] == IMPOSSIBLE
+            and check_local_part("john.doe@gmail.com")[0] == OK
+            and check_local_part("a@unknown-corp.com")[0] == OK)
+
+
+def check_junk_stripping():
+    from core.cleaner import EmailCleaner
+    from core.network import validate_email_syntax
+    repaired = EmailCleaner().clean_email(chr(96) + "hjohnuc@gmail.com")
+    return repaired == "hjohnuc@gmail.com" and validate_email_syntax(repaired)
+
+
+def check_lazy_proxy_input():
+    """Дедуп отдаёт первый прокси, не дочитав вход; очередь чекера ограничена."""
+    import types
+    from core.network import dedupe_proxies_stream
+    from core.async_proxy import AsyncProxyChecker
+    read = []
+
+    def watched():
+        for i in range(5000):
+            read.append(i)
+            yield "10.0.%d.%d:1080" % (i // 256, i % 256)
+
+    stream = dedupe_proxies_stream(watched())
+    if not isinstance(stream, types.GeneratorType):
+        return False
+    next(stream)
+    if len(read) > 10:
+        return False
+    checker = AsyncProxyChecker(watched(), workers=5, timeout=0.1, mode="smtp")
+    return checker.total == 0 and getattr(AsyncProxyChecker, "QUEUE_HEADROOM", 0) > 0
+
+
+def check_gui_sync_counting():
+    """Подсчёт строк ушёл в фон, синхронных вызовов не осталось."""
+    import inspect
+    from ui.gui import ValidatorApp
+    helper = inspect.getsource(ValidatorApp._count_lines_async)
+    if "threading.Thread" not in helper or "self.after" not in helper:
+        return False
+    source = inspect.getsource(sys.modules["ui.gui"])
+    offenders = [line for line in source.splitlines()
+                 if "count_total_lines()" in line
+                 and "total = StreamLoader" not in line
+                 and not line.strip().startswith("#")
+                 and "Зачем фон" not in line]
+    return not offenders
+
+
 CLOSED_CHECKS = {
     "invalid_heuristic": check_invalid_heuristic,
     "control_rcpt": check_control_rcpt,
@@ -361,18 +481,22 @@ CLOSED_CHECKS = {
     "run_resume": check_run_resume,
     "ui_full_scan": check_ui_full_scan,
     "requirements": check_requirements,
+    "mx_cross_check": check_mx_cross_check,
+    "niche_providers": check_niche_providers,
+    "private_relay_validation": check_private_relay_validation,
+    "ip_load_budget_enforced": check_ip_load_budget_enforced,
+    "latency_resampling": check_latency_resampling,
+    "whois_proxying": check_whois_proxying,
+    "rest_api": check_rest_api,
+    "local_part_rules": check_local_part_rules,
+    "junk_stripping": check_junk_stripping,
+    "lazy_proxy_input": check_lazy_proxy_input,
+    "gui_sync_counting": check_gui_sync_counting,
 }
 
 OPEN_CHECKS = {
-    "mx_cross_check": open_mx_cross_check,
-    "niche_providers": open_niche_providers,
-    "private_relay_validation": open_private_relay_validation,
     "osint_breadth": open_osint_breadth,
-    "ip_load_budget_enforced": open_ip_load_budget_enforced,
-    "latency_resampling": open_latency_resampling,
-    "whois_proxying": open_whois_proxying,
     "monoliths": open_monoliths,
-    "rest_api": open_rest_api,
 }
 
 
