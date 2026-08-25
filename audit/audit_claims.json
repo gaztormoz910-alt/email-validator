@@ -1,17 +1,17 @@
 {
   "_comment": "Числовые и поведенческие утверждения из отчёта аудита 2026-08-25. Скрипт verify_audit_claims.py измеряет реальность и сверяет с этим файлом. Расхождение = провал гейта, а не тихая правка отчёта.",
   "inventory": {
-    "py_files_total": 84,
-    "py_lines_total": 20020,
-    "core_modules": 19,
+    "py_files_total": 91,
+    "py_lines_total": 22051,
+    "core_modules": 20,
     "parser_modules": 7,
-    "tests_files": 25,
+    "tests_files": 29,
     "entrypoints": [
       "main.py",
       "cli.py"
     ],
     "biggest_module": "core/network.py",
-    "biggest_module_lines": 2523,
+    "biggest_module_lines": 2828,
     "_note": "Числа обновлены после внедрения улучшений: из корня убраны 13 отладочных файлов (остались в истории git), добавлены core/proxy_profile.py, core/runstate.py, ui/result_store.py, ui/log_buffer.py и новые наборы тестов."
   },
   "smtp": {
@@ -25,7 +25,8 @@
     "helo_names": 6,
     "security_gateway_vendors": 25,
     "yahoo_domains": 22,
-    "needs_clean_ip_domains": 19
+    "needs_clean_ip_domains": 26,
+    "local_rule_domains": 62
   },
   "scoring": {
     "valid_points": 55,
