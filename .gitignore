@@ -3,3 +3,9 @@
 data/validation_cache.sqlite
 data/validation_cache.sqlite-wal
 data/validation_cache.sqlite-shm
+
+# Рабочее состояние unlazy: ledger-пайплайны и память Stop-хука. Локальная
+# координация одной машины — в репозитории ей делать нечего.
+.unlazy/
+.unlazy-hook-state.json
+.claude/settings.local.json
