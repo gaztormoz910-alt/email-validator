@@ -24,6 +24,15 @@ import core.heuristics as H
 import core.provider as P
 import core.scoring as S
 import core.disposable as D
+# Модули, появившиеся позже. Их обязательно держать в этом же списке: сито
+# ловит только то, что в него положили, и новый модуль без обстрела — это
+# ровно тот случай, когда падение на мусоре находят уже на живой базе.
+import core.baseops as BO
+import core.cache as CA
+import core.filters as FL
+import core.github_parser as GP
+import core.parser.names_index as NIX
+import core.parser.translit as TRL
 from core.network import NetworkValidator, PROXY_MAX_CONSECUTIVE_FAILS as MAXF
 from core.scoring import calculate_engagement_score as score
 from core.cleaner import EmailCleaner, normalize_for_dedup
@@ -51,7 +60,7 @@ class TestNoCrashOnGarbage(unittest.TestCase):
     def _targets(self):
         v = NetworkValidator(timeout=2)
         targets = []
-        for mod in (N, C, H, P, S, D):
+        for mod in (N, C, H, P, S, D, BO, CA, FL, GP, NIX, TRL):
             for name, fn in vars(mod).items():
                 if (inspect.isfunction(fn) and not name.startswith("__")
                         and getattr(fn, "__module__", "") == mod.__name__):
