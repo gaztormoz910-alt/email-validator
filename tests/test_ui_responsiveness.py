@@ -1,0 +1,282 @@
+"""Отзывчивость интерфейса: измеряем, а не обещаем.
+
+Главная проверка здесь — `paging`. Она не засекает время (на загруженной
+машине это гадание), а СЧИТАЕТ, сколько строк интерфейс трогает, чтобы
+показать одну страницу. Старый код трогал всю базу целиком на каждом тике;
+новый обязан трогать порядка размера страницы независимо от того, сто в базе
+адресов или сто тысяч.
+
+У проверки есть положительный контроль: тот же счётчик прогоняется по старому
+способу выборки, и тест требует, чтобы он СРАБОТАЛ на нём. Без этого счётчик,
+случайно перестав считать, сделал бы всю проверку зелёной и бессмысленной.
+"""
+import os
+import sys
+import unittest
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from ui.result_store import ResultStore, group_of, GROUPS
+from ui.log_buffer import LogBuffer, Throttle
+from core.proxy_profile import pool_summary, provider_fitness
+
+
+class CountingList(list):
+    """Список, считающий обращения по индексу."""
+
+    def __init__(self, *a):
+        super().__init__(*a)
+        self.reads = 0
+
+    def __getitem__(self, item):
+        self.reads += 1
+        return super().__getitem__(item)
+
+
+def build(store, count, status="Valid", score=90):
+    for i in range(count):
+        store.append(f"user{i}@example.com", status, "250 OK", "mx.example.com",
+                     {"engagement_score": score, "name": f"User{i}"})
+
+
+class TestPagingCost(unittest.TestCase):
+    """Стоимость показа страницы не должна расти вместе с базой."""
+
+    def _reads_for_first_page(self, size):
+        store = ResultStore()
+        build(store, size)
+        # Подменяем хранилище строк на считающее — сам код при этом обычный
+        store._rows = CountingList(store._rows)
+        rows = store.page(("valid",), page=1, size=100)
+        self.assertEqual(len(rows), 100)
+        return store._rows.reads
+
+    def test_paging_cost_is_independent_of_base_size(self):
+        small = self._reads_for_first_page(1000)
+        large = self._reads_for_first_page(100000)
+        self.assertLessEqual(small, 120, "даже на малой базе трогается лишнее")
+        self.assertLessEqual(
+            large, 120,
+            f"на базе в 100k строк для одной страницы прочитано {large} строк — "
+            "стоимость показа зависит от размера базы")
+        self.assertLessEqual(
+            large, small * 2,
+            f"стоимость выросла с {small} до {large} при росте базы в 100 раз")
+
+    def test_positive_control_old_approach_would_be_caught(self):
+        """Счётчик обязан ловить старый способ — иначе он ничего не проверяет."""
+        store = ResultStore()
+        build(store, 5000)
+        rows = CountingList(store._rows)
+        # Ровно то, что делал прежний _get_filtered_results: перебор ВСЕЙ базы
+        filtered = [rows[i] for i in range(len(rows))
+                    if rows[i]["status"] == "Valid"][:100]
+        self.assertEqual(len(filtered), 100)
+        self.assertGreater(
+            rows.reads, 1000,
+            "положительный контроль не сработал: счётчик не видит полный перебор, "
+            "значит и основную проверку он не доказывает")
+
+    def test_deep_page_still_returns_right_rows(self):
+        store = ResultStore()
+        build(store, 5000)
+        page_one = store.page(("valid",), page=1, size=100)
+        page_ten = store.page(("valid",), page=10, size=100)
+        self.assertEqual(page_one[0]["email"], "user0@example.com")
+        self.assertEqual(page_ten[0]["email"], "user900@example.com")
+        self.assertEqual(len(page_ten), 100)
+
+
+class TestStatsAreCheap(unittest.TestCase):
+    """Счётчики берутся готовыми, а не пересчитываются перебором."""
+
+    def test_counts_do_not_scan_rows(self):
+        store = ResultStore()
+        build(store, 20000)
+        store._rows = CountingList(store._rows)
+        counts = store.counts()
+        self.assertEqual(counts["valid"], 20000)
+        self.assertEqual(counts["total"], 20000)
+        self.assertEqual(counts["names"], 20000)
+        self.assertEqual(store._rows.reads, 0,
+                         "счётчики перебирают строки, хотя должны быть готовыми")
+
+    def test_matching_count_without_score_filter_is_free(self):
+        store = ResultStore()
+        build(store, 20000)
+        store._rows = CountingList(store._rows)
+        self.assertEqual(store.matching_count(("valid",)), 20000)
+        self.assertEqual(store._rows.reads, 0,
+                         "подсчёт подходящих строк без порога всё ещё перебирает базу")
+
+    def test_stats_updates_are_throttled(self):
+        clock = {"t": 0.0}
+        throttle = Throttle(0.5, clock=lambda: clock["t"])
+        allowed = 0
+        # Тысяча результатов приходит за полсекунды — как на реальном прогоне
+        for i in range(1000):
+            clock["t"] += 0.0005
+            if throttle.ready():
+                allowed += 1
+        self.assertLessEqual(allowed, 3,
+                             f"за 0.5с обновление счётчиков прошло {allowed} раз — "
+                             "интерфейс дёргает виджеты на каждом адресе")
+        self.assertGreaterEqual(allowed, 1, "обновление не прошло ни разу")
+
+
+class TestLogBuffer(unittest.TestCase):
+    """Терминал не растёт бесконечно и не теряет строки молча."""
+
+    def test_log_buffer_is_capped(self):
+        buf = LogBuffer(capacity=500)
+        for i in range(100000):
+            buf.put(f"строка {i}", "info")
+        self.assertLessEqual(len(buf), 500,
+                             "буфер лога не ограничен — на большой базе он съест память")
+        self.assertEqual(buf.total, 100000)
+        self.assertGreater(buf.dropped, 0, "потери строк не считаются")
+
+    def test_log_drain_returns_and_empties(self):
+        buf = LogBuffer(capacity=100)
+        for i in range(10):
+            buf.put(f"строка {i}")
+        chunk = buf.drain()
+        self.assertEqual(len(chunk), 10)
+        self.assertEqual(len(buf), 0)
+        self.assertEqual(chunk[0], ("строка 0", "info"))
+
+    def test_log_drain_respects_limit(self):
+        buf = LogBuffer(capacity=100)
+        for i in range(50):
+            buf.put(f"строка {i}")
+        chunk = buf.drain(limit=20)
+        self.assertEqual(len(chunk), 20)
+        self.assertEqual(len(buf), 30, "остаток должен дождаться следующего тика")
+
+
+class TestStatusGrouping(unittest.TestCase):
+    """Группы фильтра описаны в одном месте и покрывают все статусы пайплайна."""
+
+    def test_known_statuses_map_to_expected_groups(self):
+        cases = {
+            "Valid": "valid",
+            "Invalid/Bounce": "invalid",
+            "Trap/Disposable": "spam",
+            "Role-based": "spam",
+            "Risky": "spam",
+            "Unknown": "unknown",
+            "Unverified": "other",
+        }
+        for status, expected in cases.items():
+            self.assertEqual(group_of(status), expected, f"статус {status}")
+
+    def test_every_group_is_declared(self):
+        for status in ("Valid", "Invalid/Bounce", "Trap/Disposable",
+                       "Role-based", "Risky", "Unknown", "Unverified"):
+            self.assertIn(group_of(status), GROUPS)
+
+    def test_garbage_status_does_not_crash(self):
+        for junk in (None, 123, [], {}, b"x"):
+            self.assertIn(group_of(junk), GROUPS)
+
+    def test_mixed_groups_keep_arrival_order(self):
+        store = ResultStore()
+        store.append("a@x.com", "Valid", "", "", {})
+        store.append("b@x.com", "Unknown", "", "", {})
+        store.append("c@x.com", "Valid", "", "", {})
+        rows = store.page(("valid", "unknown"), page=1, size=10)
+        self.assertEqual([r["email"] for r in rows],
+                         ["a@x.com", "b@x.com", "c@x.com"],
+                         "слияние групп перепутало порядок добавления")
+
+
+class TestScoreFilter(unittest.TestCase):
+    def test_score_filter_selects_and_stops_early(self):
+        store = ResultStore()
+        for i in range(2000):
+            store.append(f"u{i}@x.com", "Valid", "", "",
+                         {"engagement_score": 90 if i % 2 == 0 else 10})
+        rows = store.page(("valid",), page=1, size=50, min_score=70)
+        self.assertEqual(len(rows), 50)
+        self.assertTrue(all(r["data"]["engagement_score"] >= 70 for r in rows))
+        self.assertEqual(store.matching_count(("valid",), min_score=70), 1000)
+
+    def test_broken_score_does_not_crash_filter(self):
+        store = ResultStore()
+        store.append("a@x.com", "Valid", "", "", {"engagement_score": "мусор"})
+        store.append("b@x.com", "Valid", "", "", {"engagement_score": 80})
+        rows = store.page(("valid",), page=1, size=10, min_score=50)
+        self.assertEqual([r["email"] for r in rows], ["b@x.com"])
+
+
+class TestProxyPanelData(unittest.TestCase):
+    """Панель прокси показывает измеренное, а не пересказанное.
+
+    Числа для неё считает core/proxy_profile.pool_summary — тот же код,
+    который наполняет лог и CLI. Проверяем здесь именно его: если панель
+    начнёт считать что-то своё, эти проверки перестанут её описывать.
+    """
+
+    def _pool(self):
+        return {
+            "a:1": {"exit_ip": "1.1.1.1", "has_ptr": True, "latency_ms": 120,
+                    "asn_country": "de", "ip_type": "datacenter", "outlook_ok": True},
+            "b:2": {"exit_ip": "1.1.1.1", "has_ptr": True, "latency_ms": 240,
+                    "asn_country": "DE", "ip_type": "datacenter"},
+            "c:3": {"exit_ip": "2.2.2.2", "has_ptr": False, "in_dnsbl": True,
+                    "latency_ms": 90, "asn_country": "US", "ip_type": "residential",
+                    "rdns_dirty": True},
+            "d:4": {"exit_ip": None, "has_ptr": None},
+        }
+
+    def test_panel_shows_real_rotation_not_line_count(self):
+        s = pool_summary(self._pool())
+        self.assertEqual(s["total"], 4)
+        self.assertEqual(s["unique_ips"], 2,
+                         "ротация считается по строкам прокси, а не по выходным адресам")
+        self.assertEqual(s["duplicates"], 1)
+        self.assertEqual(s["largest_group"], 2)
+
+    def test_panel_shows_ip_type_and_country(self):
+        s = pool_summary(self._pool())
+        self.assertEqual(s["by_type"], {"datacenter": 1, "residential": 1},
+                         "тип считается по прокси, а не по разным выходным адресам")
+        # Регистр страны приходит по-разному — панель обязана его схлопнуть
+        self.assertEqual(s["countries"], {"DE": 1, "US": 1})
+
+    def test_panel_shows_hygiene_counters(self):
+        s = pool_summary(self._pool())
+        self.assertEqual(s["with_ptr"], 2)
+        self.assertEqual(s["ptr_unknown"], 1)
+        self.assertEqual(s["in_dnsbl"], 1)
+        self.assertEqual(s["rdns_dirty"], 1)
+        self.assertEqual(s["latency_min"], 90)
+        self.assertEqual(s["latency_max"], 240)
+
+    def test_panel_fitness_prefers_direct_probe_over_guess(self):
+        """Прямая проба почтовика важнее вывода из списков."""
+        fit = provider_fitness({
+            # В чёрном списке, но Microsoft ПРИНЯЛ напрямую — значит годен
+            "a:1": {"exit_ip": "1.1.1.1", "in_dnsbl": True, "outlook_ok": True},
+            # Чистый по спискам, но Microsoft отверг — значит не годен
+            "b:2": {"exit_ip": "2.2.2.2", "in_dnsbl": False, "outlook_ok": False},
+        })
+        self.assertEqual(fit["Outlook / Hotmail"]["ok"], 1)
+        self.assertEqual(fit["Outlook / Hotmail"]["no"], 1)
+        self.assertEqual(fit["Outlook / Hotmail"]["unknown"], 0)
+
+    def test_panel_fitness_keeps_unknown_separate_from_no(self):
+        """«Не проверяли» не имеет права выглядеть как «не пустят»."""
+        fit = provider_fitness({"a:1": {"exit_ip": "1.1.1.1", "has_ptr": None}})
+        self.assertEqual(fit["Yahoo / AOL"]["unknown"], 1)
+        self.assertEqual(fit["Yahoo / AOL"]["no"], 0)
+
+    def test_panel_survives_garbage_profiles(self):
+        for junk in (None, "мусор", [], {"a": None}, {"a": "строка"}):
+            s = pool_summary(junk)
+            self.assertIsInstance(s, dict)
+            self.assertIn("unique_ips", s)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,35 @@
+# Рантайм-зависимости валидатора.
+#   pip install -r requirements.txt
+#
+# Список сверяется автоматически: audit/verify_requirements.py разбирает
+# импорты всего проекта и требует, чтобы каждый сторонний пакет был назван
+# здесь. Забытая строка ломает гейт, а не чужую машину.
+
+# --- Сеть и протоколы ---
+requests>=2.32.0
+urllib3>=2.0.0
+PySocks>=1.7.1            # import socks — SOCKS4/5 и HTTP CONNECT для SMTP
+dnspython>=2.6.0          # import dns — MX, PTR, DNSBL, DoH
+
+# --- Интерфейс ---
+customtkinter>=5.2.0
+psutil>=5.9.0             # определение числа потоков по железу
+
+# --- Обогащение данными ---
+names-dataset>=3.1.0      # import names_dataset — база на 138 млн имён
+gender-guesser>=0.4.0     # import gender_guesser — пол по имени с учётом страны
+wordsegment>=1.3.1        # разбор слитных robertanderson -> Robert Anderson
+python-whois>=0.9.0       # import whois — возраст домена, когда прокси не заданы
+
+# --- Парсер адресов ---
+ddgs>=9.0.0               # актуальный клиент DuckDuckGo
+duckduckgo-search>=6.0.0  # прежнее имя того же пакета, оставлено для совместимости
+stem>=1.8.0               # управление Tor-инстансами
+
+# --- Необязательное ---
+# spaCy нужен только при включённом переключателе «AI фильтр (ML)»: он отсеивает
+# организации, притворяющиеся именами. Без него валидатор работает, просто
+# NER-проверка имени не делается (см. core/parser/ml_predictor.py).
+spacy>=3.7.0
+# Модель к нему ставится отдельно:
+#   python -m spacy download en_core_web_sm

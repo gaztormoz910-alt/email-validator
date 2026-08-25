@@ -1,0 +1,274 @@
+"""Три источника ложных вердиктов, закрытые в leaf-1.1.
+
+Проверяется ПОВЕДЕНИЕ на подставном SMTP-сервере, а не наличие строк в коде.
+Каждый тест начинается с негативного контроля: сначала показываем, что при
+«честном» сервере вердикт прежний, и только потом — что при лгущем он меняется.
+Без этого зелёный тест не отличить от теста, который проходит всегда.
+"""
+
+import sys
+import os
+import unittest
+from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.network import NetworkValidator
+
+
+class FakeSMTP:
+    """Подставной SMTP-сервер: отвечает по сценарию, считает команды.
+
+    Сценарий RCPT задаётся списком (код, текст) по порядку обращений, чтобы
+    можно было отличить ответ реальному адресу от ответа контрольному.
+    """
+
+    def __init__(self, rcpt_script, mail_code=250, banner=b"220 fake ESMTP"):
+        self.rcpt_script = list(rcpt_script)
+        self.mail_code = mail_code
+        self.banner = banner
+        self.rcpt_calls = []
+        self.connects = 0
+        self.quits = 0
+
+    def connect(self, host, port):
+        self.connects += 1
+        return (220, self.banner)
+
+    def ehlo(self, name=None):
+        return (250, b"fake hello")
+
+    def helo(self, name=None):
+        return (250, b"fake hello")
+
+    def has_extn(self, name):
+        return False
+
+    def mail(self, addr):
+        return (self.mail_code, b"250 sender ok")
+
+    def rcpt(self, addr):
+        self.rcpt_calls.append(addr)
+        if self.rcpt_script:
+            return self.rcpt_script.pop(0)
+        return (250, b"250 OK")
+
+    def quit(self):
+        self.quits += 1
+
+
+def validator_with(server):
+    """Валидатор, у которого каждое SMTP-соединение — это переданный сервер."""
+    v = NetworkValidator(timeout=1)
+    v._make_smtp_connection = lambda proxy=None: server
+    v._mx_delay = lambda mx: 0        # тесты не должны ждать реальных пауз
+    return v
+
+
+class TestControlRcpt(unittest.TestCase):
+    """S1: контрольный RCPT в той же сессии ловит скрытый catch-all."""
+
+    def test_control_rcpt_marks_catchall_when_fake_address_also_accepted(self):
+        # Сервер принимает ВСЁ: и реальный адрес, и выдуманный
+        server = FakeSMTP([(250, b"250 OK"), (250, b"250 OK")])
+        v = validator_with(server)
+
+        res = v._do_single_ping("real@corp-x.com", "mx.corp-x.com",
+                                control_probe=True)
+
+        self.assertEqual(res["status"], "catchall",
+                         "сервер принял выдуманный адрес, но домен не помечен catch-all")
+        self.assertEqual(len(server.rcpt_calls), 2,
+                         "контрольный RCPT не отправлен")
+        self.assertEqual(server.connects, 1,
+                         "контрольная проба стоила лишнего подключения — она обязана "
+                         "идти в той же сессии")
+        self.assertTrue(v.catchall_cache.get("corp-x.com"),
+                        "вывод о catch-all не сохранён для домена")
+
+    def test_control_rcpt_confirms_real_mailbox_when_fake_rejected(self):
+        # Негативный контроль: честный сервер отвергает выдуманный адрес
+        server = FakeSMTP([(250, b"250 OK"), (550, b"550 no such user")])
+        v = validator_with(server)
+
+        res = v._do_single_ping("real@corp-x.com", "mx.corp-x.com",
+                                control_probe=True)
+
+        self.assertEqual(res["status"], "valid",
+                         "честный сервер — вердикт обязан остаться Valid")
+        self.assertEqual(res.get("control_rcpt"), "rejected")
+        self.assertIs(v.catchall_cache.get("corp-x.com"), False)
+
+    def test_control_rcpt_is_off_by_default(self):
+        # Без флага лишних команд быть не должно — иначе вырастет нагрузка
+        server = FakeSMTP([(250, b"250 OK")])
+        v = validator_with(server)
+
+        res = v._do_single_ping("real@corp-x.com", "mx.corp-x.com")
+
+        self.assertEqual(res["status"], "valid")
+        self.assertEqual(len(server.rcpt_calls), 1,
+                         "контрольный RCPT отправлен без запроса")
+
+    def test_control_rcpt_skipped_when_real_address_rejected(self):
+        # Реальный адрес отвергнут — спрашивать выдуманный незачем
+        server = FakeSMTP([(550, b"550 no such user")])
+        v = validator_with(server)
+
+        res = v._do_single_ping("dead@corp-x.com", "mx.corp-x.com",
+                                control_probe=True)
+
+        self.assertEqual(res["status"], "invalid")
+        self.assertEqual(len(server.rcpt_calls), 1,
+                         "контрольный RCPT потрачен на заведомо мёртвый адрес")
+
+
+class TestNarrowInvalid(unittest.TestCase):
+    """S2: временный отказ больше не читается как отсутствующий ящик."""
+
+    def setUp(self):
+        self.v = NetworkValidator(timeout=1)
+        self.parse = self.v._parse_smtp_response
+
+    def test_narrow_invalid_keeps_burying_real_bounces(self):
+        # Негативный контроль: настоящие отказы обязаны остаться invalid
+        decisive = [
+            b"5.1.1 User unknown",
+            b"550 No such user here",
+            b"550 5.1.1 The email account that you tried to reach does not exist",
+            b"550 Requested action not taken: mailbox unavailable",
+            b"550 invalid recipient",
+            b"550 recipient rejected",
+        ]
+        for msg in decisive:
+            with self.subTest(msg=msg):
+                res = self.parse(550, msg, "a@b.com", "b.com")
+                self.assertEqual(res["status"], "invalid",
+                                 f"настоящий отскок перестал быть invalid: {msg!r}")
+
+    def test_narrow_invalid_spares_temporary_wording(self):
+        # 550 с временной формулировкой противоречит сам себе — не хороним
+        transient = [
+            b"550 5.2.1 The mailbox is temporarily unavailable",
+            b"550 mailbox busy, try again later",
+            b"550 4.2.1 recipient deferred, retry later",
+            b"550 user account is not available at this time",
+            b"550 too busy to accept mail for this recipient",
+        ]
+        for msg in transient:
+            with self.subTest(msg=msg):
+                res = self.parse(550, msg, "a@b.com", "b.com")
+                self.assertNotEqual(
+                    res["status"], "invalid",
+                    f"временный отказ похоронен как мёртвый ящик: {msg!r}")
+
+    def test_narrow_invalid_spares_recipient_word_without_negation(self):
+        # Слово о получателе без отрицания ничего не доказывает
+        vague = [
+            b"550 recipient",
+            b"550 mailbox",
+            b"550 address policy",
+        ]
+        for msg in vague:
+            with self.subTest(msg=msg):
+                res = self.parse(550, msg, "a@b.com", "b.com")
+                self.assertNotEqual(res["status"], "invalid",
+                                    f"упоминание получателя без отрицания "
+                                    f"похоронило адрес: {msg!r}")
+
+    def test_narrow_invalid_does_not_touch_other_codes(self):
+        # Соседние ветки разбора не должны поехать
+        self.assertEqual(self.parse(250, b"OK", "a@b.com", "b.com")["status"], "valid")
+        self.assertEqual(self.parse(452, b"mailbox full", "a@b.com", "b.com")["status"],
+                         "valid")
+        self.assertEqual(self.parse(452, b"insufficient system storage",
+                                    "a@b.com", "b.com")["status"], "unknown")
+        self.assertEqual(self.parse(551, b"user not local", "a@b.com", "b.com")["status"],
+                         "invalid")
+
+
+class TestPostmasterTrust(unittest.TestCase):
+    """S3: сервер, отвергающий postmaster@, теряет право хоронить адрес."""
+
+    def test_postmaster_honored_returns_true_when_accepted(self):
+        v = NetworkValidator(timeout=1)
+        v._probe_recipients = lambda addrs, mx, proxy=None, from_email=None: [
+            {"status": "valid", "reason": "250 OK"}]
+        self.assertIs(v.postmaster_is_honored("corp-x.com", "mx.corp-x.com"), True)
+
+    def test_postmaster_honored_returns_false_when_rejected(self):
+        v = NetworkValidator(timeout=1)
+        v._probe_recipients = lambda addrs, mx, proxy=None, from_email=None: [
+            {"status": "invalid", "reason": "550 no such user"}]
+        self.assertIs(v.postmaster_is_honored("corp-x.com", "mx.corp-x.com"), False)
+
+    def test_postmaster_unknown_is_not_cached(self):
+        """Сбой не должен навсегда лишить домен проверки."""
+        calls = []
+
+        def probe(addrs, mx, proxy=None, from_email=None):
+            calls.append(addrs)
+            return [{"status": "unknown", "reason": "Timeout"}]
+
+        v = NetworkValidator(timeout=1)
+        v._probe_recipients = probe
+        self.assertIsNone(v.postmaster_is_honored("corp-x.com", "mx.corp-x.com"))
+        self.assertIsNone(v.postmaster_is_honored("corp-x.com", "mx.corp-x.com"))
+        self.assertEqual(len(calls), 2, "неудачная проба закэширована")
+
+    def test_postmaster_result_is_cached_once_decided(self):
+        calls = []
+
+        def probe(addrs, mx, proxy=None, from_email=None):
+            calls.append(addrs)
+            return [{"status": "invalid", "reason": "550"}]
+
+        v = NetworkValidator(timeout=1)
+        v._probe_recipients = probe
+        v.postmaster_is_honored("corp-x.com", "mx.corp-x.com")
+        v.postmaster_is_honored("corp-x.com", "mx.corp-x.com")
+        self.assertEqual(len(calls), 1, "решённый вердикт спрашивается повторно")
+
+    def test_postmaster_downgrades_invalid_to_risky_in_check_email(self):
+        """Сквозная проверка: лгущий сервер больше не хоронит адрес."""
+        v = NetworkValidator(timeout=1)
+        v.get_mx_records = lambda d: ["mx.corp-x.com"]
+        v.is_catch_all_domain = lambda d, mx: False
+        v.stealth_smtp_ping = lambda e, mx, control_probe=False: {
+            "status": "invalid", "reason": "550 User Does Not Exist"}
+
+        # Негативный контроль: честный сервер — вердикт остаётся invalid
+        v.postmaster_is_honored = lambda d, mx: True
+        honest = v.check_email("ghost@corp-x.com")
+        self.assertEqual(honest["status"], "invalid",
+                         "у честного сервера вердикт invalid обязан сохраниться")
+
+        # Лгущий сервер — вердикт обесценивается
+        v2 = NetworkValidator(timeout=1)
+        v2.get_mx_records = lambda d: ["mx.corp-x.com"]
+        v2.is_catch_all_domain = lambda d, mx: False
+        v2.stealth_smtp_ping = lambda e, mx, control_probe=False: {
+            "status": "invalid", "reason": "550 User Does Not Exist"}
+        v2.postmaster_is_honored = lambda d, mx: False
+        lying = v2.check_email("ghost@corp-x.com")
+        self.assertEqual(lying["status"], "risky",
+                         "сервер, отвергающий postmaster@, всё ещё хоронит адрес")
+        self.assertIs(lying.get("postmaster_honored"), False)
+
+    def test_postmaster_not_probed_for_live_addresses(self):
+        """Лишняя сессия на домен не тратится там, где вердикт и так не invalid."""
+        probed = []
+        v = NetworkValidator(timeout=1)
+        v.get_mx_records = lambda d: ["mx.corp-x.com"]
+        v.is_catch_all_domain = lambda d, mx: False
+        v.stealth_smtp_ping = lambda e, mx, control_probe=False: {
+            "status": "valid", "reason": "250 OK"}
+        v.check_dns_health = lambda d, mx_record="": {"score": 0}
+        v.postmaster_is_honored = lambda d, mx: probed.append(d) or True
+
+        v.check_email("live@corp-x.com")
+        self.assertEqual(probed, [], "postmaster спрошен там, где никого не хоронят")
+
+
+if __name__ == "__main__":
+    unittest.main()
