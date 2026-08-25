@@ -651,19 +651,17 @@ class ValidatorApp(ctk.CTk):
                 if len(preview_dorks) == 5000:
                     self.dork_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
                 
-                total_loader = StreamLoader(self.dork_sources)
-                total_count = total_loader.count_total_lines()
-                self.loaded_dorks_lbl.configure(text=f"Загружено: {total_count}")
+                self._count_lines_async(self.dork_sources, self.loaded_dorks_lbl,
+                                        "Загружено: {count}")
                 if hasattr(self, 'safe_parser_log'):
-                    self.safe_parser_log(f"[INFO] Dork-запросы добавлены. Строк: {total_count}", "info")
+                    self.safe_parser_log("[INFO] Dork-запросы добавлены, считаю строки в фоне.", "info")
             
             self.dork_selector.set_text("Несколько файлов" if len(filepaths) > 1 else filepaths[0])
 
     def on_dorks_pasted(self, text):
         self.dork_sources.append({"type": "text", "content": text})
-        total_loader = StreamLoader(self.dork_sources)
-        total_count = total_loader.count_total_lines()
-        self.loaded_dorks_lbl.configure(text=f"Загружено: {total_count}")
+        self._count_lines_async(self.dork_sources, self.loaded_dorks_lbl,
+                                "Загружено: {count}")
 
     def load_parser_proxies(self):
         filepaths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
@@ -697,18 +695,16 @@ class ValidatorApp(ctk.CTk):
                 if len(preview_proxies) == 5000:
                     self.parser_proxy_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
                 
-                total_loader = StreamLoader(self.parser_proxy_sources)
-                total_count = total_loader.count_total_lines()
-                self.loaded_parser_proxies_lbl.configure(text=f"Прокси (оценка): {total_count}")
+                self._count_lines_async(self.parser_proxy_sources, self.loaded_parser_proxies_lbl,
+                                        "Прокси (оценка): {count}")
                 if hasattr(self, 'safe_parser_log'):
-                    self.safe_parser_log(f"[INFO] Прокси парсера добавлены. Строк: {total_count}", "info")
+                    self.safe_parser_log("[INFO] Прокси парсера добавлены, считаю строки в фоне.", "info")
             
             self.parser_proxy_selector.set_text("Несколько файлов" if len(filepaths) > 1 else filepaths[0])
     def on_parser_proxies_pasted(self, text):
         self.parser_proxy_sources.append({"type": "text", "content": text})
-        total_loader = StreamLoader(self.parser_proxy_sources)
-        total_count = total_loader.count_total_lines()
-        self.loaded_parser_proxies_lbl.configure(text=f"Прокси (оценка): {total_count}")
+        self._count_lines_async(self.parser_proxy_sources, self.loaded_parser_proxies_lbl,
+                                "Прокси (оценка): {count}")
 
     def _build_main_workspace(self):
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -1074,6 +1070,26 @@ class ValidatorApp(ctk.CTk):
                 "[INFO] Страна по имени: режим ЗАПОЛНЕННОСТЬ. Колонка заполняется "
                 "почти всегда; догадку видно по колонке «Источник».", "info")
 
+    def _count_lines_async(self, sources, label, template):
+        """Считает строки источников в фоне и подписывает результат.
+
+        Зачем фон. count_total_lines() читает файлы целиком. На гигабайтном
+        списке это десятки секунд, и раньше они проходили в ГЛАВНОМ потоке —
+        то есть окно на всё это время переставало отзываться сразу после того,
+        как пользователь выбрал файл. Само чтение быстрее не стало, но окно
+        больше не висит, а подпись обновляется, когда счёт закончен.
+        """
+        label.configure(text=template.format(count="считаю..."))
+
+        def work():
+            try:
+                total = StreamLoader(list(sources)).count_total_lines()
+            except Exception:
+                total = 0
+            self.after(0, lambda: label.configure(text=template.format(count=total)))
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _build_proxy_panel(self):
         """Вкладка «Прокси»: что за пул загружен и что им можно проверить.
 
@@ -1365,10 +1381,9 @@ class ValidatorApp(ctk.CTk):
                 if len(preview_emails) == 5000:
                     self.db_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
                 
-                total_loader = StreamLoader(self.email_sources)
-                total_count = total_loader.count_total_lines()
-                self.loaded_lbl.configure(text=f"Загружено строк: {total_count}")
-                self.safe_log(f"[INFO] Файлы добавлены. Всего строк: {total_count}", "info")
+                self._count_lines_async(self.email_sources, self.loaded_lbl,
+                                        "Загружено строк: {count}")
+                self.safe_log("[INFO] Файлы добавлены, считаю строки в фоне.", "info")
 
             self.db_selector.set_text("Несколько файлов" if len(filepaths) > 1 else filepaths[0])
             self._scan_base_composition()
@@ -1392,9 +1407,8 @@ class ValidatorApp(ctk.CTk):
 
     def on_emails_pasted(self, text):
         self.email_sources.append({"type": "text", "content": text})
-        total_loader = StreamLoader(self.email_sources)
-        total_count = total_loader.count_total_lines()
-        self.loaded_lbl.configure(text=f"Загружено строк: {total_count}")
+        self._count_lines_async(self.email_sources, self.loaded_lbl,
+                                "Загружено строк: {count}")
         self._scan_base_composition()
 
     def load_proxies(self):
@@ -1428,18 +1442,16 @@ class ValidatorApp(ctk.CTk):
                 if len(preview_proxies) == 5000:
                     self.proxy_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
                 
-                total_loader = StreamLoader(self.proxy_sources)
-                total_count = total_loader.count_total_lines()
-                self.loaded_proxies_lbl.configure(text=f"Прокси (оценка): {total_count}")
-                self.safe_log(f"[INFO] Прокси добавлены. Строк: {total_count}", "info")
+                self._count_lines_async(self.proxy_sources, self.loaded_proxies_lbl,
+                                        "Прокси (оценка): {count}")
+                self.safe_log("[INFO] Прокси добавлены, считаю строки в фоне.", "info")
             
             self.proxy_selector.set_text("Несколько файлов" if len(filepaths) > 1 else filepaths[0])
 
     def on_proxies_pasted(self, text):
         self.proxy_sources.append({"type": "text", "content": text})
-        total_loader = StreamLoader(self.proxy_sources)
-        total_count = total_loader.count_total_lines()
-        self.loaded_proxies_lbl.configure(text=f"Прокси (оценка): {total_count}")
+        self._count_lines_async(self.proxy_sources, self.loaded_proxies_lbl,
+                                "Прокси (оценка): {count}")
 
     def _set_sidebar_state(self, state):
         if hasattr(self, 'engine_selector'):
@@ -1523,15 +1535,29 @@ class ValidatorApp(ctk.CTk):
         # отсеивалось всё, кроме socks5 и голого host:port, хотя и чекер, и
         # соединение давно умеют socks4 и HTTP CONNECT — часть купленного
         # пула просто не доходила до валидатора.
-        from core.network import dedupe_proxies
-        actual_proxies = dedupe_proxies(
-            list(StreamLoader(self.proxy_sources).stream_lines()))
-        
-        if not actual_proxies:
+        # Прокси идут в пайплайн ЛЕНИВО. Раньше здесь строился список из всего
+        # файла, и на списке в миллионы строк окно замирало ещё до старта
+        # проверки. Теперь читается по строке, а материализуются только те,
+        # что оказались живыми.
+        from core.network import dedupe_proxies_stream
+        proxy_stream = dedupe_proxies_stream(
+            StreamLoader(self.proxy_sources).stream_lines())
+
+        # Заглядываем ровно на один элемент: это отличает пустой источник от
+        # непустого, не читая остальное.
+        try:
+            first_proxy = next(proxy_stream)
+        except StopIteration:
+            first_proxy = None
+
+        if first_proxy is None:
             self.safe_log("[DEAD] Ошибка: в загруженных источниках нет ни одного прокси!", "dead")
             self._set_playback_state("stopped")
             self._set_sidebar_state("normal")
             return
+
+        import itertools
+        actual_proxies = itertools.chain([first_proxy], proxy_stream)
 
         threads = int(self.threads_slider.get())
         timeout = int(self.timeout_slider.get())

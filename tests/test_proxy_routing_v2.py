@@ -376,3 +376,168 @@ class TestMxSemaphoreDoesNotHoldDuringSleep(unittest.TestCase):
             peak[0], self.LIMIT,
             f"одновременно к MX ушло {peak[0]} обращений при лимите {self.LIMIT} — "
             "перенос паузы сломал само ограничение параллельности")
+
+
+class TestIpBudgetEnforced(unittest.TestCase):
+    """P13: перегруженный выходной адрес выбывает из выбора, а не просто теряет ранг."""
+
+    def _pool(self):
+        v = make(["hot:1", "cold:2"], {
+            "hot:1": {"exit_ip": "1.1.1.1", "latency_ms": 10},
+            "cold:2": {"exit_ip": "2.2.2.2", "latency_ms": 900},
+        })
+        return v
+
+    def test_budget_enforced_excludes_overloaded_proxy(self):
+        v = self._pool()
+        # Контроль: пока нагрузки нет, оба в игре и быстрый берётся чаще.
+        # Именно ОБА — выбор намеренно с разбросом, иначе одним прокси било бы
+        # в один сервер. Поэтому контроль статистический, а не по одной выборке.
+        before = [v._pick_best_proxy() for _ in range(60)]
+        self.assertIn("hot:1", before, "быстрый прокси не выбирается вовсе")
+        self.assertGreater(before.count("hot:1"), before.count("cold:2"),
+                           "быстрый прокси не имеет преимущества — значит и "
+                           "проверка на его исключение ничего не докажет")
+
+        v.note_ip_use("hot:1", v._ip_load_soft_cap + 1)
+        picks = {v._pick_best_proxy() for _ in range(60)}
+        self.assertEqual(picks, {"cold:2"},
+                         "перегруженный адрес всё ещё выбирается, хотя есть свободный")
+
+    def test_budget_enforced_falls_back_when_everything_is_loaded(self):
+        """Если свободных нет вовсе, работаем перегруженными: пауза хуже."""
+        v = self._pool()
+        v.note_ip_use("hot:1", v._ip_load_soft_cap + 1)
+        v.note_ip_use("cold:2", v._ip_load_soft_cap + 1)
+        self.assertIn(v._pick_best_proxy(), {"hot:1", "cold:2"},
+                      "при поголовной перегрузке выбор обнулился")
+
+    def test_budget_enforced_counts_by_exit_ip(self):
+        """Нагрузка общая у всех прокси с одним выходом."""
+        v = make(["a:1", "b:2", "free:3"], {
+            "a:1": {"exit_ip": "1.1.1.1", "latency_ms": 10},
+            "b:2": {"exit_ip": "1.1.1.1", "latency_ms": 10},
+            "free:3": {"exit_ip": "9.9.9.9", "latency_ms": 500},
+        })
+        v.note_ip_use("a:1", v._ip_load_soft_cap + 1)
+        picks = {v._pick_best_proxy() for _ in range(60)}
+        self.assertEqual(picks, {"free:3"},
+                         "второй прокси того же выхода не считается перегруженным")
+
+
+class TestLatencyLive(unittest.TestCase):
+    """P14: задержка обновляется по ходу прогона, а не раз в десять минут."""
+
+    def test_latency_live_smooths_new_measurement(self):
+        v = make(["p:1"], {"p:1": {"exit_ip": "1.1.1.1", "latency_ms": 1000}})
+        v._note_latency("p:1", 0)
+        measured = v._proxy_latency["p:1"]
+        self.assertLess(measured, 1000, "новый замер не повлиял на задержку")
+        self.assertGreater(measured, 0,
+                           "одиночный замер полностью заменил прежний — "
+                           "случайный всплеск будет выкидывать рабочий прокси")
+
+    def test_latency_live_converges_to_reality(self):
+        """Устойчиво медленный прокси в итоге признаётся медленным."""
+        v = make(["p:1"], {"p:1": {"exit_ip": "1.1.1.1", "latency_ms": 10}})
+        for _ in range(30):
+            v._note_latency("p:1", 900)
+        self.assertGreater(v._proxy_latency["p:1"], 700,
+                           "задержка не сходится к наблюдаемой")
+
+    def test_latency_live_ignores_garbage(self):
+        v = make(["p:1"], {"p:1": {"exit_ip": "1.1.1.1", "latency_ms": 100}})
+        for junk in (None, -5, "мусор", [], {}):
+            v._note_latency("p:1", junk)
+        self.assertEqual(v._proxy_latency["p:1"], 100)
+
+    def test_latency_live_first_measurement_sets_value(self):
+        v = make(["p:1"], {"p:1": {"exit_ip": "1.1.1.1"}})
+        v._note_latency("p:1", 250)
+        self.assertEqual(v._proxy_latency["p:1"], 250)
+
+
+class TestGeoNeutral(unittest.TestCase):
+    """P15: у .com зоны страны нет — спрашиваем у его почтового сервера."""
+
+    def test_geo_neutral_zone_uses_mx_country(self):
+        v = NetworkValidator(timeout=1)
+        # Зона молчит — это и есть исходная проблема
+        self.assertEqual(country_code_for_domain("example.com"), "")
+
+        calls = []
+
+        def fake_meta(ip, **kw):
+            calls.append(ip)
+            return {"asn_country": "us", "asn": "AS15169", "ip_type": "datacenter"}
+
+        import core.proxy_profile as PP
+        original = PP.lookup_ip_meta
+        try:
+            PP.lookup_ip_meta = fake_meta
+            v.resolver = type("R", (), {"resolve": staticmethod(
+                lambda name, rdtype='A': ["93.184.216.34"])})()
+            self.assertEqual(v.country_for_domain("example.com", "mx.example.com"), "US")
+            # Второй вызов обязан взяться из кэша, а не спрашивать заново
+            self.assertEqual(v.country_for_domain("example.com", "mx.example.com"), "US")
+            self.assertEqual(len(calls), 1, "страна MX спрашивается на каждом адресе")
+        finally:
+            PP.lookup_ip_meta = original
+
+    def test_geo_neutral_zone_wins_when_known(self):
+        """Зона домена по-прежнему главнее: web.de — Германия без всякого MX."""
+        v = NetworkValidator(timeout=1)
+        self.assertEqual(v.country_for_domain("web.de", "mx.google.com"), "DE")
+
+    def test_geo_neutral_returns_empty_without_mx(self):
+        v = NetworkValidator(timeout=1)
+        self.assertEqual(v.country_for_domain("example.com", ""), "")
+        self.assertEqual(v.country_for_domain("example.com", "N/A"), "")
+
+    def test_geo_neutral_survives_lookup_failure(self):
+        """Сбой запроса не имеет права выдумать страну."""
+        v = NetworkValidator(timeout=1)
+        v.resolver = type("R", (), {"resolve": staticmethod(
+            lambda *a, **k: (_ for _ in ()).throw(Exception("нет DNS")))})()
+        self.assertEqual(v.country_for_domain("example.com", "mx.example.com"), "")
+
+
+class TestWhoisProxied(unittest.TestCase):
+    """P16: WHOIS перестал быть единственным непроксируемым каналом."""
+
+    def test_whois_helper_exists_and_uses_socks(self):
+        import inspect
+        source = inspect.getsource(N._whois_ask)
+        self.assertIn("socks.socksocket", source,
+                      "WHOIS ходит голым сокетом — реальный IP утекает регистратору")
+        self.assertIn("set_proxy", source)
+
+    def test_whois_parses_creation_date_from_body(self):
+        """Разбор ответа проверяем на теле, а не на живом сервере."""
+        crlf = chr(13) + chr(10)
+        body = ("Domain Name: EXAMPLE.COM" + crlf
+                + "Registrar: Example Inc" + crlf
+                + "Creation Date: 1995-08-14T04:00:00Z" + crlf)
+        found = N._WHOIS_CREATED_RE.search(body)
+        self.assertIsNotNone(found, "дата регистрации не распознана")
+        self.assertEqual(found.group(1), "1995-08-14T04:00:00Z")
+
+    def test_whois_parses_referral(self):
+        crlf = chr(13) + chr(10)
+        iana = "domain:        COM" + crlf + "refer:         whois.verisign-grs.com" + crlf
+        found = N._WHOIS_REFER_RE.search(iana)
+        self.assertIsNotNone(found, "сервер зоны не распознан")
+        self.assertEqual(found.group(1), "whois.verisign-grs.com")
+
+    def test_whois_bad_input_returns_empty(self):
+        for junk in (None, "", "no-dot", 123, []):
+            with self.subTest(junk=junk):
+                self.assertEqual(N.whois_creation_date(junk), "")
+
+    def test_whois_pipeline_no_longer_skips_it(self):
+        """В пайплайне не осталось отказа от WHOIS при заданных прокси."""
+        import inspect
+        from core.pipeline import ValidationPipeline
+        source = inspect.getsource(ValidationPipeline._fetch_domain_age)
+        self.assertIn("whois_creation_date", source)
+        self.assertNotIn("whois не проксируется", source)

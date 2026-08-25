@@ -272,3 +272,66 @@ class TestPostmasterTrust(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSecondMx(unittest.TestCase):
+    """P17: приговор «ящика нет» сверяется со вторым сервером домена.
+
+    Почему это важно именно для invalid. У домена бывает несколько MX, и они
+    не всегда знают одно и то же: запасной узел часто отвечает 550 на всё
+    подряд, потому что списка ящиков у него нет. Приговор такого сервера
+    выбрасывает живой контакт навсегда, а это самая дорогая ошибка валидатора.
+    """
+
+    def _validator(self, answers):
+        """answers: {mx_host: status} — что «ответит» каждый сервер."""
+        v = NetworkValidator(timeout=1)
+        asked = []
+
+        def fake_ping(email, mx_record, proxy=None, from_email=None,
+                      control_probe=False):
+            asked.append(mx_record)
+            return {"status": answers.get(mx_record, "unknown"), "reason": "тест"}
+
+        v._do_single_ping = fake_ping
+        v._pick_best_proxy = lambda **kw: None
+        return v, asked
+
+    def test_second_mx_confirms_the_bounce(self):
+        """Оба сервера отвергли — приговор в силе."""
+        v, asked = self._validator({"mx1": "invalid", "mx2": "invalid"})
+        result = v.stealth_smtp_ping("a@b.com", ["mx1", "mx2"])
+        self.assertEqual(result["status"], "invalid")
+        self.assertIn("mx2", asked, "второй сервер вообще не спрашивали")
+
+    def test_second_mx_disagreement_saves_the_address(self):
+        """Второй сервер принял адрес — хоронить нельзя."""
+        v, asked = self._validator({"mx1": "invalid", "mx2": "valid"})
+        result = v.stealth_smtp_ping("a@b.com", ["mx1", "mx2"])
+        self.assertEqual(result["status"], "risky",
+                         "серверы разошлись, а адрес всё равно похоронен")
+        self.assertIn("по-разному", result["reason"])
+
+    def test_second_mx_silence_leaves_the_verdict(self):
+        """Молчание второго сервера — не несогласие."""
+        v, _ = self._validator({"mx1": "invalid", "mx2": "unknown"})
+        result = v.stealth_smtp_ping("a@b.com", ["mx1", "mx2"])
+        self.assertEqual(result["status"], "invalid",
+                         "молчание второго сервера принято за оправдание")
+
+    def test_second_mx_single_server_domain_is_unchanged(self):
+        """Негативный контроль: сверять не с чем — поведение прежнее."""
+        v, asked = self._validator({"mx1": "invalid"})
+        result = v.stealth_smtp_ping("a@b.com", ["mx1"])
+        self.assertEqual(result["status"], "invalid")
+        self.assertEqual(asked.count("mx1"), 1,
+                         "на домене с одним MX сделан лишний запрос")
+
+    def test_second_mx_costs_nothing_for_live_mailboxes(self):
+        """На valid лишний запрос не тратится вовсе."""
+        v, asked = self._validator({"mx1": "valid", "mx2": "valid"})
+        result = v.stealth_smtp_ping("a@b.com", ["mx1", "mx2"])
+        self.assertEqual(result["status"], "valid")
+        self.assertNotIn("mx2", asked,
+                         "подтверждённый живой ящик потянул за собой лишнее "
+                         "подключение ко второму серверу")
