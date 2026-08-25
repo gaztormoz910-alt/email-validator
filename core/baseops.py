@@ -23,10 +23,34 @@ def _key(email):
     return normalize_for_dedup(email) if isinstance(email, str) else ""
 
 
+def _as_list(value):
+    """Приводит вход к списку. Всё, что не перебирается, — пустой список.
+
+    Операции с базами зовутся и из GUI, и из консоли, и из экспорта. Уронить
+    выгрузку на неожиданном типе нельзя: адреса потеряются молча, а причина
+    останется в проглоченном исключении.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)):
+        return []
+    if not hasattr(value, "__iter__"):
+        return []
+    try:
+        return list(value)
+    except Exception:
+        return []
+
+
 def read_emails(path, limit=None):
     """Читает адреса из файла. Берёт первое поле строки, разделители любые."""
     emails = []
-    if not path or not os.path.exists(path):
+    if not isinstance(path, (str, bytes, os.PathLike)):
+        return emails
+    try:
+        if not path or not os.path.exists(path):
+            return emails
+    except (TypeError, ValueError, OSError):
         return emails
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -50,7 +74,7 @@ def dedupe(emails):
     """Схлопывает дубли по каноническому ключу, сохраняя порядок и оригиналы."""
     seen = set()
     result = []
-    for email in emails or []:
+    for email in _as_list(emails):
         key = _key(email)
         if not key or key in seen:
             continue
@@ -63,19 +87,19 @@ def merge(*lists):
     """Объединение нескольких списков с дедупом. Первое написание побеждает."""
     combined = []
     for chunk in lists:
-        combined.extend(chunk or [])
+        combined.extend(_as_list(chunk))
     return dedupe(combined)
 
 
 def subtract(base, removals):
     """base минус removals. Основа для списка отписок."""
-    drop = {_key(e) for e in (removals or []) if _key(e)}
+    drop = {_key(e) for e in _as_list(removals) if _key(e)}
     return [e for e in dedupe(base) if _key(e) not in drop]
 
 
 def intersect(base, other):
     """Только те, кто есть в обоих списках."""
-    keep = {_key(e) for e in (other or []) if _key(e)}
+    keep = {_key(e) for e in _as_list(other) if _key(e)}
     return [e for e in dedupe(base) if _key(e) in keep]
 
 
@@ -85,7 +109,7 @@ def chunks(items, size):
     Размер меньше единицы означает «не резать»: молча отдавать пустые куски
     хуже, чем один целый список.
     """
-    items = list(items or [])
+    items = _as_list(items)
     try:
         size = int(size)
     except (TypeError, ValueError):
