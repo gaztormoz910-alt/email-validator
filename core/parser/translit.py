@@ -37,7 +37,9 @@ MAX_VARIANTS = 24
 
 def looks_translit(word: str) -> bool:
     """True, если слово похоже на латиницу без диакритики — только её и трогаем."""
-    return bool(word) and bool(_LATIN_RE.match(word.lower()))
+    if not isinstance(word, str) or not word:
+        return False
+    return bool(_LATIN_RE.match(word.lower()))
 
 
 def variants(word: str, limit: int = MAX_VARIANTS) -> list:

@@ -215,9 +215,9 @@ class NameExtractor:
         Extracts and formats a potential name from an email address using Phase 1 & 2 heuristics.
         Returns the formatted name or None if extraction fails.
         """
-        if not email or '@' not in email:
+        if not isinstance(email, str) or not email or '@' not in email:
             return None
-            
+
         username = email.split('@')[0].strip()
         username_clean = re.sub(r'\d+', '', username)
         
