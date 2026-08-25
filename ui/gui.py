@@ -637,15 +637,17 @@ class ValidatorApp(ctk.CTk):
                 if hasattr(self, 'safe_parser_log'):
                     self.safe_parser_log(f"[INFO] Добавлены массивные файлы прокси парсера (>{len(filepaths)} шт.).", "info")
             else:
+                # Парсер умеет все три протокола: чекер работает в режиме HTTP
+                # (socks4, socks5 и CONNECT), а ProxyManager сам дописывает
+                # схему. Отсеивать socks4 и HTTP значило выбрасывать часть
+                # купленного пула без причины.
                 loader = StreamLoader([{"type": "file", "path": fp} for fp in filepaths])
                 preview_proxies = []
-                for idx, p in enumerate(loader.stream_lines()):
-                    p_lower = p.lower()
-                    if p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://"):
-                        continue
-                    if idx < 5000:
-                        preview_proxies.append(p)
-                
+                for p in loader.stream_lines():
+                    preview_proxies.append(p)
+                    if len(preview_proxies) >= 5000:
+                        break
+
                 self.parser_proxy_selector.append_to_textbox(preview_proxies)
                 if len(preview_proxies) == 5000:
                     self.parser_proxy_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
@@ -1162,15 +1164,17 @@ class ValidatorApp(ctk.CTk):
                 self.loaded_proxies_lbl.configure(text=f"Прокси источников: {len(self.proxy_sources)}")
                 self.safe_log(f"[INFO] Добавлены массивные файлы прокси (>{len(filepaths)} шт.).", "info")
             else:
+                # Предпросмотр показывает ровно то, что пойдёт в работу.
+                # Раньше здесь отсеивались socks4 и HTTP — и получалось враньё:
+                # валидация их использует, а в окне пользователь их не видит,
+                # хотя счётчик ниже считает все строки файла.
                 loader = StreamLoader([{"type": "file", "path": fp} for fp in filepaths])
                 preview_proxies = []
-                for idx, p in enumerate(loader.stream_lines()):
-                    p_lower = p.lower()
-                    if p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://"):
-                        continue
-                    if idx < 5000:
-                        preview_proxies.append(p)
-                
+                for p in loader.stream_lines():
+                    preview_proxies.append(p)
+                    if len(preview_proxies) >= 5000:
+                        break   # дальше не читаем: файл может быть огромным
+
                 self.proxy_selector.append_to_textbox(preview_proxies)
                 if len(preview_proxies) == 5000:
                     self.proxy_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
@@ -1514,13 +1518,13 @@ class ValidatorApp(ctk.CTk):
         threads = int(self.parser_threads_slider.get())
         timeout = float(self.parser_timeout_slider.get())
         
-        actual_proxies = []
-        for p in StreamLoader(self.parser_proxy_sources).stream_lines():
-            p_lower = p.lower()
-            if not (p_lower.startswith("http://") or p_lower.startswith("https://") or p_lower.startswith("socks4://")):
-                actual_proxies.append(p)
-        actual_proxies = list(set(actual_proxies))
-        
+        # Как и у валидатора: берём прокси любого поддерживаемого протокола
+        # и схлопываем повторы по разобранным частям, а не по строке —
+        # один прокси, записанный дважды, занимал два места в ротации.
+        from core.network import dedupe_proxies
+        actual_proxies = dedupe_proxies(
+            list(StreamLoader(self.parser_proxy_sources).stream_lines()))
+
         from core.parser_pipeline import ParserPipeline
         self.parser_pipeline = ParserPipeline(
             dork_sources=self.dork_sources,
