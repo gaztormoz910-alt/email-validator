@@ -9,6 +9,7 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core.cache import ResultCache
+from core.runstate import RunState, run_id_for, DEFAULT_RETRY_DELAY
 from core.cleaner import EmailCleaner, normalize_for_dedup
 from core.filters import SpamFilter
 from core.github_parser import BlacklistDownloader
@@ -577,6 +578,18 @@ class ValidationPipeline:
                         self.callbacks['on_log'](
                             "[DEAD] ВСЕ прокси числятся в чёрных списках — Outlook, iCloud "
                             "и GMX будут молчать. Нужны прокси с чистым IP.", "dead")
+
+                    # Структурная сводка для окна. Всё перечисленное выше уже
+                    # уходило строками лога, но лог прокручивается и теряется,
+                    # а решение «хватит ли этих прокси» пользователь принимает
+                    # именно по этим числам. Считает их core/proxy_profile.py,
+                    # чтобы панель, лог и CLI не могли разойтись.
+                    if 'on_proxy_profile' in self.callbacks:
+                        try:
+                            from core.proxy_profile import pool_summary
+                            self.callbacks['on_proxy_profile'](pool_summary(proxy_profiles))
+                        except Exception:
+                            pass
                 except Exception as e:
                     self.callbacks['on_log'](
                         f"[DEAD] Профилирование прокси не удалось ({type(e).__name__}).", "dead")
@@ -595,7 +608,8 @@ class ValidationPipeline:
             self.ai.train_models()
             self.callbacks['on_log']("[INFO] ИИ успешно обучен и готов к бою!", "info")
 
-    def run_pipeline(self, email_sources, threads=50, fix_typos=True, check_spam=True, deep_ping=True, enable_ai=False, enable_osint=False):
+    def run_pipeline(self, email_sources, threads=50, fix_typos=True, check_spam=True, deep_ping=True, enable_ai=False, enable_osint=False,
+                     resume=False):
         self.is_running = True
         self.is_paused = False
         
@@ -612,10 +626,20 @@ class ValidationPipeline:
         self.callbacks['on_progress'](0, total_emails)
         processed_count = 0
         
-        # Очередь для Greylisting retry (п.2.4)
+        # Очередь для Greylisting retry (п.2.4).
+        #
+        # Теперь у каждой записи есть СРОК готовности. Раньше очередь была
+        # обычным мешком, а пайплайн после основного прохода спал ровно 90
+        # секунд подряд — и всё это время не делал ничего. Срок ставится в
+        # момент откладывания, поэтому к концу основного прохода бОльшая часть
+        # адресов уже созрела и ждать не нужно вовсе.
         import queue as queue_module
         # queue.Queue уже потокобезопасна — отдельный лок не нужен
         greylisted_queue = queue_module.Queue()
+
+        def defer(email, data, is_role, delay=DEFAULT_RETRY_DELAY):
+            greylisted_queue.put((email, data, is_role,
+                                  time.monotonic() + max(0.0, float(delay))))
 
         # Статистика вердиктов по домену. Если у домена МНОГО адресов и ВСЕ до
         # единого ответили 250 OK — это почти наверняка catch-all, даже когда
@@ -731,6 +755,7 @@ class ValidationPipeline:
                         email, status_display,
                         f"{cached['reason']} [из кэша, {cached['age_days']} дн. назад]",
                         cached["mx"], data)
+                    state.mark_done(normalize_for_dedup(email))
                     return
 
             # Шаг 3: Глубокий SMTP Ping
@@ -741,7 +766,7 @@ class ValidationPipeline:
 
                 # Greylisted — складываем в очередь для повторной проверки (п.2.4)
                 if raw_status == "greylisted":
-                    greylisted_queue.put((email, data, is_role))
+                    defer(email, data, is_role)
                     return  # Не выводим результат сейчас — перепроверим позже
 
                 # Временный отказ (таймаут, сдохший прокси, лимит скорости, блок по
@@ -749,7 +774,7 @@ class ValidationPipeline:
                 # же очередь: через паузу лимиты отпускают, прокси восстанавливаются,
                 # и повтор другим прокси часто даёт однозначный ответ вместо Unknown.
                 if _is_transient_failure(raw_status, res.get("reason", "")):
-                    greylisted_queue.put((email, data, is_role))
+                    defer(email, data, is_role)
                     return
 
                 if raw_status == "valid":
@@ -785,6 +810,8 @@ class ValidationPipeline:
                                        original_smtp_status, is_role, enable_ai)
 
                 self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
+                # Журнал сделанного: при возобновлении этот адрес пропустится
+                state.mark_done(normalize_for_dedup(email))
             else:
                 self.callbacks['on_result'](email, "Unverified", "Skipped Ping", "N/A", data)
 
@@ -793,12 +820,31 @@ class ValidationPipeline:
         
         import queue
         task_queue = queue.Queue(maxsize=safe_threads * 2)
-        seen_emails = set()
+
+        # Состояние прогона на диске: дедуп и журнал сделанного.
+        #
+        # Раньше здесь стоял обычный set. Он рос линейно по базе, и на файлах,
+        # ради которых затевалось потоковое чтение, в память уже не помещался:
+        # файл читался порциями, а рядом копилось множество на сотню миллионов
+        # строк. Плюс журнал даёт возобновление — «Стоп» больше не выбрасывает
+        # проделанную работу.
+        state = RunState(run_id_for(email_sources), resume=resume)
+        self.state = state
+        if resume and state.resumed_count:
+            self.callbacks['on_log'](
+                f"[INFO] Продолжаю прерванный прогон: {state.resumed_count} адресов "
+                "уже проверены и заново проверяться не будут.", "info")
+        elif not state.enabled:
+            self.callbacks['on_log'](
+                "[DEAD] Состояние прогона недоступно (не открылась база) — дедуп "
+                "и возобновление отключены, проверка идёт как раньше.", "dead")
+
         duplicates_skipped = 0
+        already_done = 0
         queued_count = 0
 
         def feeder_thread():
-            nonlocal duplicates_skipped, queued_count
+            nonlocal duplicates_skipped, queued_count, already_done
             from core.streamer import StreamLoader
             for email, data in StreamLoader(email_sources).stream_emails():
                 if not self.is_running:
@@ -814,11 +860,15 @@ class ValidationPipeline:
                 # один и тот же ящик, и слать туда дважды нельзя (жалобы на спам).
                 # В обработку при этом уходит оригинальный адрес.
                 dedup_key = normalize_for_dedup(email)
-                if dedup_key in seen_emails:
+                if not state.add_if_new(dedup_key):
                     duplicates_skipped += 1
                     continue
 
-                seen_emails.add(dedup_key)
+                # Продолжение прерванного прогона: адрес с вердиктом пропускаем
+                if resume and state.is_done(dedup_key):
+                    already_done += 1
+                    continue
+
                 queued_count += 1
                 task_queue.put((email, data))
                 
@@ -832,6 +882,10 @@ class ValidationPipeline:
             total_emails = queued_count
             if 'on_unique_count' in self.callbacks:
                 self.callbacks['on_unique_count'](queued_count)
+
+            if already_done:
+                self.callbacks['on_log'](
+                    f"[INFO] Пропущено как уже проверенное: {already_done} адресов.", "info")
 
             if duplicates_skipped:
                 self.callbacks['on_log'](
@@ -882,26 +936,18 @@ class ValidationPipeline:
         # другим прокси — значительная часть превращается в однозначный ответ.
         greylisted_count = greylisted_queue.qsize()
         if greylisted_count > 0 and self.is_running and deep_ping:
-            self.callbacks['on_log'](f"[INFO] Отложено на перепроверку: {greylisted_count} адресов (greylisting и временные сбои). Ожидание 90 сек...", "info")
-            
-            # Ждём 90 секунд (серверы с greylisting ожидают повторной попытки через 1-5 мин)
-            for i in range(90):
-                if not self.is_running:
-                    break
-                time.sleep(1)
             
             if self.is_running:
-                self.callbacks['on_log'](f"[INFO] Начинаю перепроверку {greylisted_count} адресов...", "info")
                 retry_count = 0
                 retry_lock = threading.Lock()
 
                 def retry_one(entry):
                     """Обрабатывает один отложенный адрес. Вызывается из пула потоков."""
                     nonlocal retry_count
-                    email, data, is_role = entry
+                    email, data, is_role, _due = entry
                     if not self.is_running:
                         return
-                    
+
                     res = self.network.check_email(email)
                     raw_status = res["status"]
                     
@@ -928,12 +974,19 @@ class ValidationPipeline:
                                            original_smtp_status, is_role, enable_ai)
 
                     self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
+                    state.mark_done(normalize_for_dedup(email))
                     with retry_lock:
                         retry_count += 1
 
-                # Забираем всё из очереди и обрабатываем ПАРАЛЛЕЛЬНО. Раньше повтор
-                # шёл в один поток: на тысячах отложенных адресов это растягивалось
-                # на часы, в течение которых их не было в выдаче.
+                # Забираем всё из очереди и обрабатываем ПАРАЛЛЕЛЬНО, но не раньше
+                # срока каждой записи.
+                #
+                # Раньше здесь стояло `time.sleep(1)` девяносто раз подряд — глухая
+                # пауза после ВСЕГО основного прохода, во время которой не делалось
+                # ничего и не работала даже кнопка «Стоп». Теперь срок ставится в
+                # момент откладывания: пока шёл основной проход, он у большинства
+                # адресов уже истёк, и ждать нечего. Если ждать всё же приходится,
+                # сон идёт короткими шагами, поэтому остановка срабатывает сразу.
                 pending = []
                 while True:
                     try:
@@ -941,9 +994,44 @@ class ValidationPipeline:
                     except Exception:
                         break
 
-                retry_workers = max(1, min(safe_threads, len(pending)))
+                pending.sort(key=lambda entry: entry[3])
+                total_pending = len(pending)
+                retry_workers = max(1, min(safe_threads, total_pending or 1))
+                waited = 0.0
+
                 with ThreadPoolExecutor(max_workers=retry_workers) as retry_pool:
-                    futures = [retry_pool.submit(retry_one, entry) for entry in pending]
+                    futures = []
+                    index = 0
+                    announced = False
+                    while index < total_pending and self.is_running:
+                        now = time.monotonic()
+                        # Всё, что уже созрело, отправляем в пул немедленно
+                        launched = 0
+                        while index < total_pending and pending[index][3] <= now:
+                            futures.append(retry_pool.submit(retry_one, pending[index]))
+                            index += 1
+                            launched += 1
+                        if launched and not announced:
+                            announced = True
+                            self.callbacks['on_log'](
+                                f"[INFO] Перепроверка началась: {launched} из "
+                                f"{total_pending} адресов созрели сразу, ждать не пришлось.",
+                                "info")
+                        if index >= total_pending:
+                            break
+                        # Ничего не созрело — ждём ровно до ближайшего срока,
+                        # но шагами по четверти секунды, чтобы «Стоп» был мгновенным
+                        remaining = pending[index][3] - time.monotonic()
+                        if remaining > 0:
+                            if not announced and waited == 0.0:
+                                self.callbacks['on_log'](
+                                    f"[INFO] Отложено на перепроверку: {total_pending}. "
+                                    f"Ближайший созреет через {int(remaining)}с — ждём только его.",
+                                    "info")
+                            step = min(0.25, remaining)
+                            time.sleep(step)
+                            waited += step
+
                     for fut in as_completed(futures):
                         try:
                             fut.result()
@@ -951,9 +1039,15 @@ class ValidationPipeline:
                             self.callbacks['on_log'](
                                 f"[DEAD] Ошибка перепроверки: {type(e).__name__}: {e}", "dead")
 
+                    # Не дождавшиеся своего срока (нажали «Стоп») возвращаются
+                    # в очередь — ниже их подберёт страховка и отдаст как Unknown
+                    for leftover_entry in pending[index:]:
+                        greylisted_queue.put(leftover_entry)
+
                 self.callbacks['on_log'](
-                    f"[INFO] Перепроверка завершена: {retry_count} из {len(pending)} адресов "
-                    "получили окончательный вердикт.", "info")
+                    f"[INFO] Перепроверка завершена: {retry_count} из {total_pending} адресов "
+                    f"получили окончательный вердикт. Простой в ожидании: {waited:.1f}с "
+                    "(раньше было ровно 90с всегда).", "info")
 
         # Страховка: всё, что осталось в очереди — не перепроверено (нажали «Стоп»,
         # выключен deep_ping, или прогон прервался). Раньше такие адреса молча
@@ -962,7 +1056,7 @@ class ValidationPipeline:
         leftover = 0
         while True:
             try:
-                email, data, is_role = greylisted_queue.get_nowait()
+                email, data, is_role, _due = greylisted_queue.get_nowait()
             except Exception:
                 break
             leftover += 1
@@ -1010,14 +1104,22 @@ class ValidationPipeline:
             self.cache.close()
             self.cache = None
 
+        # Состояние дописывается на диск: недописанная пачка иначе потерялась бы,
+        # и возобновление не увидело бы последние сотни адресов.
+        try:
+            state.close()
+        except Exception:
+            pass
+
         self.is_running = False
         self.callbacks['on_complete']()
 
-    def start(self, email_sources, threads, timeout, fix_typos, check_spam, deep_ping, enable_ai, proxies=None, enable_osint=False, use_cache=True):
+    def start(self, email_sources, threads, timeout, fix_typos, check_spam, deep_ping, enable_ai, proxies=None, enable_osint=False, use_cache=True,
+              resume=False):
         def worker():
             self.setup(timeout=timeout, enable_ai=enable_ai, proxies=proxies, threads=threads,
                        use_cache=use_cache)
-            self.run_pipeline(email_sources, threads, fix_typos, check_spam, deep_ping, enable_ai, enable_osint=enable_osint)
+            self.run_pipeline(email_sources, threads, fix_typos, check_spam, deep_ping, enable_ai, enable_osint=enable_osint, resume=resume)
             
         t = threading.Thread(target=worker, daemon=True)
         t.start()

@@ -7,6 +7,8 @@ import os
 import re
 import threading
 from ui.colors import *
+from ui.result_store import ResultStore, group_of
+from ui.log_buffer import LogBuffer, Throttle
 from core.pipeline import ValidationPipeline
 from core.streamer import StreamLoader
 
@@ -303,7 +305,11 @@ class ValidatorApp(ctk.CTk):
         self.email_sources = [] # [{"type": "text", "content": "..."}, {"type": "file", "path": "..."}]
         self.proxy_sources = []
         self.stats = {"valid": 0, "invalid": 0, "spam": 0, "unknown": 0}
-        self.results_data = []
+        # Результаты живут в индексированном хранилище: выборка страницы больше
+        # не перебирает всю базу (см. ui/result_store.py).
+        self.result_store = ResultStore()
+        # Сводка по прокси для панели — заполняется после профилирования
+        self.proxy_summary = None
         
         self.dork_sources = []
         self.parser_proxy_sources = []
@@ -319,7 +325,20 @@ class ValidatorApp(ctk.CTk):
         self.progress_queue = queue.Queue()
         self.result_queue = queue.Queue()
         self.validator_result_queue = queue.Queue()
-        self.validator_log_queue = queue.Queue()
+        # Лог с ЖЁСТКИМ потолком. Раньше здесь стояла обычная очередь, и на
+        # большой базе она росла быстрее, чем окно успевала её разгребать:
+        # каждый проверенный адрес добавлял строку, а видно всё равно только
+        # последнюю тысячу. Теперь лишнее отбрасывается сразу, до Tk.
+        self.validator_log_queue = LogBuffer(capacity=4000)
+
+        # Как часто интерфейсу вообще позволено дёргать виджеты. Опрос очередей
+        # идёт двадцать раз в секунду, но перерисовывать таблицу и счётчики с
+        # такой частотой незачем — глаз столько не берёт, а Tk на это тратит
+        # весь главный поток.
+        self._stats_throttle = Throttle(0.25)
+        self._table_throttle = Throttle(0.5)
+        self._table_dirty = False
+        self._active_tab = "Терминал"
         self._poll_queues()
         self._poll_validator_queues()
 
@@ -329,7 +348,8 @@ class ValidatorApp(ctk.CTk):
             'on_result': self.safe_add_result,
             'on_complete': self.on_pipeline_complete,
             'on_unique_count': self.safe_update_unique_count,
-            'on_proxies_tested': self.safe_update_proxies_count
+            'on_proxies_tested': self.safe_update_proxies_count,
+            'on_proxy_profile': self.safe_proxy_profile,
         })
 
         self.grid_rowconfigure(0, weight=1)
@@ -452,6 +472,31 @@ class ValidatorApp(ctk.CTk):
         self.chk_cache = ctk.CTkSwitch(self.validator_sidebar_frame, text="Кэш вердиктов (не перепроверять)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color=TEXT_ON_ACCENT, button_hover_color=TEXT_MAIN)
         self.chk_cache.select()
         self.chk_cache.pack(padx=20, anchor="w", pady=(0, 20))
+
+        # Режим колонки «Страна». Раньше выбор между заполненностью и точностью
+        # был правкой двух чисел в исходнике, хотя это решение про ДЕНЬГИ: гнать
+        # гео-таргет по колонке, где треть значений выдумана, — не то же самое,
+        # что по неполной, но верной. Замеры обоих режимов лежат в
+        # core/parser/ml_predictor.py рядом с порогами.
+        ctk.CTkLabel(self.validator_sidebar_frame, text="Колонка «Страна» по имени:",
+                     text_color=TEXT_MAIN, font=ctk.CTkFont(size=12)).pack(
+            padx=20, anchor="w", pady=(0, 4))
+
+        self.country_mode_var = ctk.StringVar(value="Заполненность")
+        self.country_mode_seg = ctk.CTkSegmentedButton(
+            self.validator_sidebar_frame, values=["Заполненность", "Точность"],
+            variable=self.country_mode_var, command=self._on_country_mode_change,
+            fg_color=BG_CARD_2, selected_color=ACCENT_PRIMARY,
+            selected_hover_color=ACCENT_PRIMARY_HOVER, unselected_color=BG_CARD_2,
+            unselected_hover_color=BORDER, text_color=TEXT_MAIN,
+            font=ctk.CTkFont(size=11))
+        self.country_mode_seg.pack(fill="x", padx=20, pady=(0, 4))
+
+        self.country_mode_hint = ctk.CTkLabel(
+            self.validator_sidebar_frame,
+            text="заполнено почти всегда, ~треть стран — догадка",
+            text_color=TEXT_DIM, font=ctk.CTkFont(size=10), justify="left")
+        self.country_mode_hint.pack(padx=20, anchor="w", pady=(0, 20))
 
         # --- PARSER SIDEBAR CONTENT ---
         self.parser_sidebar_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -742,18 +787,28 @@ class ValidatorApp(ctk.CTk):
         self.tabs_frame = ctk.CTkFrame(self.bottom_container, fg_color="transparent")
         self.tabs_frame.pack(fill="x", pady=(15, 10))
         
-        self.tab_seg = ctk.CTkSegmentedButton(self.tabs_frame, values=["Терминал", "Результаты"], command=self._switch_tab, fg_color=BG_SIDEBAR, selected_color=ACCENT_PRIMARY, selected_hover_color=ACCENT_PRIMARY_HOVER, unselected_color=BG_SIDEBAR, unselected_hover_color=BG_CARD_2, text_color=TEXT_MAIN)
+        self.tab_seg = ctk.CTkSegmentedButton(self.tabs_frame, values=["Терминал", "Результаты", "Прокси"], command=self._switch_tab, fg_color=BG_SIDEBAR, selected_color=ACCENT_PRIMARY, selected_hover_color=ACCENT_PRIMARY_HOVER, unselected_color=BG_SIDEBAR, unselected_hover_color=BG_CARD_2, text_color=TEXT_MAIN)
         self.tab_seg.set("Терминал")
         self.tab_seg.pack(anchor="center")
         
         self.terminal_view = ctk.CTkFrame(self.bottom_container, fg_color="transparent")
         self.table_view = ctk.CTkFrame(self.bottom_container, fg_color="transparent")
-        
+        self.proxy_view = ctk.CTkFrame(self.bottom_container, fg_color="transparent")
+        self._build_proxy_panel()
+
         self.terminal_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-        
+
         self.terminal_header = ctk.CTkFrame(self.terminal_view, fg_color="transparent")
         self.terminal_header.pack(fill="x", pady=(0, 10))
-        
+
+        # Сколько строк лога не поместилось в буфер. Пустая метка при обычной
+        # работе; заполняется, только если поток результатов обогнал окно —
+        # молча терять лог нельзя, иначе по терминалу нельзя судить о прогоне.
+        self.log_note_lbl = ctk.CTkLabel(self.terminal_header, text="",
+                                         text_color=TEXT_DIM,
+                                         font=ctk.CTkFont(size=11))
+        self.log_note_lbl.pack(side="left")
+
         self.copy_logs_btn = ctk.CTkButton(self.terminal_header, text="Копировать", width=120, height=28, corner_radius=8, font=ctk.CTkFont(size=12), command=self.copy_terminal_logs, fg_color="transparent", border_width=1, border_color=BORDER_STRONG, hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN)
         self.copy_logs_btn.pack(side="right")
         
@@ -997,13 +1052,207 @@ class ValidatorApp(ctk.CTk):
         self.parser_tree.configure(yscrollcommand=self.parser_scrollbar.set)
         self.parser_scrollbar.grid(row=0, column=1, sticky="ns")
 
-    def _switch_tab(self, value):
-        if value == "Терминал":
-            self.table_view.pack_forget()
-            self.terminal_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+    def _on_country_mode_change(self, value):
+        """Переключает пороги предсказания страны по имени.
+
+        Действует сразу, без перезапуска: пороги читаются на каждом
+        предсказании, а не защёлкиваются при старте прогона.
+        """
+        from core.parser.ml_predictor import set_country_mode
+        mode = "accuracy" if value == "Точность" else "coverage"
+        set_country_mode(mode)
+        if mode == "accuracy":
+            self.country_mode_hint.configure(
+                text="неуверенная страна остаётся пустой (верно ~50%, пусто ~42%)")
+            self.safe_log(
+                "[INFO] Страна по имени: режим ТОЧНОСТЬ. Слабое распределение "
+                "отбрасывается — колонка будет заполнена реже, но вернее.", "info")
         else:
-            self.terminal_view.pack_forget()
+            self.country_mode_hint.configure(
+                text="заполнено почти всегда, ~треть стран — догадка")
+            self.safe_log(
+                "[INFO] Страна по имени: режим ЗАПОЛНЕННОСТЬ. Колонка заполняется "
+                "почти всегда; догадку видно по колонке «Источник».", "info")
+
+    def _build_proxy_panel(self):
+        """Вкладка «Прокси»: что за пул загружен и что им можно проверить.
+
+        Зачем она нужна. Валидатор умеет много такого, о чём по окну догадаться
+        было нельзя: он выясняет РЕАЛЬНЫЙ выходной IP каждого прокси, схлопывает
+        дубли (десять строк с одним выходом — это ротация из одного адреса),
+        определяет тип адреса и страну, спрашивает у почтовиков напрямую, пустят
+        ли они. Всё это уходило строчками в лог и прокручивалось наверх. Здесь
+        оно лежит на виду и не исчезает.
+        """
+        wrapper = ctk.CTkScrollableFrame(self.proxy_view, fg_color="transparent")
+        wrapper.pack(fill="both", expand=True)
+        self.proxy_panel_body = wrapper
+
+        self.proxy_panel_hint = ctk.CTkLabel(
+            wrapper,
+            text=("Профиль появится после запуска: валидатор сам определит\n"
+                  "выходной IP каждого прокси, схлопнет дубли и спросит\n"
+                  "у почтовиков, пустят ли они этот адрес."),
+            text_color=TEXT_MUTED, font=ctk.CTkFont(size=12), justify="left")
+        self.proxy_panel_hint.pack(anchor="w", padx=4, pady=8)
+
+        self.proxy_cards = {}
+
+    def _proxy_metric(self, parent, key, title, hint):
+        """Одна плитка сводки. Значение обновляется, не пересоздаётся."""
+        card = ctk.CTkFrame(parent, fg_color=BG_CARD_1, corner_radius=10,
+                            border_width=1, border_color=BORDER)
+        ctk.CTkLabel(card, text=title, text_color=TEXT_MUTED,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14, pady=(10, 0))
+        value = ctk.CTkLabel(card, text="—", text_color=TEXT_MAIN,
+                             font=ctk.CTkFont(size=20, weight="bold"))
+        value.pack(anchor="w", padx=14, pady=(2, 0))
+        note = ctk.CTkLabel(card, text=hint, text_color=TEXT_DIM,
+                            font=ctk.CTkFont(size=10), justify="left")
+        note.pack(anchor="w", padx=14, pady=(0, 10))
+        self.proxy_cards[key] = (value, note)
+        return card
+
+    def safe_proxy_profile(self, summary):
+        """Колбэк пайплайна: сводка приходит из рабочего потока."""
+        self.after(0, lambda: self._store_proxy_summary(summary))
+
+    def _store_proxy_summary(self, summary):
+        self.proxy_summary = summary if isinstance(summary, dict) else None
+        if self.proxy_summary:
+            rotation = self.proxy_summary.get("unique_ips", 0)
+            duplicates = self.proxy_summary.get("duplicates", 0)
+            if duplicates:
+                # Это то самое, чего раньше не было видно вообще: ротация
+                # меньше, чем кажется по числу строк в файле.
+                self.safe_log(
+                    f"[DEAD] Реальная ротация — {rotation} адресов, а не "
+                    f"{self.proxy_summary.get('total', 0)} прокси: {duplicates} из них "
+                    "выходят через уже занятый IP. Почтовик видит адреса, а не строки.",
+                    "dead")
+        if self._active_tab == "Прокси":
+            self._render_proxy_panel()
+
+    def _render_proxy_panel(self):
+        """Перерисовывает панель. Вызывается по событию, а не по таймеру."""
+        summary = self.proxy_summary
+        if not summary:
+            return
+
+        for child in self.proxy_panel_body.winfo_children():
+            child.destroy()
+        self.proxy_cards = {}
+
+        total = summary.get("total", 0)
+        unique = summary.get("unique_ips", 0)
+        duplicates = summary.get("duplicates", 0)
+
+        grid = ctk.CTkFrame(self.proxy_panel_body, fg_color="transparent")
+        grid.pack(fill="x", pady=(0, 14))
+        grid.grid_columnconfigure((0, 1, 2), weight=1, uniform="pcard")
+
+        self._proxy_metric(grid, "rotation", "Реальная ротация",
+                           "разных выходных IP — столько адресов видит почтовик"
+                           ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self._proxy_metric(grid, "dupes", "Дубли по выходу",
+                           "прокси, выходящих через уже занятый адрес"
+                           ).grid(row=0, column=1, sticky="ew", padx=8)
+        self._proxy_metric(grid, "speed", "Скорость (медиана)",
+                           "задержка до баннера, участвует в выборе прокси"
+                           ).grid(row=0, column=2, sticky="ew", padx=(8, 0))
+
+        self.proxy_cards["rotation"][0].configure(text=f"{unique} / {total}")
+        dup_value, dup_note = self.proxy_cards["dupes"]
+        dup_value.configure(text=str(duplicates),
+                            text_color=ACCENT_ERROR if duplicates else ACCENT_SUCCESS)
+        if duplicates:
+            dup_note.configure(
+                text=f"самая крупная группа — {summary.get('largest_group', 0)} прокси "
+                     "с одним IP")
+        median = summary.get("latency_median")
+        self.proxy_cards["speed"][0].configure(
+            text=f"{median} мс" if median is not None else "—")
+        if summary.get("latency_min") is not None:
+            self.proxy_cards["speed"][1].configure(
+                text=f"от {summary['latency_min']} до {summary['latency_max']} мс")
+
+        self._proxy_section(
+            "Пригодность по провайдерам",
+            "Спрошено у самих почтовиков пробой до MAIL FROM, а не выведено из списков.",
+            [(label, f"годны {c['ok']}   не пустят {c['no']}   не проверено {c['unknown']}",
+              ACCENT_SUCCESS if c["ok"] else (ACCENT_ERROR if c["no"] else TEXT_MUTED))
+             for label, c in (summary.get("fitness") or {}).items()])
+
+        by_type = summary.get("by_type") or {}
+        type_names = {"residential": "Жилые (лучшая репутация)",
+                      "datacenter": "Датацентровые (режут чаще всего)",
+                      "mobile": "Мобильные", "unknown": "Тип не определён"}
+        self._proxy_section(
+            "Тип выходных адресов",
+            "Фильтры смотрят именно на это: датацентровый IP блокируется заметно чаще жилого.",
+            [(type_names.get(kind, kind), f"{count} адресов",
+              ACCENT_WARNING if kind == "datacenter" else TEXT_MAIN)
+             for kind, count in sorted(by_type.items(), key=lambda kv: -kv[1])])
+
+        countries = summary.get("countries") or {}
+        if countries:
+            top = sorted(countries.items(), key=lambda kv: -kv[1])[:12]
+            self._proxy_section(
+                "География выходных адресов",
+                "Прокси из страны домена получателя выбирается первым — это снижает долю отказов.",
+                [(code, f"{count} адресов", TEXT_MAIN) for code, count in top])
+
+        self._proxy_section(
+            "Гигиена адресов",
+            "PTR нужен Yahoo и AOL; чёрные списки и «грязное» имя закрывают Outlook, iCloud и GMX.",
+            [("С обратным DNS (PTR)", f"{summary.get('with_ptr', 0)} прокси", ACCENT_SUCCESS),
+             ("PTR проверить не удалось", f"{summary.get('ptr_unknown', 0)} прокси", TEXT_MUTED),
+             ("В чёрных списках", f"{summary.get('in_dnsbl', 0)} прокси",
+              ACCENT_ERROR if summary.get('in_dnsbl') else TEXT_MAIN),
+             ("Имя в PTR выдаёт прокси/VPN", f"{summary.get('rdns_dirty', 0)} прокси",
+              ACCENT_WARNING if summary.get('rdns_dirty') else TEXT_MAIN)])
+
+    def _proxy_section(self, title, hint, rows):
+        """Блок «заголовок + пояснение + строки». Пустой блок не рисуется."""
+        if not rows:
+            return
+        block = ctk.CTkFrame(self.proxy_panel_body, fg_color=BG_CARD_1,
+                             corner_radius=10, border_width=1, border_color=BORDER)
+        block.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(block, text=title, text_color=TEXT_MAIN,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(
+            anchor="w", padx=14, pady=(12, 0))
+        ctk.CTkLabel(block, text=hint, text_color=TEXT_DIM, justify="left",
+                     font=ctk.CTkFont(size=10)).pack(anchor="w", padx=14, pady=(2, 8))
+
+        for label, value, color in rows:
+            line = ctk.CTkFrame(block, fg_color="transparent")
+            line.pack(fill="x", padx=14, pady=1)
+            ctk.CTkLabel(line, text=label, text_color=TEXT_MUTED,
+                         font=ctk.CTkFont(size=12)).pack(side="left")
+            ctk.CTkLabel(line, text=value, text_color=color,
+                         font=ctk.CTkFont(size=12, weight="bold")).pack(side="right")
+        ctk.CTkFrame(block, height=8, fg_color="transparent").pack()
+
+    def _switch_tab(self, value):
+        # Активная вкладка запоминается: таблица перерисовывается только когда
+        # она видна. На вкладке терминала эта работа не видна никому, а стоит
+        # ровно столько же — именно она и съедала главный поток.
+        self._active_tab = value
+        for view in (self.terminal_view, self.table_view, self.proxy_view):
+            view.pack_forget()
+        if value == "Терминал":
+            self.terminal_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        elif value == "Прокси":
+            self.proxy_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+            self._render_proxy_panel()
+        else:
             self.table_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+            # При переходе на вкладку показываем СРАЗУ, не дожидаясь таймера
+            self._table_dirty = False
+            self._table_throttle.reset()
+            self.refresh_validator_tree(force=True)
 
     def _switch_parser_tab(self, value):
         if value == "Терминал":
@@ -1250,7 +1499,7 @@ class ValidatorApp(ctk.CTk):
             return
             
         self.stats = {"valid": 0, "invalid": 0, "spam": 0, "unknown": 0, "names": 0}
-        self.results_data.clear()
+        self.result_store.clear()
         
         self.stat_0.configure(text="0")
         self.stat_1.configure(text="0")
@@ -1315,20 +1564,40 @@ class ValidatorApp(ctk.CTk):
         self.on_pipeline_complete()
 
     def safe_log(self, text, tag="info"):
-        self.validator_log_queue.put((text, tag))
-        
-    def _log_ui(self, text, tag):
+        self.validator_log_queue.put(text, tag)
+
+    def _flush_log_ui(self, chunk):
+        """Вставляет пачку строк ОДНИМ обращением к виджету.
+
+        Раньше на каждую строку приходилось: снять блокировку, вставить,
+        посчитать общее число строк, обрезать лишние, прокрутить, вернуть
+        блокировку. Шесть операций Tk на строку и сто тысяч строк за прогон —
+        столько главный поток просто не успевает, и окно замирает. Теперь
+        накопленное за тик склеивается и вставляется целиком.
+        """
+        if not chunk:
+            return
         self.terminal_box.configure(state="normal")
-        self.terminal_box.insert("end", text + "\n", tag)
-        
-        # Keep only the last 1000 lines
+        # Теги разные, поэтому склеиваем подряд идущие строки с одинаковым
+        # тегом: обычно весь тик — это один тег, и вставка получается одна.
+        run_tag = chunk[0][1]
+        run = []
+        for text, tag in chunk:
+            if tag != run_tag and run:
+                self.terminal_box.insert("end", "\n".join(run) + "\n", run_tag)
+                run, run_tag = [], tag
+            run.append(text)
+        if run:
+            self.terminal_box.insert("end", "\n".join(run) + "\n", run_tag)
+
+        # Обрезка тоже раз в тик, а не на каждой строке
         try:
             line_count = int(self.terminal_box.index('end-1c').split('.')[0])
             if line_count > 1000:
                 self.terminal_box.delete("1.0", f"{line_count - 1000}.0")
         except Exception:
             pass
-            
+
         self.terminal_box.see("end")
         self.terminal_box.configure(state="disabled")
 
@@ -1354,31 +1623,62 @@ class ValidatorApp(ctk.CTk):
             self.progress_bar.configure(progress_color=ACCENT_PRIMARY)
 
     def _poll_validator_queues(self):
+        """Тик интерфейса. Здесь была главная причина зависаний.
+
+        Что было. На КАЖДОМ тике (двадцать раз в секунду) вызывался
+        refresh_validator_tree(), а он звал _get_filtered_results(), который
+        перебирал ВСЮ базу результатов, чтобы показать сотню строк. Сто тысяч
+        итераций двадцать раз в секунду в главном потоке Tk — окно переставало
+        отзываться тем сильнее, чем дольше шёл прогон.
+
+        Что стало. Данные кладутся в индексированное хранилище (дёшево),
+        а виджеты трогаются по таймеру и только если есть что показывать:
+        таблица — не чаще двух раз в секунду и только на своей вкладке,
+        счётчики — четыре раза в секунду, лог — одной пачкой.
+        """
         import queue
-        # Process logs
-        for _ in range(500):
+
+        self._flush_log_ui(self.validator_log_queue.drain(limit=400))
+
+        # Результаты забираем пачкой и кладём в хранилище — это чистый Python
+        # без единого обращения к Tk, поэтому предел здесь щедрый.
+        added = 0
+        for _ in range(2000):
             try:
-                msg, tag = self.validator_log_queue.get_nowait()
-                self._log_ui(msg, tag)
+                email, status, reason, mx, data = self.validator_result_queue.get_nowait()
             except queue.Empty:
                 break
-                
-        # Batch process results
-        results_to_insert = []
-        for _ in range(500):
-            try:
-                item = self.validator_result_queue.get_nowait()
-                results_to_insert.append(item)
-            except queue.Empty:
-                break
-                
-        if results_to_insert:
-            for email, status, reason, mx, data in results_to_insert:
-                self._add_result_ui(email, status, reason, mx, data)
-                
+            self._add_result_ui(email, status, reason, mx, data)
+            added += 1
+
+        if added:
+            self._table_dirty = True
+            if self._stats_throttle.ready():
+                self._refresh_stat_cards()
+
+        # Таблицу перерисовываем, только когда она видна: на вкладке терминала
+        # эта работа не видна никому, а стоит столько же.
+        if (self._table_dirty and self._active_tab == "Результаты"
+                and self._table_throttle.ready()):
+            self._table_dirty = False
             self.refresh_validator_tree()
-                
+
         self.after(50, self._poll_validator_queues)
+
+    def _refresh_stat_cards(self):
+        """Переносит готовые счётчики хранилища в карточки."""
+        counts = self.result_store.counts()
+        self.stat_1.configure(text=str(counts["valid"]))
+        self.stat_2.configure(text=str(counts["invalid"]))
+        self.stat_3.configure(text=str(counts["spam"]))
+        self.stat_4.configure(text=str(counts["unknown"]))
+        self.stat_names.configure(text=str(counts["names"]))
+        dropped = self.validator_log_queue.dropped
+        if dropped and hasattr(self, "log_note_lbl"):
+            # Молча терять строки лога нельзя — иначе по терминалу нельзя
+            # судить о прогоне. Говорим, сколько не поместилось.
+            self.log_note_lbl.configure(
+                text=f"строк лога пропущено: {dropped} (потолок буфера)")
 
     def safe_add_result(self, email, status, reason, mx, data=None):
         if data is None:
@@ -1386,34 +1686,32 @@ class ValidatorApp(ctk.CTk):
         self.validator_result_queue.put((email, status, reason, mx, data))
         
     def _add_result_ui(self, email, status, reason, mx, data):
-        self.results_data.append({"email": email, "status": status, "reason": reason, "mx": mx, "data": data})
-        
-        if status == "Valid":
-            self.stats["valid"] += 1
-            self.stat_1.configure(text=str(self.stats["valid"]))
-            if data.get("name"):
-                self.stats["names"] += 1
-                self.stat_names.configure(text=str(self.stats["names"]))
+        """Кладёт результат в хранилище и в лог. Виджеты здесь НЕ трогаются.
+
+        Раньше каждая строка результата дёргала .configure() у карточки
+        статистики — то есть на сто тысяч адресов приходилось сто тысяч
+        перерисовок виджета, каждая из которых заставляла Tk пересчитывать
+        раскладку. Теперь счётчики хранятся в самом хранилище и переносятся
+        в карточки по таймеру, пачкой.
+        """
+        data = data if isinstance(data, dict) else {}
+        group = self.result_store.append(email, status, reason, mx, data)
+
+        # Строка лога по-прежнему пишется на каждый адрес: живой поток в
+        # терминале — это то, ради чего окно и открыто. Дорогой её делала не
+        # запись, а немедленная вставка в Tk; вставка теперь идёт пачками,
+        # а буфер имеет потолок и не может съесть память.
+        if group == "valid":
             self.safe_log(f"[VALID] {email} -> {reason}", "valid")
-        elif "Trap" in status or "Disposable" in status or status == "Risky":
-            self.stats["spam"] += 1
-            self.stat_3.configure(text=str(self.stats["spam"]))
-            self.safe_log(f"[{status.upper()}] {email} -> {reason}", "trap")
-        elif status == "Role-based":
-            self.stats["spam"] += 1
-            self.stat_3.configure(text=str(self.stats["spam"]))
-            self.safe_log(f"[ROLE] {email} -> {reason}", "trap")
-        elif status == "Unknown":
-            if "unknown" not in self.stats: self.stats["unknown"] = 0
-            self.stats["unknown"] += 1
-            self.stat_4.configure(text=str(self.stats["unknown"]))
+        elif group == "spam":
+            label = "ROLE" if status == "Role-based" else str(status).upper()
+            self.safe_log(f"[{label}] {email} -> {reason}", "trap")
+        elif group == "unknown":
             self.safe_log(f"[UNKNOWN] {email} -> {reason}", "trap")
-        elif status == "Unverified":
-            self.safe_log(f"[SKIP] {email} -> {reason}", "info")
-        else:
-            self.stats["invalid"] += 1
-            self.stat_2.configure(text=str(self.stats["invalid"]))
+        elif group == "invalid":
             self.safe_log(f"[DEAD] {email} -> {reason}", "dead")
+        else:
+            self.safe_log(f"[SKIP] {email} -> {reason}", "info")
             
     def _on_filter_change(self):
         self.validator_page = 1
@@ -1433,28 +1731,35 @@ class ValidatorApp(ctk.CTk):
             self.refresh_validator_tree(force=True)
             
     def refresh_validator_tree(self, force=False):
-        filtered = self._get_filtered_results()
         import math
-        total_pages = max(1, math.ceil(len(filtered) / self.validator_page_size))
-        
+        groups = self._selected_groups()
+        min_score = self._get_min_score()
+
+        # Число страниц: без порога по скору оно берётся из готовых счётчиков
+        # и не стоит ничего. Раньше ради него материализовалась вся выборка.
+        total = self.result_store.matching_count(groups, min_score=min_score)
+        total_pages = max(1, math.ceil(total / self.validator_page_size))
+
         if self.validator_page > total_pages:
             self.validator_page = max(1, total_pages)
-            
+
         self.lbl_page.configure(text=f"Стр. {self.validator_page} / {total_pages}")
-        
-        start_idx = (self.validator_page - 1) * self.validator_page_size
-        end_idx = start_idx + self.validator_page_size
-        page_data = filtered[start_idx:end_idx]
-        
-        current_emails = [self.tree.item(child)["values"][0] for child in self.tree.get_children()]
+
+        page_data = self.result_store.page(
+            groups, page=self.validator_page,
+            size=self.validator_page_size, min_score=min_score)
+
+        # Сравнение «а изменилось ли что-нибудь» раньше дёргало tree.item()
+        # на каждой видимой строке — сотня обращений к Tk только чтобы решить
+        # НЕ перерисовывать. Держим прошлый список у себя.
         new_emails = [r["email"] for r in page_data]
-        
-        if not force and current_emails == new_emails:
+        if not force and getattr(self, "_shown_emails", None) == new_emails:
             return
-            
+        self._shown_emails = new_emails
+
         for child in self.tree.get_children():
             self.tree.delete(child)
-            
+
         for r in page_data:
             email = r["email"]
             status = r["status"]
@@ -1709,37 +2014,32 @@ class ValidatorApp(ctk.CTk):
         except (ValueError, AttributeError):
             return 0
 
+    def _selected_groups(self):
+        """Группы, отмеченные галочками фильтра."""
+        groups = []
+        if self.chk_valid_var.get():
+            groups.append("valid")
+        if self.chk_invalid_var.get():
+            groups.append("invalid")
+        if self.chk_spam_var.get():
+            groups.append("spam")
+        if self.chk_unknown_var.get():
+            groups.append("unknown")
+        return tuple(groups)
+
     def _get_filtered_results(self):
-        export_data = []
-        min_score = self._get_min_score()
-        for r in self.results_data:
-            st = r["status"]
-            matched = False
-            if self.chk_valid_var.get() and st == "Valid":
-                matched = True
-            elif self.chk_invalid_var.get() and "Invalid" in st:
-                matched = True
-            elif self.chk_spam_var.get() and ("Trap" in st or "Disposable" in st or "Risky" in st or st == "Role-based"):
-                matched = True
-            elif self.chk_unknown_var.get() and st == "Unknown":
-                matched = True
+        """Вся выборка целиком — только для экспорта.
 
-            if not matched:
-                continue
-
-            # Отсекаем слабые адреса по порогу скора (п.37)
-            if min_score > 0:
-                try:
-                    if int(r.get("data", {}).get("engagement_score", 0) or 0) < min_score:
-                        continue
-                except (TypeError, ValueError):
-                    continue
-
-            export_data.append(r)
-        return export_data
+        Для ПОКАЗА этим пользоваться нельзя: здесь материализуется вся база.
+        Раньше отсюда брались данные и для таблицы тоже, и полный перебор
+        случался двадцать раз в секунду. Таблица теперь ходит в
+        result_store.page(), который обрывается на нужной странице.
+        """
+        return list(self.result_store.iter_matching(
+            self._selected_groups(), min_score=self._get_min_score()))
 
     def export_results(self):
-        if not hasattr(self, 'results_data') or not self.results_data:
+        if not len(self.result_store):
             messagebox.showwarning("Пусто", "Нет данных для экспорта.")
             return
             
@@ -1856,7 +2156,7 @@ class ValidatorApp(ctk.CTk):
                       "Они будут вычтены при сохранении.", "info")
 
     def copy_results(self):
-        if not hasattr(self, 'results_data') or not self.results_data:
+        if not len(self.result_store):
             messagebox.showwarning("Пусто", "Нет данных для копирования.")
             return
             
