@@ -42,6 +42,7 @@ AUDIT_TOOLING = {
     "verify_gui_builds.py",
     "verify_no_blocking_sleep.py",
     "verify_requirements.py",
+    "verify_gaps_closed.py",
 }
 
 _failures = []
