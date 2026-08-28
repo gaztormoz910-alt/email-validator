@@ -485,7 +485,11 @@ def verify_proxy():
     eq(v5._dns_proxy(), "", "DNS уходит напрямую, раскрывая реальный IP")
 
     # Потолки параллельности
-    profile_src = open(os.path.join(ROOT, "core", "network.py"), encoding="utf-8").read()
+    # Профилирование прокси уехало из network.py в core/proxy_probe.py, когда
+    # монолит разобрали на модули. Читаем там, где код теперь лежит: иначе
+    # проверка молча искала бы в чужом файле и падала на .index().
+    profile_src = open(os.path.join(ROOT, "core", "proxy_probe.py"),
+                       encoding="utf-8").read()
     check(f"min(workers, {c['worker_cap']})" in profile_src,
           f"потолок воркеров профилирования не {c['worker_cap']}")
     checker = AsyncProxyChecker(["1.2.3.4:1080"], workers=100000, timeout=1, mode="smtp")

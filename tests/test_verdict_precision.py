@@ -183,8 +183,14 @@ class TestNarrowInvalid(unittest.TestCase):
                          "valid")
         self.assertEqual(self.parse(452, b"insufficient system storage",
                                     "a@b.com", "b.com")["status"], "unknown")
+        # 551 — «User not local; please try <forward-path>». Сервер говорит
+        # «этот ящик не у меня», а не «этого ящика нет»: RFC 5321 §3.4 ровно
+        # для того и завёл код, чтобы указать НА ДРУГОЙ сервер. Раньше здесь
+        # стоял приговор, и он хоронил живые адреса на доменах с раздельной
+        # маршрутизацией (почта уехала к другому провайдеру, старый MX ещё
+        # отвечает). Доказательства отсутствия ящика в 551 нет, поэтому risky.
         self.assertEqual(self.parse(551, b"user not local", "a@b.com", "b.com")["status"],
-                         "invalid")
+                         "risky")
 
 
 class TestPostmasterTrust(unittest.TestCase):
@@ -268,6 +274,53 @@ class TestPostmasterTrust(unittest.TestCase):
 
         v.check_email("live@corp-x.com")
         self.assertEqual(probed, [], "postmaster спрошен там, где никого не хоронят")
+
+
+class TestCheckEmailAsksForTheControlProbe(unittest.TestCase):
+    """check_email обязан ЗАКАЗЫВАТЬ контрольную пробу там, где она нужна.
+
+    Дыра, которую это закрывает, тихая. Тройная проба на catch-all при сбое
+    (мёртвый прокси, таймаут) возвращает False — «не catch-all», — потому что
+    другого способа сказать «не знаю» у неё нет. Дальше обычный пинг получает
+    250 на настоящий адрес, и без контрольной пробы это уехало бы в Valid на
+    домене, который принимает вообще всё. Ровно тот ложный Valid, ради
+    которого потом приходит отскок.
+
+    Контрольная проба стоит одной команды RCPT в уже открытой сессии, но
+    заказывается она НЕ везде: гиганты вроде gmail.com catch-all быть не
+    могут, и тратить её там незачем. Проверяется и то, и другое.
+    """
+
+    def _validator(self, seen):
+        from core.network import NetworkValidator
+
+        validator = NetworkValidator(proxies=[])
+        validator.get_mx_records = lambda domain: ["mx.example.com"]
+        validator.is_catch_all_domain = lambda domain, mx: False
+        validator.check_dns_health = lambda domain, mx_record="": {"score": 0}
+
+        def ping(email, mx_records, control_probe=False):
+            seen.append(control_probe)
+            return {"status": "valid", "reason": "250 OK"}
+
+        validator.stealth_smtp_ping = ping
+        return validator
+
+    def test_ordinary_domain_gets_the_control_probe(self):
+        seen = []
+        self._validator(seen).check_email("someone@corp-example.com")
+        self.assertEqual(seen, [True],
+                         "контрольная проба не заказана: сорвавшаяся проверка "
+                         "catch-all выдаст ложный Valid")
+
+    def test_giants_do_not_pay_for_it(self):
+        for domain in ("gmail.com", "yandex.ru", "icloud.com"):
+            with self.subTest(domain=domain):
+                seen = []
+                self._validator(seen).check_email(f"someone@{domain}")
+                self.assertEqual(seen, [False],
+                                 "лишняя проба на домене, который catch-all "
+                                 "быть не может")
 
 
 if __name__ == "__main__":
