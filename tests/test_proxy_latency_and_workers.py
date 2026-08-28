@@ -102,7 +102,10 @@ class TestProfilingWorkers(unittest.TestCase):
 
     def test_workers_argument_is_honoured(self):
         seen = {}
-        import core.network as net
+        # Патчим ТОТ модуль, где пул на самом деле создаётся. Профилирование
+        # переехало из network.py в proxy_probe.py, и подмена в старом месте
+        # молча ничего не делала бы: тест был бы зелёным, ничего не проверив.
+        import core.proxy_probe as net
         real_pool = net.ThreadPoolExecutor
 
         class SpyPool(real_pool):
@@ -119,7 +122,7 @@ class TestProfilingWorkers(unittest.TestCase):
         self.assertEqual(seen["max_workers"], 50)  # ограничено размером списка
 
     def test_workers_are_capped_and_sanitised(self):
-        import core.network as net
+        import core.proxy_probe as net
         real_pool = net.ThreadPoolExecutor
         seen = {}
 
