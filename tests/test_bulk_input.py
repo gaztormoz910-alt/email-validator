@@ -132,8 +132,11 @@ class TestGuiLoad(unittest.TestCase):
         source = inspect.getsource(ValidatorApp._count_lines_async)
         self.assertIn("threading.Thread", source,
                       "подсчёт строк идёт в главном потоке — окно замрёт")
-        self.assertIn("self.after", source,
-                      "результат подсчёта не возвращается в поток интерфейса")
+        # _ui_call — это self.after с защитой от закрытого окна (см. ui/gui.py).
+        # Проверка на «результат уходит в поток интерфейса», а не на конкретное
+        # написание: прямой after() тут тоже был бы верен, просто хуже.
+        self.assertTrue("self._ui_call" in source or "self.after" in source,
+                        "результат подсчёта не возвращается в поток интерфейса")
 
     def test_gui_load_no_synchronous_counting_left(self):
         """Ни один обработчик не зовёт count_total_lines напрямую."""

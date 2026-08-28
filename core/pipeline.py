@@ -8,6 +8,7 @@ import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from core.bounded import BoundedCache
 from core.cache import ResultCache
 from core.runstate import RunState, run_id_for, DEFAULT_RETRY_DELAY
 from core.cleaner import EmailCleaner, normalize_for_dedup
@@ -19,6 +20,7 @@ from core.parser.name_extractor import NameExtractor
 from core.parser.ml_predictor import MLPredictor
 from core.disposable import is_disposable
 from core.gravatar import GravatarChecker
+from core.org_role import enrich_org_role
 from core.scoring import calculate_engagement_score
 from core.provider import (classify_domain, country_from_domain,
                            country_from_location, extend_free_domains,
@@ -77,6 +79,48 @@ def _fmt_stamp(iso_stamp):
         return ""
 
 
+class _DomainGate:
+    """Один вход на домен, который убирает себя за собой.
+
+    Отдельным классом, а не замыканием: пайплайн живёт в сотне потоков, и
+    вход/выход обязаны быть симметричны даже когда внутри блока вылетело
+    исключение. Контекстный менеджер это гарантирует, ручные acquire/release
+    по коду — нет.
+    """
+
+    __slots__ = ("_owner", "_key", "_lock")
+
+    def __init__(self, owner, key):
+        self._owner = owner
+        self._key = key
+        self._lock = None
+
+    def __enter__(self):
+        owner, key = self._owner, self._key
+        with owner._inflight_guard:
+            entry = owner._inflight.get(key)
+            if entry is None:
+                entry = [threading.Lock(), 0]
+                owner._inflight[key] = entry
+            entry[1] += 1                      # ссылок на замок стало больше
+            self._lock = entry[0]
+        self._lock.acquire()
+        return self._lock
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._lock is not None:
+            self._lock.release()
+            self._lock = None
+        owner, key = self._owner, self._key
+        with owner._inflight_guard:
+            entry = owner._inflight.get(key)
+            if entry is not None:
+                entry[1] -= 1
+                if entry[1] <= 0:
+                    owner._inflight.pop(key, None)
+        return False
+
+
 class ValidationPipeline:
     def __init__(self, callbacks):
         self.callbacks = callbacks 
@@ -94,9 +138,11 @@ class ValidationPipeline:
         self.cache = None
         self._cache_hits = 0
         self._cache_lock = threading.Lock()
-        self._domain_age_cache = {}
+        # Кэши с потолком, а не словари: ключ — домен, и на базе, собранной
+        # дорками, разных доменов столько же, сколько адресов. См. core/bounded.py.
+        self._domain_age_cache = BoundedCache()
         self._domain_age_lock = threading.Lock()
-        self._http_alive_cache = {}
+        self._http_alive_cache = BoundedCache()
         self._http_alive_lock = threading.Lock()
         # Замки «один в полёте» на домен. Без них сто потоков, наткнувшись на
         # новый домен одновременно, делают сто одинаковых запросов WHOIS —
@@ -105,13 +151,21 @@ class ValidationPipeline:
         self._inflight_guard = threading.Lock()
 
     def _domain_gate(self, key):
-        """Замок на конкретный домен: остальные ждут результата, а не дублируют запрос."""
-        with self._inflight_guard:
-            gate = self._inflight.get(key)
-            if gate is None:
-                gate = threading.Lock()
-                self._inflight[key] = gate
-            return gate
+        """Замок на конкретный домен: остальные ждут результата, а не дублируют запрос.
+
+        Замок ОСВОБОЖДАЕТСЯ, когда его отпустил последний ждавший. Раньше
+        запись оставалась в словаре навсегда, и это был не кэш, а утечка:
+        замки нужны только пока запрос в полёте, а копились они по два на
+        каждый домен базы. Замерено вместе с двумя кэшами возраста и сайта —
+        468 байт на домен, 2.3 ГБ на пяти миллионах доменов.
+
+        Считаем ссылки, а не удаляем сразу после выхода: пока один поток
+        держит замок, второй уже мог взять на него ссылку и ждать. Удалить
+        запись под ним значило бы, что третий поток создаст ДРУГОЙ замок на
+        тот же домен и оба пойдут делать один и тот же запрос — ровно то, ради
+        чего замок и заводился.
+        """
+        return _DomainGate(self, key)
         
     def _http_proxies(self):
         """Прокси для HTTP-проверок (Gravatar, RDAP, HEAD).
@@ -387,6 +441,14 @@ class ValidationPipeline:
         data["provider_name"] = prov_name
         data["domain_type"] = dom_type
 
+        # Компания и должность. Оба поля выводятся из самого адреса и потому
+        # являются фактами, а не догадками: корпоративный домен куплен
+        # организацией, а `sales@` написано в адресе прямым текстом. Считаем
+        # ЗДЕСЬ, потому что нужен domain_type — у бесплатного почтовика
+        # компании нет, и колонка обязана остаться пустой, а не сообщать,
+        # что человек работает в Gmail.
+        data.update(enrich_org_role(email, dom_type))
+
         # В кэш уходит SMTP-статус, а не отображаемый: ролевой ящик
         # показывается как Role-based, но доказан-то он как Valid.
         if self.cache:
@@ -631,17 +693,57 @@ class ValidationPipeline:
         self.is_paused = False
         
         from core.streamer import StreamLoader
-        # Стартовая оценка по сырым строкам. Реальное число уникальных адресов
-        # известно только фидеру (дедуп ленивый), поэтому ниже он уточнит total,
-        # иначе прогресс-бар застревает и выглядит как зависание.
-        total_emails = StreamLoader(email_sources).count_total_lines()
-        self.callbacks['on_log'](f"[INFO] Запуск обработки {total_emails} сырых email...", "info")
+        # Стартовая ОЦЕНКА по размеру файла, а не точный подсчёт.
+        #
+        # Раньше здесь стоял count_total_lines(), то есть полный проход по
+        # файлу ДО первого проверенного адреса. На базе в сотни мегабайт это
+        # минуты, в течение которых не происходит ничего видимого: окно
+        # показывает 0/0, лог молчит, и прогон выглядит зависшим ещё до
+        # старта. Точность здесь не нужна вовсе — настоящее число уникальных
+        # адресов знает только фидер (дедуп ленивый), и он уточняет знаменатель
+        # ниже, когда доберётся до конца входа.
+        total_emails = StreamLoader(email_sources).estimate_total_lines()
+        self.callbacks['on_log'](
+            f"[INFO] Запуск обработки — во входе примерно {total_emails} строк. "
+            "Точное число уникальных адресов появится по ходу.", "info")
 
         if 'on_unique_count' in self.callbacks:
             self.callbacks['on_unique_count'](total_emails) # Approximate since dedup is lazy
-            
+
         self.callbacks['on_progress'](0, total_emails)
         processed_count = 0
+        feeder_finished = False
+
+        def refine_total():
+            """Уточняет знаменатель точным счётом, пока идёт проверка.
+
+            Оценка по трём пробам ошибается на реальных файлах на два десятка
+            процентов — измерено на списке в 712 МБ. Точный счёт при этом
+            занимает доли секунды (читаем кусками и считаем переводы строк),
+            но эти доли секунды нельзя тратить ДО старта: на холодном диске
+            гигабайтный файл читается заметно дольше, и всё это время окно
+            выглядит зависшим. Поэтому счёт идёт параллельно работе.
+
+            Если фидер к этому моменту уже дошёл до конца входа, его число
+            точнее нашего — оно про уникальные адреса, а не про сырые строки,
+            и перебивать его нельзя.
+            """
+            nonlocal total_emails
+            try:
+                exact = StreamLoader(email_sources).count_total_lines()
+            except Exception:
+                return
+            if feeder_finished or not exact or not self.is_running:
+                return
+            total_emails = exact
+            try:
+                if 'on_unique_count' in self.callbacks:
+                    self.callbacks['on_unique_count'](exact)
+                self.callbacks['on_progress'](processed_count, exact)
+            except Exception:
+                pass
+
+        threading.Thread(target=refine_total, daemon=True).start()
         
         # Очередь для Greylisting retry (п.2.4).
         #
@@ -784,7 +886,7 @@ class ValidationPipeline:
                 # Greylisted — складываем в очередь для повторной проверки (п.2.4)
                 if raw_status == "greylisted":
                     defer(email, data, is_role)
-                    return  # Не выводим результат сейчас — перепроверим позже
+                    return False  # Вердикта нет: адрес ждёт перепроверки
 
                 # Временный отказ (таймаут, сдохший прокси, лимит скорости, блок по
                 # IP) — это НЕ вердикт о ящике, а сбой нашей стороны. Отправляем в ту
@@ -792,7 +894,7 @@ class ValidationPipeline:
                 # и повтор другим прокси часто даёт однозначный ответ вместо Unknown.
                 if _is_transient_failure(raw_status, res.get("reason", "")):
                     defer(email, data, is_role)
-                    return
+                    return False   # вердикта нет, прогресс не двигаем
 
                 if raw_status == "valid":
                     status_display = "Valid"
@@ -895,7 +997,11 @@ class ValidationPipeline:
             # Уточняем знаменатель прогресса: в очередь попали только уникальные
             # адреса, а стартовая оценка считалась по сырым строкам. Без этого
             # бар застревает (например на 5/17) и выглядит как зависание.
-            nonlocal total_emails
+            nonlocal total_emails, feeder_finished
+            # Флаг ставится ДО присвоения: фоновый уточнитель проверяет именно
+            # его, и порядок «сначала флаг, потом число» гарантирует, что он
+            # не перезапишет наше число своим, менее точным.
+            feeder_finished = True
             total_emails = queued_count
             if 'on_unique_count' in self.callbacks:
                 self.callbacks['on_unique_count'](queued_count)
@@ -921,8 +1027,11 @@ class ValidationPipeline:
                 item = task_queue.get()
                 if item is None:
                     break
+                deferred = False
                 try:
-                    process_single(item)
+                    # False означает «адрес отложен на перепроверку»: вердикта
+                    # по нему ещё нет, и считать его пройденным нельзя.
+                    deferred = process_single(item) is False
                 except Exception as e:
                     # Without this the whole worker thread would die and silently
                     # drop every remaining email it was going to handle.
@@ -932,11 +1041,20 @@ class ValidationPipeline:
                         self.callbacks['on_result'](email, "Unknown", f"Processing error: {type(e).__name__}", "N/A", item[1])
                     except Exception:
                         pass
-                with progress_lock:
-                    processed_count += 1
-                    current = processed_count
-                self.callbacks['on_progress'](current, total_emails)
-                
+                # Прогресс двигают только ОКОНЧАТЕЛЬНЫЕ вердикты.
+                #
+                # Раньше счётчик рос и для отложенных адресов, поэтому бар
+                # доходил до 100% ещё до начала перепроверки — а потом в
+                # терминале продолжали появляться результаты. Выглядело как
+                # сломанный прогресс, и по сути им и было: показывалось
+                # «сколько адресов вынуто из очереди», а не «сколько
+                # проверено».
+                if not deferred:
+                    with progress_lock:
+                        processed_count += 1
+                        current = processed_count
+                    self.callbacks['on_progress'](current, total_emails)
+
         worker_threads = []
         for _ in range(safe_threads):
             wt = threading.Thread(target=worker_loop, daemon=True)
@@ -960,7 +1078,7 @@ class ValidationPipeline:
 
                 def retry_one(entry):
                     """Обрабатывает один отложенный адрес. Вызывается из пула потоков."""
-                    nonlocal retry_count
+                    nonlocal retry_count, processed_count
                     email, data, is_role, _due = entry
                     if not self.is_running:
                         return
@@ -994,6 +1112,12 @@ class ValidationPipeline:
                     state.mark_done(normalize_for_dedup(email))
                     with retry_lock:
                         retry_count += 1
+                    # Вердикт получен — вот теперь адрес пройден. Прогресс
+                    # доходит до 100% в КОНЦЕ работы, а не до перепроверки.
+                    with progress_lock:
+                        processed_count += 1
+                        current = processed_count
+                    self.callbacks['on_progress'](current, total_emails)
 
                 # Забираем всё из очереди и обрабатываем ПАРАЛЛЕЛЬНО, но не раньше
                 # срока каждой записи.
@@ -1083,6 +1207,11 @@ class ValidationPipeline:
                     email, "Unknown", "Greylisted (перепроверка не выполнена)", "N/A", data)
             except Exception:
                 pass
+            # Вердикт выдан (пусть и Unknown) — адрес пройден, бар двигаем.
+            with progress_lock:
+                processed_count += 1
+                current = processed_count
+            self.callbacks['on_progress'](current, total_emails)
         if leftover:
             self.callbacks['on_log'](
                 f"[INFO] {leftover} greylisted-адресов возвращены как Unknown "

@@ -1,6 +1,8 @@
 # ui/gui.py
 import customtkinter as ctk
+import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import itertools
 import psutil
 import socket
 import os
@@ -9,281 +11,19 @@ import threading
 from ui.colors import *
 from ui.result_store import ResultStore, group_of
 from ui.log_buffer import LogBuffer, Throttle
+# Окно собрано из примесей: разметка, вкладка парсера и переиспользуемые
+# виджеты живут в отдельных файлах. Разделение по роду работы, а не по
+# размеру: правка разметки не должна задевать логику прогона.
+from ui.panels import PanelsMixin
+from ui.parser_tab import ParserTabMixin
+from ui.widgets import (ProxyHunterInputSelector, ProxyHunterSlider,
+                        clean_input_line, _format_sources)
 from core.pipeline import ValidationPipeline
 from core.streamer import StreamLoader
 
 CLEAN_PREFIX_RE = re.compile(r'^\d+[-.)\]:й]*\s+')
 
-def clean_input_line(line):
-    # Убирает нумерацию типа "1. ", "2)", "1-й ", "100:", "1 ", оставляя только суть.
-    return CLEAN_PREFIX_RE.sub('', line.strip())
-
-
-def _format_sources(data):
-    """Коротко: откуда взяты имя, пол и страна.
-
-    «файл» означает, что значение пришло из исходной базы и является фактом.
-    Всё остальное — предсказание, и пользователь должен видеть разницу:
-    раньше догадка ML стояла в колонке наравне с данными из файла.
-    """
-    marks = []
-    for field, label in (("name_source", "имя"), ("gender_source", "пол"),
-                         ("country_source", "гео")):
-        source = data.get(field)
-        if source:
-            marks.append(f"{label}:{source}")
-    return " ".join(marks)
-
-
-class ProxyHunterInputSelector(ctk.CTkFrame):
-    def __init__(self, parent, label_text, button_text, command=None, on_paste=None, on_clear=None):
-        super().__init__(parent, fg_color="transparent")
-        
-        self.command = command
-        self.on_paste = on_paste
-        self.on_clear = on_clear
-        
-        self.header_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.header_frame.pack(fill="x", pady=(0, 5))
-        
-        self.label = ctk.CTkLabel(self.header_frame, text=label_text, text_color=TEXT_MUTED, font=ctk.CTkFont(size=12))
-        self.label.pack(side="left")
-        
-        self.seg_btn = ctk.CTkSegmentedButton(self.header_frame, values=["Файл", "Текст"], command=self._switch_mode, height=22, fg_color=BG_CARD_2, selected_color=ACCENT_PRIMARY, selected_hover_color=ACCENT_PRIMARY_HOVER, unselected_color=BG_CARD_2, unselected_hover_color=BORDER, text_color=TEXT_MAIN, font=ctk.CTkFont(size=11))
-        self.seg_btn.pack(side="right")
-        self.seg_btn.set("Файл")
-        
-        self.clear_btn = ctk.CTkButton(self.header_frame, text="🗑", width=26, height=22, corner_radius=6, fg_color=BG_CARD_2, hover_color=ACCENT_ERROR, text_color=TEXT_MAIN, command=self._clear_data)
-        self.clear_btn.pack(side="right", padx=(0, 5))
-        
-        self.file_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.file_frame.pack(fill="x")
-        
-        self.entry = ctk.CTkEntry(self.file_frame, fg_color=BG_CARD_2, border_color=BORDER, text_color=TEXT_MAIN, state="disabled", height=30)
-        self.entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        
-        self.btn = ctk.CTkButton(self.file_frame, text=button_text, command=self._browse_file, fg_color=ACCENT_PRIMARY, hover_color=ACCENT_PRIMARY_HOVER, text_color=TEXT_ON_ACCENT, width=70, height=30, corner_radius=6)
-        self.btn.pack(side="right")
-        
-        self.text_frame = ctk.CTkFrame(self, fg_color="transparent")
-        
-        self.textbox = ctk.CTkTextbox(self.text_frame, height=80, fg_color=BG_CARD_2, border_color=BORDER, border_width=1, text_color=TEXT_MAIN, font=ctk.CTkFont(size=11), wrap="none")
-        self.textbox.pack(fill="x")
-        self.textbox.bind("<KeyRelease>", self._text_modified)
-        
-        # Explicit paste bindings for English
-        self.textbox.bind("<Control-v>", self._paste)
-        self.textbox.bind("<Control-V>", self._paste)
-        self.textbox.bind("<Control-c>", self._copy_cyrillic)
-        self.textbox.bind("<Control-C>", self._copy_cyrillic)
-        self.textbox.bind("<Control-x>", self._cut_cyrillic)
-        self.textbox.bind("<Control-X>", self._cut_cyrillic)
-        self.textbox.bind("<Control-a>", self._select_all_cyrillic)
-        self.textbox.bind("<Control-A>", self._select_all_cyrillic)
-
-        # Generic binding for Russian layout compatibility
-        self.textbox.bind("<Control-KeyPress>", self._handle_ctrl_keypress)
-        
-        # Right click menu
-        self.textbox.bind("<Button-3>", self._show_menu)
-        
-    def _show_menu(self, event):
-        # We can't easily do a native popup menu in CTk without tkinter.Menu, but tkinter.Menu looks bad.
-        # Let's just use standard tkinter Menu for right click.
-        import tkinter as tk
-        m = tk.Menu(self.textbox, tearoff=0, bg=BG_CARD_2, fg=TEXT_MAIN, activebackground=ACCENT_PRIMARY)
-        m.add_command(label="Вставить", command=self._paste_from_menu)
-        m.add_command(label="Копировать", command=self._copy_from_menu)
-        m.add_command(label="Выбрать все", command=self._select_all_from_menu)
-        m.tk_popup(event.x_root, event.y_root)
-
-    def _paste_from_menu(self):
-        try:
-            text = self.clipboard_get()
-            cleaned_text = "\n".join([clean_input_line(line) for line in text.split("\n") if line.strip()])
-            self.textbox.insert("insert", cleaned_text)
-            self._text_modified(None)
-        except Exception:
-            pass
-
-    def _copy_from_menu(self):
-        try:
-            text = self.textbox.get("sel.first", "sel.last")
-            self.clipboard_clear()
-            self.clipboard_append(text)
-        except Exception:
-            pass
-
-    def _select_all_from_menu(self):
-        self.textbox.tag_add("sel", "1.0", "end")
-
-    def _paste(self, event):
-        try:
-            text = self.clipboard_get()
-            cleaned_text = "\n".join([clean_input_line(line) for line in text.split("\n") if line.strip()])
-            self.textbox.insert("insert", cleaned_text)
-            self._text_modified(None)
-            return "break"
-        except Exception:
-            pass
-
-    def _copy_cyrillic(self, event):
-        try:
-            text = self.textbox.get("sel.first", "sel.last")
-            self.clipboard_clear()
-            self.clipboard_append(text)
-            return "break"
-        except Exception:
-            pass
-
-    def _cut_cyrillic(self, event):
-        try:
-            text = self.textbox.get("sel.first", "sel.last")
-            self.clipboard_clear()
-            self.clipboard_append(text)
-            self.textbox.delete("sel.first", "sel.last")
-            self._text_modified(None)
-            return "break"
-        except Exception:
-            pass
-
-    def _select_all_cyrillic(self, event):
-        self.textbox.tag_add("sel", "1.0", "end")
-        return "break"
-
-    def _handle_ctrl_keypress(self, event):
-        char = getattr(event, 'char', '').lower()
-        if not char:
-            return
-            
-        if char == 'м': # Paste
-            return self._paste(event)
-        elif char == 'с': # Copy
-            return self._copy_cyrillic(event)
-        elif char == 'ч': # Cut
-            return self._cut_cyrillic(event)
-        elif char == 'ф': # Select All
-            return self._select_all_cyrillic(event)
-        
-    def _switch_mode(self, mode):
-        if mode == "Файл":
-            self.text_frame.pack_forget()
-            self.file_frame.pack(fill="x")
-        else:
-            self.file_frame.pack_forget()
-            self.text_frame.pack(fill="x")
-            
-    def _browse_file(self):
-        if self.command:
-            self.command()
-            
-    def _text_modified(self, event):
-        if self.on_paste:
-            text = self.textbox.get("1.0", "end")
-            self.on_paste(text)
-            
-    def configure(self, state):
-        self.btn.configure(state=state)
-        self.clear_btn.configure(state=state)
-        # self.seg_btn.configure(state=state) # Keep toggle active so user can switch tabs
-        if state == "disabled":
-            self.textbox.configure(state="disabled")
-        else:
-            self.textbox.configure(state="normal")
-
-    def set_text(self, text):
-        self.entry.configure(state="normal")
-        self.entry.delete(0, "end")
-        self.entry.insert(0, text)
-        self.entry.configure(state="disabled")
-        
-    def _clear_data(self):
-        self.set_text("")
-        self.textbox.delete("1.0", "end")
-        if self.on_clear:
-            self.on_clear()
-            
-    def append_to_textbox(self, lines):
-        if not lines: return
-        self.textbox.insert("end", "\n".join(lines) + "\n")
-
-class ProxyHunterSlider(ctk.CTkFrame):
-    def __init__(self, parent, label_text, from_, to, initial, command=None):
-        super().__init__(parent, fg_color="transparent")
-        self.command = command
-        self.from_ = from_
-        self.to = to
-        self.val = initial
-        
-        self.top_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.top_frame.pack(fill="x", pady=(0, 5))
-        
-        self.label = ctk.CTkLabel(self.top_frame, text=label_text, text_color=TEXT_MUTED, font=ctk.CTkFont(size=12))
-        self.label.pack(side="left")
-        
-        self.controls_frame = ctk.CTkFrame(self.top_frame, fg_color="transparent")
-        self.controls_frame.pack(side="right")
-        
-        self.btn_minus = ctk.CTkButton(self.controls_frame, text="-", width=26, height=26, corner_radius=6, fg_color=BG_CARD_2, hover_color=BORDER, text_color=TEXT_MAIN, font=ctk.CTkFont(weight="bold", size=14), command=self._minus)
-        self.btn_minus.pack(side="left", padx=(0, 4))
-        
-        self.entry = ctk.CTkEntry(self.controls_frame, width=50, height=26, justify="center", fg_color=BG_CARD_2, border_color=BORDER, text_color=ACCENT_PRIMARY, font=ctk.CTkFont(weight="bold"))
-        self.entry.insert(0, str(int(initial)))
-        self.entry.pack(side="left", padx=0)
-        self.entry.bind("<Return>", self._manual_entry)
-        
-        self.btn_plus = ctk.CTkButton(self.controls_frame, text="+", width=26, height=26, corner_radius=6, fg_color=BG_CARD_2, hover_color=BORDER, text_color=TEXT_MAIN, font=ctk.CTkFont(weight="bold", size=14), command=self._plus)
-        self.btn_plus.pack(side="left", padx=(4, 0))
-        
-        self.slider = ctk.CTkSlider(self, from_=from_, to=to, height=12, fg_color=BG_CARD_2, progress_color=ACCENT_PRIMARY, button_color=ACCENT_PRIMARY, button_hover_color=ACCENT_PRIMARY_HOVER, command=self._slider_moved)
-        self.slider.set(initial)
-        self.slider.pack(fill="x")
-        
-    def _minus(self):
-        self.val = max(self.from_, self.val - 1)
-        self._update_all()
-        
-    def _plus(self):
-        self.val = min(self.to, self.val + 1)
-        self._update_all()
-        
-    def _slider_moved(self, value):
-        self.val = int(value)
-        self.entry.delete(0, "end")
-        self.entry.insert(0, str(self.val))
-        if self.command:
-            self.command(self.val)
-            
-    def _manual_entry(self, event=None):
-        try:
-            val = int(self.entry.get())
-            self.val = max(self.from_, min(self.to, val))
-        except ValueError:
-            pass
-        self._update_all()
-        
-    def _update_all(self):
-        self.entry.delete(0, "end")
-        self.entry.insert(0, str(int(self.val)))
-        self.slider.set(self.val)
-        if self.command:
-            self.command(self.val)
-
-    def configure(self, state):
-        self.btn_minus.configure(state=state)
-        self.btn_plus.configure(state=state)
-        self.entry.configure(state=state)
-        self.slider.configure(state=state)
-
-    def get(self):
-        return self.val
-
-    def set(self, val):
-        self.val = val
-        self._update_all()
-
-
-class ValidatorApp(ctk.CTk):
+class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
     def __init__(self):
         super().__init__()
 
@@ -310,6 +50,9 @@ class ValidatorApp(ctk.CTk):
         self.result_store = ResultStore()
         # Сводка по прокси для панели — заполняется после профилирования
         self.proxy_summary = None
+        # Идёт ли выгрузка. Вторая кнопка поверх первой писала бы в тот
+        # же файл двумя потоками сразу.
+        self._export_busy = False
         
         self.dork_sources = []
         self.parser_proxy_sources = []
@@ -338,6 +81,7 @@ class ValidatorApp(ctk.CTk):
         self._stats_throttle = Throttle(0.25)
         self._table_throttle = Throttle(0.5)
         self._table_dirty = False
+        self._stats_dirty = False
         self._active_tab = "Терминал"
         self._poll_queues()
         self._poll_validator_queues()
@@ -388,6 +132,16 @@ class ValidatorApp(ctk.CTk):
 
     def on_closing(self):
         import os
+        # Выгрузка пишет файл в фоновом потоке. Выход по os._exit обрывает её
+        # на середине, и на диске остаётся ОБРЕЗАННЫЙ файл, который выглядит
+        # целым: строки в нём настоящие, просто не все. Спросить дешевле, чем
+        # потом отправлять по половине базы, считая её полной.
+        if getattr(self, "_export_busy", False):
+            if not messagebox.askyesno(
+                    "Идёт выгрузка",
+                    "Файл ещё сохраняется. Если выйти сейчас, он останется "
+                    "обрезанным.\n\nВсё равно выйти?"):
+                return
         if hasattr(self, 'pipeline') and self.pipeline.is_running:
             if messagebox.askyesno("Внимание", "Проверка сейчас запущена!\nВы уверены, что хотите прервать работу и закрыть программу?"):
                 self.pipeline.is_running = False
@@ -401,138 +155,6 @@ class ValidatorApp(ctk.CTk):
         else:
             self.destroy()
             os._exit(0)
-
-    def _build_sidebar(self):
-        self.sidebar_container = ctk.CTkFrame(self, fg_color="transparent")
-        self.sidebar_container.grid(row=0, column=0, sticky="nsew", padx=(15, 0), pady=15)
-        
-        self.sidebar = ctk.CTkFrame(self.sidebar_container, fg_color=BG_SIDEBAR, border_color=BORDER, border_width=1, corner_radius=12)
-        self.sidebar.pack(fill="both", expand=True)
-
-        header_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        header_frame.pack(fill="x", pady=(20, 10), padx=20)
-        
-        self.logo_label = ctk.CTkLabel(header_frame, text="⚙ Конфигурация", font=ctk.CTkFont(size=16, weight="bold"), text_color=TEXT_MAIN)
-        self.logo_label.pack(anchor="center", pady=(0, 10))
-
-        self.mode_switcher = ctk.CTkSegmentedButton(
-            header_frame, 
-            values=["Валидатор", "Парсер"], 
-            command=self._switch_app_mode,
-            fg_color=BG_CARD_2, 
-            selected_color=ACCENT_PRIMARY, 
-            selected_hover_color=ACCENT_PRIMARY_HOVER, 
-            unselected_color=BG_CARD_2, 
-            unselected_hover_color=BORDER, 
-            text_color=TEXT_MAIN,
-            font=ctk.CTkFont(size=12, weight="bold")
-        )
-        self.mode_switcher.set("Валидатор")
-        self.mode_switcher.pack(fill="x")
-        
-        self.separator = ctk.CTkFrame(self.sidebar, height=1, fg_color=BORDER)
-        self.separator.pack(fill="x", padx=20, pady=(0, 20))
-
-        # --- VALIDATOR SIDEBAR CONTENT ---
-        self.validator_sidebar_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        self.validator_sidebar_frame.pack(fill="both", expand=True)
-
-        self.db_selector = ProxyHunterInputSelector(self.validator_sidebar_frame, "База Email адресов:", "Выбрать", command=self.load_file, on_paste=self.on_emails_pasted, on_clear=self.clear_emails)
-        self.db_selector.pack(fill="x", padx=20, pady=(0, 5))
-        
-        self.loaded_lbl = ctk.CTkLabel(self.validator_sidebar_frame, text="Загружено: 0", text_color=TEXT_MUTED, font=ctk.CTkFont(size=11))
-        self.loaded_lbl.pack(padx=20, anchor="w", pady=(0, 15))
-        
-        self.proxy_selector = ProxyHunterInputSelector(self.validator_sidebar_frame, "SOCKS5 Прокси:", "Выбрать", command=self.load_proxies, on_paste=self.on_proxies_pasted, on_clear=self.clear_proxies)
-        self.proxy_selector.pack(fill="x", padx=20, pady=(0, 5))
-        
-        self.loaded_proxies_lbl = ctk.CTkLabel(self.validator_sidebar_frame, text="Прокси: 0", text_color=TEXT_MUTED, font=ctk.CTkFont(size=11))
-        self.loaded_proxies_lbl.pack(padx=20, anchor="w", pady=(0, 25))
-
-        self.max_hw_threads, self.hw_rank, self.hw_color = self.get_hardware_limits()
-
-        # Максимальное значение ползунка ограничено 300 — максимальное безопасное число для домашней сети
-        safe_max_threads = min(self.max_hw_threads, 300)
-        self.threads_slider = ProxyHunterSlider(self.validator_sidebar_frame, "Потоки", 1, safe_max_threads, safe_max_threads)
-        self.threads_slider.pack(fill="x", padx=20, pady=(0, 20))
-        
-        self.timeout_slider = ProxyHunterSlider(self.validator_sidebar_frame, "Таймаут (сек)", 1, 300, 5)
-        self.timeout_slider.pack(fill="x", padx=20, pady=(0, 25))
-
-        self.chk_ai = ctk.CTkSwitch(self.validator_sidebar_frame, text="Использовать AI фильтр (ML)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color=TEXT_ON_ACCENT, button_hover_color=TEXT_MAIN)
-        self.chk_ai.select()
-        self.chk_ai.pack(padx=20, anchor="w", pady=(0, 20))
-        
-        self.chk_osint_val = ctk.CTkSwitch(self.validator_sidebar_frame, text="Обогащение данных (OSINT)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color=TEXT_ON_ACCENT, button_hover_color=TEXT_MAIN)
-        self.chk_osint_val.select()
-        self.chk_osint_val.pack(padx=20, anchor="w", pady=(0, 20))
-
-        # Кэш вердиктов прошлых прогонов. Выключай, если базу нужно проверить
-        # заново целиком (например, спустя месяцы или после смены прокси).
-        self.chk_cache = ctk.CTkSwitch(self.validator_sidebar_frame, text="Кэш вердиктов (не перепроверять)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color=TEXT_ON_ACCENT, button_hover_color=TEXT_MAIN)
-        self.chk_cache.select()
-        self.chk_cache.pack(padx=20, anchor="w", pady=(0, 20))
-
-        # Режим колонки «Страна». Раньше выбор между заполненностью и точностью
-        # был правкой двух чисел в исходнике, хотя это решение про ДЕНЬГИ: гнать
-        # гео-таргет по колонке, где треть значений выдумана, — не то же самое,
-        # что по неполной, но верной. Замеры обоих режимов лежат в
-        # core/parser/ml_predictor.py рядом с порогами.
-        ctk.CTkLabel(self.validator_sidebar_frame, text="Колонка «Страна» по имени:",
-                     text_color=TEXT_MAIN, font=ctk.CTkFont(size=12)).pack(
-            padx=20, anchor="w", pady=(0, 4))
-
-        self.country_mode_var = ctk.StringVar(value="Заполненность")
-        self.country_mode_seg = ctk.CTkSegmentedButton(
-            self.validator_sidebar_frame, values=["Заполненность", "Точность"],
-            variable=self.country_mode_var, command=self._on_country_mode_change,
-            fg_color=BG_CARD_2, selected_color=ACCENT_PRIMARY,
-            selected_hover_color=ACCENT_PRIMARY_HOVER, unselected_color=BG_CARD_2,
-            unselected_hover_color=BORDER, text_color=TEXT_MAIN,
-            font=ctk.CTkFont(size=11))
-        self.country_mode_seg.pack(fill="x", padx=20, pady=(0, 4))
-
-        self.country_mode_hint = ctk.CTkLabel(
-            self.validator_sidebar_frame,
-            text="заполнено почти всегда, ~треть стран — догадка",
-            text_color=TEXT_DIM, font=ctk.CTkFont(size=10), justify="left")
-        self.country_mode_hint.pack(padx=20, anchor="w", pady=(0, 20))
-
-        # --- PARSER SIDEBAR CONTENT ---
-        self.parser_sidebar_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        
-        self.dork_selector = ProxyHunterInputSelector(self.parser_sidebar_frame, "Dork-запросы:", "Выбрать", command=self.load_dorks, on_paste=self.on_dorks_pasted, on_clear=self.clear_dorks)
-        self.dork_selector.pack(fill="x", padx=20, pady=(0, 5))
-        
-        self.loaded_dorks_lbl = ctk.CTkLabel(self.parser_sidebar_frame, text="Загружено: 0", text_color=TEXT_MUTED, font=ctk.CTkFont(size=11))
-        self.loaded_dorks_lbl.pack(padx=20, anchor="w", pady=(0, 15))
-        
-        self.parser_proxy_frame = ctk.CTkFrame(self.parser_sidebar_frame, fg_color="transparent")
-        self.parser_proxy_frame.pack(fill="x", pady=0)
-        
-        self.parser_proxy_selector = ProxyHunterInputSelector(self.parser_proxy_frame, "SOCKS5 Прокси:", "Выбрать", command=self.load_parser_proxies, on_paste=self.on_parser_proxies_pasted, on_clear=self.clear_parser_proxies)
-        self.parser_proxy_selector.pack(fill="x", padx=20, pady=(0, 5))
-        
-        self.loaded_parser_proxies_lbl = ctk.CTkLabel(self.parser_proxy_frame, text="Прокси: 0", text_color=TEXT_MUTED, font=ctk.CTkFont(size=11))
-        self.loaded_parser_proxies_lbl.pack(padx=20, anchor="w", pady=(0, 20))
-
-        self.engine_frame = ctk.CTkFrame(self.parser_sidebar_frame, fg_color="transparent")
-        self.engine_frame.pack(fill="x", pady=0)
-
-        self.engine_lbl = ctk.CTkLabel(self.engine_frame, text="Поисковик:", text_color=TEXT_MAIN, font=ctk.CTkFont(size=12))
-        self.engine_lbl.pack(padx=20, anchor="w", pady=(0, 5))
-        
-        self.engine_var = ctk.StringVar(value="DuckDuckGo Lite")
-        self.engine_selector = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["DuckDuckGo Lite", "AOL (Tor)", "Yahoo (Tor)", "AOL (Proxies)", "Yahoo (Proxies)"], fg_color=BG_CARD_2, button_color=BORDER, button_hover_color=ACCENT_PRIMARY, command=self._on_engine_change)
-        self.engine_selector.pack(fill="x", padx=20, pady=(0, 20))
-
-        # Максимальное значение ползунка парсера ограничено 300 — чтобы не давить роутер
-        parser_max_threads = min(self.max_hw_threads, 300)
-        self.parser_threads_slider = ProxyHunterSlider(self.parser_sidebar_frame, "Потоки (Dorks)", 1, parser_max_threads, parser_max_threads)
-        self.parser_threads_slider.pack(fill="x", padx=20, pady=(0, 20))
-
-        self.parser_timeout_slider = ProxyHunterSlider(self.parser_sidebar_frame, "Таймаут прокси (сек)", 1, 300, 5)
-        self.parser_timeout_slider.pack(fill="x", padx=20, pady=(0, 20))
 
     def _switch_app_mode(self, mode):
         self.app_mode = mode
@@ -607,447 +229,6 @@ class ValidatorApp(ctk.CTk):
         self.proxy_selector.textbox.delete("1.0", "end")
         self.safe_log("[INFO] SOCKS5 прокси очищены.", "trap")
         
-    def clear_dorks(self):
-        self.dork_sources.clear()
-        self.loaded_dorks_lbl.configure(text="Загружено: 0")
-        self.dork_selector.set_text("")
-        self.dork_selector.textbox.delete("1.0", "end")
-        if hasattr(self, 'safe_parser_log'):
-            self.safe_parser_log("[INFO] Dork-запросы очищены.", "trap")
-        
-    def clear_parser_proxies(self):
-        self.parser_proxy_sources.clear()
-        self.loaded_parser_proxies_lbl.configure(text="Прокси: 0")
-        self.parser_proxy_selector.set_text("")
-        self.parser_proxy_selector.textbox.delete("1.0", "end")
-        if hasattr(self, 'safe_parser_log'):
-            self.safe_parser_log("[INFO] SOCKS5 прокси для парсера очищены.", "trap")
-
-    # --- DUMMY HANDLERS FOR PARSER (to be fully implemented later) ---
-    def load_dorks(self):
-        filepaths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
-        if filepaths:
-            is_massive = False
-            for filepath in filepaths:
-                file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
-                if file_size_mb > 20:
-                    is_massive = True
-                self.dork_sources.append({"type": "file", "path": filepath})
-            
-            if is_massive:
-                self.dork_selector.textbox.delete("1.0", "end")
-                self.dork_selector.textbox.insert("1.0", "[ПРЕДПРОСМОТР ОТКЛЮЧЕН]\nОдин или несколько файлов слишком велики (>20 МБ).\nВключен режим потокового чтения (Lazy Loading).")
-                self.loaded_dorks_lbl.configure(text=f"Dorks источников: {len(self.dork_sources)}")
-                if hasattr(self, 'safe_parser_log'):
-                    self.safe_parser_log(f"[INFO] Добавлены массивные файлы Dorks (>{len(filepaths)} шт.).", "info")
-            else:
-                loader = StreamLoader([{"type": "file", "path": fp} for fp in filepaths])
-                preview_dorks = []
-                for idx, line in enumerate(loader.stream_lines()):
-                    if idx < 5000:
-                        preview_dorks.append(line)
-                
-                self.dork_selector.append_to_textbox(preview_dorks)
-                if len(preview_dorks) == 5000:
-                    self.dork_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
-                
-                self._count_lines_async(self.dork_sources, self.loaded_dorks_lbl,
-                                        "Загружено: {count}")
-                if hasattr(self, 'safe_parser_log'):
-                    self.safe_parser_log("[INFO] Dork-запросы добавлены, считаю строки в фоне.", "info")
-            
-            self.dork_selector.set_text("Несколько файлов" if len(filepaths) > 1 else filepaths[0])
-
-    def on_dorks_pasted(self, text):
-        self.dork_sources.append({"type": "text", "content": text})
-        self._count_lines_async(self.dork_sources, self.loaded_dorks_lbl,
-                                "Загружено: {count}")
-
-    def load_parser_proxies(self):
-        filepaths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
-        if filepaths:
-            is_massive = False
-            for filepath in filepaths:
-                file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
-                if file_size_mb > 20:
-                    is_massive = True
-                self.parser_proxy_sources.append({"type": "file", "path": filepath})
-            
-            if is_massive:
-                self.parser_proxy_selector.textbox.delete("1.0", "end")
-                self.parser_proxy_selector.textbox.insert("1.0", "[ПРЕДПРОСМОТР ОТКЛЮЧЕН]\nОдин или несколько файлов слишком велики (>20 МБ).\nВключен режим потокового чтения (Lazy Loading).")
-                self.loaded_parser_proxies_lbl.configure(text=f"Прокси источников: {len(self.parser_proxy_sources)}")
-                if hasattr(self, 'safe_parser_log'):
-                    self.safe_parser_log(f"[INFO] Добавлены массивные файлы прокси парсера (>{len(filepaths)} шт.).", "info")
-            else:
-                # Парсер умеет все три протокола: чекер работает в режиме HTTP
-                # (socks4, socks5 и CONNECT), а ProxyManager сам дописывает
-                # схему. Отсеивать socks4 и HTTP значило выбрасывать часть
-                # купленного пула без причины.
-                loader = StreamLoader([{"type": "file", "path": fp} for fp in filepaths])
-                preview_proxies = []
-                for p in loader.stream_lines():
-                    preview_proxies.append(p)
-                    if len(preview_proxies) >= 5000:
-                        break
-
-                self.parser_proxy_selector.append_to_textbox(preview_proxies)
-                if len(preview_proxies) == 5000:
-                    self.parser_proxy_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
-                
-                self._count_lines_async(self.parser_proxy_sources, self.loaded_parser_proxies_lbl,
-                                        "Прокси (оценка): {count}")
-                if hasattr(self, 'safe_parser_log'):
-                    self.safe_parser_log("[INFO] Прокси парсера добавлены, считаю строки в фоне.", "info")
-            
-            self.parser_proxy_selector.set_text("Несколько файлов" if len(filepaths) > 1 else filepaths[0])
-    def on_parser_proxies_pasted(self, text):
-        self.parser_proxy_sources.append({"type": "text", "content": text})
-        self._count_lines_async(self.parser_proxy_sources, self.loaded_parser_proxies_lbl,
-                                "Прокси (оценка): {count}")
-
-    def _build_main_workspace(self):
-        self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.main_frame.grid(row=0, column=1, sticky="nsew", padx=20, pady=15)
-
-        # 1. Верхняя шапка (общая для обоих режимов)
-        self.header_main = ctk.CTkFrame(self.main_frame, fg_color="transparent", height=50)
-        self.header_main.pack(fill="x", pady=(0, 20))
-        
-        self.title_frame = ctk.CTkFrame(self.header_main, fg_color="transparent")
-        self.title_frame.pack(side="left")
-        
-        self.shield_frame = ctk.CTkFrame(self.title_frame, fg_color=ACCENT_PRIMARY, corner_radius=10, width=40, height=40)
-        self.shield_frame.pack(side="left", padx=(0, 10))
-        self.shield_frame.pack_propagate(False)
-        self.shield_lbl = ctk.CTkLabel(self.shield_frame, text="🛡", font=ctk.CTkFont(size=20), text_color=TEXT_ON_ACCENT)
-        self.shield_lbl.place(relx=0.5, rely=0.5, anchor="center")
-        
-        self.title_text_frame = ctk.CTkFrame(self.title_frame, fg_color="transparent")
-        self.title_text_frame.pack(side="left")
-        
-        self.main_title_lbl = ctk.CTkLabel(self.title_text_frame, text="EMAIL VALIDATOR PRO", font=ctk.CTkFont(size=22, weight="bold"), text_color=TEXT_MAIN)
-        self.main_title_lbl.pack(anchor="w", pady=0)
-        self.sub_title_lbl = ctk.CTkLabel(self.title_text_frame, text="v4.0 - Продвинутая фильтрация", font=ctk.CTkFont(size=11), text_color=TEXT_MUTED)
-        self.sub_title_lbl.pack(anchor="w", pady=0)
-        
-        self.controls_frame = ctk.CTkFrame(self.header_main, fg_color="transparent")
-        self.controls_frame.pack(side="right")
-        
-        self.start_btn = ctk.CTkButton(self.controls_frame, text="▶", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_PRIMARY, hover_color=ACCENT_PRIMARY_HOVER, text_color=TEXT_ON_ACCENT, command=self.start_process)
-        self.start_btn.pack(side="left", padx=(0, 8))
-        
-        self.pause_btn = ctk.CTkButton(self.controls_frame, text="⏸", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_WARNING, hover_color=ACCENT_WARNING_HOVER, text_color=TEXT_ON_WARNING, command=self.pause_process, state="disabled")
-        self.pause_btn.pack(side="left", padx=(0, 8))
-        
-        self.stop_btn = ctk.CTkButton(self.controls_frame, text="⏹", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_ERROR, hover_color=ACCENT_ERROR_HOVER, text_color=TEXT_ON_ACCENT, command=self.stop_process, state="disabled")
-        self.stop_btn.pack(side="left")
-
-        # --- VALIDATOR WORKSPACE ---
-        self.validator_workspace = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.validator_workspace.pack(fill="both", expand=True)
-        
-        # Карточки статистики (Validator)
-        self.dashboard_frame = ctk.CTkFrame(self.validator_workspace, fg_color="transparent")
-        self.dashboard_frame.pack(fill="x", pady=(0, 20))
-        self.dashboard_frame.grid_columnconfigure((0, 1, 2), weight=1, uniform="card")
-
-        self._create_stat_card(self.dashboard_frame, 0, 0, "Всего собрано", "0", ACCENT_PRIMARY, "🌐", "stat_0")
-        self._create_stat_card(self.dashboard_frame, 0, 1, "Валидные", "0", ACCENT_SUCCESS, "⚡", "stat_1")
-        self._create_stat_card(self.dashboard_frame, 0, 2, "Невалидные", "0", ACCENT_ERROR, "🗑", "stat_2")
-        self._create_stat_card(self.dashboard_frame, 1, 0, "Спам / Ловушки", "0", ACCENT_WARNING, "⚠️", "stat_3")
-        self._create_stat_card(self.dashboard_frame, 1, 1, "Неизвестно", "0", TEXT_MUTED, "❓", "stat_4")
-        self._create_stat_card(self.dashboard_frame, 1, 2, "Имена найдены", "0", ACCENT_PURPLE, "👤", "stat_names")
-
-        # Прогресс-бар (Validator)
-        self.progress_frame = ctk.CTkFrame(self.validator_workspace, fg_color="transparent")
-        self.progress_frame.pack(fill="x", pady=(0, 20))
-        
-        self.progress_text_frame = ctk.CTkFrame(self.progress_frame, fg_color="transparent")
-        self.progress_text_frame.pack(fill="x", pady=(0, 5))
-        
-        self.progress_lbl = ctk.CTkLabel(self.progress_text_frame, text="Проверка... (0/0)", text_color=TEXT_MUTED, font=ctk.CTkFont(size=12))
-        self.progress_lbl.pack(side="left")
-        
-        self.percent_lbl = ctk.CTkLabel(self.progress_text_frame, text="0%", text_color=ACCENT_PRIMARY, font=ctk.CTkFont(size=12, weight="bold"))
-        self.percent_lbl.pack(side="right")
-
-        self.progress_bar = ctk.CTkProgressBar(self.progress_frame, height=8, corner_radius=4, fg_color=BORDER, progress_color=ACCENT_PRIMARY)
-        self.progress_bar.set(0)
-        self.progress_bar.pack(fill="x")
-
-        # Терминал / Таблица (Validator)
-        self.bottom_container = ctk.CTkFrame(self.validator_workspace, fg_color="transparent", border_color=BORDER, border_width=1, corner_radius=12)
-        self.bottom_container.pack(fill="both", expand=True)
-        
-        self.tabs_frame = ctk.CTkFrame(self.bottom_container, fg_color="transparent")
-        self.tabs_frame.pack(fill="x", pady=(15, 10))
-        
-        self.tab_seg = ctk.CTkSegmentedButton(self.tabs_frame, values=["Терминал", "Результаты", "Прокси"], command=self._switch_tab, fg_color=BG_SIDEBAR, selected_color=ACCENT_PRIMARY, selected_hover_color=ACCENT_PRIMARY_HOVER, unselected_color=BG_SIDEBAR, unselected_hover_color=BG_CARD_2, text_color=TEXT_MAIN)
-        self.tab_seg.set("Терминал")
-        self.tab_seg.pack(anchor="center")
-        
-        self.terminal_view = ctk.CTkFrame(self.bottom_container, fg_color="transparent")
-        self.table_view = ctk.CTkFrame(self.bottom_container, fg_color="transparent")
-        self.proxy_view = ctk.CTkFrame(self.bottom_container, fg_color="transparent")
-        self._build_proxy_panel()
-
-        self.terminal_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-
-        self.terminal_header = ctk.CTkFrame(self.terminal_view, fg_color="transparent")
-        self.terminal_header.pack(fill="x", pady=(0, 10))
-
-        # Сколько строк лога не поместилось в буфер. Пустая метка при обычной
-        # работе; заполняется, только если поток результатов обогнал окно —
-        # молча терять лог нельзя, иначе по терминалу нельзя судить о прогоне.
-        self.log_note_lbl = ctk.CTkLabel(self.terminal_header, text="",
-                                         text_color=TEXT_DIM,
-                                         font=ctk.CTkFont(size=11))
-        self.log_note_lbl.pack(side="left")
-
-        self.copy_logs_btn = ctk.CTkButton(self.terminal_header, text="Копировать", width=120, height=28, corner_radius=8, font=ctk.CTkFont(size=12), command=self.copy_terminal_logs, fg_color="transparent", border_width=1, border_color=BORDER_STRONG, hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN)
-        self.copy_logs_btn.pack(side="right")
-        
-        self.terminal_box = ctk.CTkTextbox(self.terminal_view, fg_color=BG_CARD_2, text_color=TEXT_MAIN, font=ctk.CTkFont(family="Consolas", size=12), border_width=0, corner_radius=8, wrap="none")
-        self.terminal_box.pack(fill="both", expand=True)
-        
-        self.terminal_box.tag_config("info", foreground=TEXT_MUTED)
-        self.terminal_box.tag_config("valid", foreground=ACCENT_SUCCESS)
-        self.terminal_box.tag_config("trap", foreground=ACCENT_WARNING)
-        self.terminal_box.tag_config("dead", foreground=ACCENT_ERROR)
-        self.terminal_box.configure(state="disabled")
-
-        self.table_export_frame = ctk.CTkFrame(self.table_view, fg_color="transparent")
-        self.table_export_frame.pack(fill="x", pady=(0, 12))
-
-        # Left zone: pagination, grouped in its own pill
-        self.pagination_frame = ctk.CTkFrame(self.table_export_frame, fg_color=BG_CARD_1, corner_radius=8)
-        self.pagination_frame.pack(side="left")
-
-        self.btn_prev_page = ctk.CTkButton(self.pagination_frame, text="‹", width=28, height=28, corner_radius=6, fg_color="transparent", hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN, command=self.prev_validator_page)
-        self.btn_prev_page.pack(side="left", padx=(4, 0), pady=4)
-
-        self.lbl_page = ctk.CTkLabel(self.pagination_frame, text="Стр. 1 / 1", text_color=TEXT_MUTED, font=ctk.CTkFont(size=12), width=64)
-        self.lbl_page.pack(side="left", padx=2)
-
-        self.btn_next_page = ctk.CTkButton(self.pagination_frame, text="›", width=28, height=28, corner_radius=6, fg_color="transparent", hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN, command=self.next_validator_page)
-        self.btn_next_page.pack(side="left", padx=(0, 4), pady=4)
-
-        # Center zone: status filter chips, grouped in their own pill
-        self.filter_frame = ctk.CTkFrame(self.table_export_frame, fg_color=BG_CARD_1, corner_radius=8)
-        self.filter_frame.pack(side="left", padx=(10, 0))
-
-        self.chk_valid_var = ctk.BooleanVar(value=True)
-        self.chk_invalid_var = ctk.BooleanVar(value=False)
-        self.chk_spam_var = ctk.BooleanVar(value=False)
-        self.chk_unknown_var = ctk.BooleanVar(value=False)
-
-        self.chk_valid = ctk.CTkCheckBox(self.filter_frame, text="Valid", variable=self.chk_valid_var, command=self._on_filter_change, fg_color=ACCENT_SUCCESS, hover_color=ACCENT_SUCCESS_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
-        self.chk_valid.pack(side="left", padx=(12, 10), pady=8)
-
-        self.chk_invalid = ctk.CTkCheckBox(self.filter_frame, text="Invalid", variable=self.chk_invalid_var, command=self._on_filter_change, fg_color=ACCENT_ERROR, hover_color=ACCENT_ERROR_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
-        self.chk_invalid.pack(side="left", padx=(0, 10), pady=8)
-
-        self.chk_spam = ctk.CTkCheckBox(self.filter_frame, text="Spam/Trap", variable=self.chk_spam_var, command=self._on_filter_change, fg_color=ACCENT_WARNING, hover_color=ACCENT_WARNING_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
-        self.chk_spam.pack(side="left", padx=(0, 10), pady=8)
-
-        self.chk_unknown = ctk.CTkCheckBox(self.filter_frame, text="Unknown", variable=self.chk_unknown_var, command=self._on_filter_change, fg_color=TEXT_MUTED, hover_color=BORDER_STRONG, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
-        self.chk_unknown.pack(side="left", padx=(0, 12), pady=8)
-
-        # Порог Engagement Score (п.37): отсекает слабые адреса при показе и экспорте
-        self.score_filter_frame = ctk.CTkFrame(self.table_export_frame, fg_color=BG_CARD_1, corner_radius=8)
-        self.score_filter_frame.pack(side="left", padx=(8, 0))
-
-        ctk.CTkLabel(self.score_filter_frame, text="Score ≥", text_color=TEXT_MAIN,
-                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(12, 6), pady=8)
-
-        self.min_score_var = ctk.StringVar(value="0")
-        self.min_score_entry = ctk.CTkEntry(self.score_filter_frame, textvariable=self.min_score_var,
-                                            width=48, height=26, corner_radius=6,
-                                            fg_color=BG_CARD_2, border_color=BORDER_STRONG,
-                                            text_color=TEXT_MAIN, font=ctk.CTkFont(size=12),
-                                            justify="center")
-        self.min_score_entry.pack(side="left", padx=(0, 12), pady=8)
-        self.min_score_entry.bind("<Return>", lambda e: self._on_filter_change())
-        self.min_score_entry.bind("<FocusOut>", lambda e: self._on_filter_change())
-
-        # Right zone: actions, anchored to the right edge instead of trailing after the filters
-        self.actions_frame = ctk.CTkFrame(self.table_export_frame, fg_color="transparent")
-        self.actions_frame.pack(side="right")
-
-        self.copy_btn = ctk.CTkButton(self.actions_frame, text="Копировать", command=self.copy_results, width=110, height=32, corner_radius=8, fg_color="transparent", border_width=1, border_color=BORDER_STRONG, hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN)
-        self.copy_btn.pack(side="left", padx=(0, 8))
-
-        # Список отписок вычитается при экспорте: повторное письмо тому, кто
-        # уже отписался, стоит жалобы на спам.
-        self.suppress_path = None
-        self.suppress_btn = ctk.CTkButton(self.actions_frame, text="Отписки", command=self.choose_suppression, width=90, height=32, corner_radius=8, fg_color="transparent", border_width=1, border_color=BORDER_STRONG, hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN)
-        self.suppress_btn.pack(side="left", padx=(0, 8))
-
-        # Нарезка выгрузки под лимиты ESP. 0 — одним файлом.
-        ctk.CTkLabel(self.actions_frame, text="по", text_color=TEXT_MUTED,
-                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 4))
-        self.chunk_entry = ctk.CTkEntry(self.actions_frame, width=64, height=32,
-                                        corner_radius=8, justify="center",
-                                        placeholder_text="0")
-        self.chunk_entry.pack(side="left", padx=(0, 8))
-
-        self.export_btn = ctk.CTkButton(self.actions_frame, text="Сохранить", command=self.export_results, width=110, height=32, corner_radius=8, fg_color=ACCENT_SUCCESS, hover_color=ACCENT_SUCCESS_HOVER, text_color=TEXT_ON_ACCENT)
-        self.export_btn.pack(side="left")
-
-        style = ttk.Style()
-        style.theme_use("default")
-        style.configure("Treeview",
-                        background=BG_CARD_1,
-                        foreground=TEXT_MAIN,
-                        rowheight=32,
-                        fieldbackground=BG_CARD_1,
-                        borderwidth=0,
-                        relief="flat",
-                        font=("Segoe UI", 10))
-        style.configure("Treeview.Heading",
-                        background=BG_TABLE_HEADER,
-                        foreground=TEXT_MUTED,
-                        font=("Segoe UI", 10, "bold"),
-                        borderwidth=0,
-                        relief="flat")
-        style.map("Treeview.Heading", background=[('active', BG_TABLE_HEADER)], foreground=[('active', TEXT_MAIN)])
-        style.map('Treeview', background=[('selected', BG_SELECTED)], foreground=[('selected', TEXT_MAIN)])
-
-        self.table_frame = ctk.CTkFrame(self.table_view, fg_color="transparent")
-        self.table_frame.pack(fill="both", expand=True)
-        self.table_frame.grid_rowconfigure(0, weight=1)
-        self.table_frame.grid_columnconfigure(0, weight=1)
-
-        columns = ("email", "status", "score", "provider", "domain_type", "reason", "mx",
-                   "name", "gender", "country", "birth_year", "source", "validated")
-        self.tree = ttk.Treeview(self.table_frame, columns=columns, show="headings")
-        self.tree.heading("email", text="Email", anchor="w")
-        self.tree.heading("status", text="Status", anchor="center")
-        self.tree.heading("score", text="Score", anchor="center")
-        self.tree.heading("provider", text="Provider", anchor="w")
-        self.tree.heading("domain_type", text="Тип домена", anchor="w")
-        self.tree.heading("reason", text="Reason", anchor="w")
-        self.tree.heading("mx", text="MX-Record", anchor="w")
-        self.tree.heading("name", text="Name", anchor="w")
-        self.tree.heading("gender", text="Gender", anchor="w")
-        self.tree.heading("country", text="Country", anchor="w")
-        self.tree.heading("birth_year", text="Год рожд.", anchor="center")
-        # Откуда взяты имя, пол и страна: «файл» — из исходника, всё остальное
-        # предсказано. Раньше догадка ML показывалась как факт.
-        self.tree.heading("source", text="Источник", anchor="w")
-        self.tree.heading("validated", text="Проверено", anchor="w")
-        
-        self.tree.column("email", width=210, minwidth=150, stretch=True, anchor="w")
-        self.tree.column("status", width=95, minwidth=80, stretch=False, anchor="center")
-        self.tree.column("score", width=55, minwidth=45, stretch=False, anchor="center")
-        self.tree.column("provider", width=115, minwidth=80, stretch=False, anchor="w")
-        self.tree.column("domain_type", width=95, minwidth=70, stretch=False, anchor="w")
-        self.tree.column("reason", width=190, minwidth=140, stretch=True, anchor="w")
-        self.tree.column("mx", width=180, minwidth=130, stretch=True, anchor="w")
-        self.tree.column("name", width=110, minwidth=80, stretch=True, anchor="w")
-        self.tree.column("gender", width=70, minwidth=55, stretch=False, anchor="w")
-        self.tree.column("country", width=85, minwidth=55, stretch=False, anchor="w")
-        self.tree.column("birth_year", width=70, minwidth=55, stretch=False, anchor="center")
-        self.tree.column("source", width=130, minwidth=90, stretch=False, anchor="w")
-        self.tree.column("validated", width=110, minwidth=90, stretch=False, anchor="w")
-        self.tree.grid(row=0, column=0, sticky="nsew")
-
-        self.tree.tag_configure("valid", foreground=ACCENT_SUCCESS)
-        self.tree.tag_configure("trap", foreground=ACCENT_WARNING)
-        self.tree.tag_configure("unknown", foreground=TEXT_MUTED)
-        self.tree.tag_configure("dead", foreground=ACCENT_ERROR)
-
-        self.scrollbar = ctk.CTkScrollbar(self.table_frame, orientation="vertical", command=self.tree.yview, fg_color="transparent", button_color=ACCENT_PRIMARY, button_hover_color=ACCENT_PRIMARY_HOVER)
-        self.tree.configure(yscrollcommand=self.scrollbar.set)
-        self.scrollbar.grid(row=0, column=1, sticky="ns")
-
-        # --- PARSER WORKSPACE ---
-        self.parser_workspace = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        
-        # Карточки статистики (Parser)
-        self.parser_dashboard_frame = ctk.CTkFrame(self.parser_workspace, fg_color="transparent")
-        self.parser_dashboard_frame.pack(fill="x", pady=(0, 20))
-        self.parser_dashboard_frame.grid_columnconfigure((0, 1), weight=1, uniform="card")
-
-        self._create_stat_card(self.parser_dashboard_frame, 0, 0, "Обработано Дорков", "0", ACCENT_PRIMARY, "🔍", "parser_stat_dorks")
-        self._create_stat_card(self.parser_dashboard_frame, 0, 1, "Страниц (Пагинация)", "0", TEXT_MUTED, "📄", "parser_stat_pages")
-        self._create_stat_card(self.parser_dashboard_frame, 1, 0, "Проверено Сниппетов", "0", TEXT_MUTED, "👁", "parser_stat_snippets")
-        self._create_stat_card(self.parser_dashboard_frame, 1, 1, "Найдено Email-ов", "0", ACCENT_SUCCESS, "📬", "parser_stat_emails")
-
-        # Прогресс-бар (Parser)
-        self.parser_progress_frame = ctk.CTkFrame(self.parser_workspace, fg_color="transparent")
-        self.parser_progress_frame.pack(fill="x", pady=(0, 20))
-        
-        self.parser_progress_text_frame = ctk.CTkFrame(self.parser_progress_frame, fg_color="transparent")
-        self.parser_progress_text_frame.pack(fill="x", pady=(0, 5))
-        
-        self.parser_progress_lbl = ctk.CTkLabel(self.parser_progress_text_frame, text="Парсинг... (0/0)", text_color=TEXT_MUTED, font=ctk.CTkFont(size=12))
-        self.parser_progress_lbl.pack(side="left")
-        
-        self.parser_percent_lbl = ctk.CTkLabel(self.parser_progress_text_frame, text="0%", text_color=ACCENT_PRIMARY, font=ctk.CTkFont(size=12, weight="bold"))
-        self.parser_percent_lbl.pack(side="right")
-
-        self.parser_progress_bar = ctk.CTkProgressBar(self.parser_progress_frame, height=8, corner_radius=4, fg_color=BORDER, progress_color=ACCENT_PRIMARY)
-        self.parser_progress_bar.set(0)
-        self.parser_progress_bar.pack(fill="x")
-
-        # Терминал / Таблица (Parser)
-        self.parser_bottom_container = ctk.CTkFrame(self.parser_workspace, fg_color="transparent", border_color=BORDER, border_width=1, corner_radius=12)
-        self.parser_bottom_container.pack(fill="both", expand=True)
-        
-        self.parser_tabs_frame = ctk.CTkFrame(self.parser_bottom_container, fg_color="transparent")
-        self.parser_tabs_frame.pack(fill="x", pady=(15, 10))
-        
-        self.parser_tab_seg = ctk.CTkSegmentedButton(self.parser_tabs_frame, values=["Терминал", "Собранные Email"], command=self._switch_parser_tab, fg_color=BG_SIDEBAR, selected_color=ACCENT_PRIMARY, selected_hover_color=ACCENT_PRIMARY_HOVER, unselected_color=BG_SIDEBAR, unselected_hover_color=BG_CARD_2, text_color=TEXT_MAIN)
-        self.parser_tab_seg.set("Терминал")
-        self.parser_tab_seg.pack(anchor="center")
-        
-        self.parser_terminal_view = ctk.CTkFrame(self.parser_bottom_container, fg_color="transparent")
-        self.parser_table_view = ctk.CTkFrame(self.parser_bottom_container, fg_color="transparent")
-        
-        self.parser_terminal_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-        
-        self.parser_terminal_header = ctk.CTkFrame(self.parser_terminal_view, fg_color="transparent")
-        self.parser_terminal_header.pack(fill="x", pady=(0, 10))
-        
-        self.parser_copy_logs_btn = ctk.CTkButton(self.parser_terminal_header, text="Копировать", width=120, height=28, corner_radius=8, font=ctk.CTkFont(size=12), command=self.copy_parser_logs, fg_color="transparent", border_width=1, border_color=BORDER_STRONG, hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN)
-        self.parser_copy_logs_btn.pack(side="right")
-        
-        self.parser_terminal_box = ctk.CTkTextbox(self.parser_terminal_view, fg_color=BG_CARD_2, text_color=TEXT_MAIN, font=ctk.CTkFont(family="Consolas", size=12), border_width=0, corner_radius=8)
-        self.parser_terminal_box.pack(fill="both", expand=True)
-        self.parser_terminal_box.configure(state="disabled")
-
-        self.parser_table_export_frame = ctk.CTkFrame(self.parser_table_view, fg_color="transparent")
-        self.parser_table_export_frame.pack(fill="x", pady=(0, 12))
-
-        self.parser_actions_frame = ctk.CTkFrame(self.parser_table_export_frame, fg_color="transparent")
-        self.parser_actions_frame.pack(side="right")
-
-        self.parser_copy_btn = ctk.CTkButton(self.parser_actions_frame, text="Копировать", command=self.copy_parser_results, width=110, height=32, corner_radius=8, fg_color="transparent", border_width=1, border_color=BORDER_STRONG, hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN)
-        self.parser_copy_btn.pack(side="left", padx=(0, 8))
-
-        self.parser_export_btn = ctk.CTkButton(self.parser_actions_frame, text="Сохранить", command=self.export_parser_results, width=110, height=32, corner_radius=8, fg_color=ACCENT_SUCCESS, hover_color=ACCENT_SUCCESS_HOVER, text_color=TEXT_ON_ACCENT)
-        self.parser_export_btn.pack(side="left")
-
-        self.parser_table_frame = ctk.CTkFrame(self.parser_table_view, fg_color="transparent")
-        self.parser_table_frame.pack(fill="both", expand=True)
-        self.parser_table_frame.grid_rowconfigure(0, weight=1)
-        self.parser_table_frame.grid_columnconfigure(0, weight=1)
-
-        p_columns = ("email", "dork")
-        self.parser_tree = ttk.Treeview(self.parser_table_frame, columns=p_columns, show="headings")
-        self.parser_tree.heading("email", text="Email", anchor="w")
-        self.parser_tree.heading("dork", text="Dork Source", anchor="w")
-        
-        self.parser_tree.column("email", width=300, minwidth=200, stretch=True, anchor="w")
-        self.parser_tree.column("dork", width=400, minwidth=250, stretch=True, anchor="w")
-        self.parser_tree.grid(row=0, column=0, sticky="nsew")
-
-        self.parser_scrollbar = ctk.CTkScrollbar(self.parser_table_frame, orientation="vertical", command=self.parser_tree.yview, fg_color="transparent", button_color=ACCENT_PRIMARY, button_hover_color=ACCENT_PRIMARY_HOVER)
-        self.parser_tree.configure(yscrollcommand=self.parser_scrollbar.set)
-        self.parser_scrollbar.grid(row=0, column=1, sticky="ns")
-
     def _on_country_mode_change(self, value):
         """Переключает пороги предсказания страны по имени.
 
@@ -1070,6 +251,109 @@ class ValidatorApp(ctk.CTk):
                 "[INFO] Страна по имени: режим ЗАПОЛНЕННОСТЬ. Колонка заполняется "
                 "почти всегда; догадку видно по колонке «Источник».", "info")
 
+    # Сколько строк показывать в предпросмотре. Больше человек всё равно не
+    # читает, а Tk тратит на каждую строку и память, и время отрисовки.
+    PREVIEW_LINES = 2000
+
+    # Через сколько элементов фоновый разбор отпускает GIL. Любой фоновый
+    # поток на чистом Python держит GIL почти непрерывно, и главный поток Tk
+    # получает его так редко, что окно подмерзает — при том, что обработчик
+    # кнопки вернулся мгновенно и «всё в фоне». Тысяча элементов между
+    # вдохами стоит около миллисекунды на тысячу и снимает подморозку.
+    BREATHE_EVERY = 1000
+
+    def _ui_call(self, fn):
+        """Ставит работу в очередь главного потока. Закрытое окно — не ошибка.
+
+        Фоновые чтения переживают закрытие окна: пользователь выбрал файл на
+        гигабайт и передумал. Раньше поток в этот момент падал с RuntimeError
+        («main thread is not in main loop»), вываливал стек в консоль и умирал,
+        не закрыв файл. Здесь это штатный исход, а не сбой.
+        """
+        try:
+            self.after(0, fn)
+            return True
+        except (RuntimeError, tk.TclError):
+            return False
+
+    def _attach_sources(self, paths, sources, selector, label, template,
+                        log, mode="lines"):
+        """Подключает файлы как источник, НЕ трогая диск в главном потоке.
+
+        Здесь исправлены сразу три причины, по которым окно замирало на
+        больших файлах, и все три жили в четырёх почти одинаковых копиях:
+
+        1. **Предпросмотр читал файл целиком.** В двух копиях из четырёх
+           стояло `for idx, line in enumerate(...)` с проверкой `if idx <
+           5000` ВНУТРИ цикла и без `break`. То есть первые пять тысяч строк
+           показывались, а остальные пятьдесят миллионов всё равно
+           прочитывались — просто молча, в никуда.
+
+        2. **Всё это происходило в главном потоке.** Даже правильный
+           предпросмотр с обрывом читает файл, а чтение с диска в обработчике
+           кнопки — это замершее окно ровно на время чтения.
+
+        3. **Порог «файл больше 20 МБ» решал не ту задачу.** Файл на 19 МБ из
+           одних коротких строк — это миллион записей, и он подвешивал окно
+           точно так же, просто не попадал под порог. Размер вообще не нужен:
+           если предпросмотр ограничен и уехал в фон, большой файл ничем не
+           отличается от маленького.
+
+        Главный поток здесь делает только две вещи: кладёт словари в список и
+        ставит подпись «читаю…». Ни одного обращения к диску — даже getsize,
+        который на сетевом диске тоже умеет блокировать.
+        """
+        if not paths:
+            return
+        for path in paths:
+            sources.append({"type": "file", "path": path})
+
+        selector.set_text("Несколько файлов" if len(paths) > 1 else paths[0])
+        label.configure(text=template.format(count="считаю..."))
+        try:
+            selector.textbox.delete("1.0", "end")
+            selector.textbox.insert("1.0", "Читаю первые строки..." + chr(10))
+        except Exception:
+            pass
+
+        snapshot = list(sources)
+
+        def work():
+            preview = []
+            try:
+                loader = StreamLoader([{"type": "file", "path": p} for p in paths])
+                stream = (loader.stream_emails() if mode == "emails"
+                          else loader.stream_lines())
+                for item in stream:
+                    preview.append(item[0] if mode == "emails" else item)
+                    if len(preview) >= self.PREVIEW_LINES:
+                        break   # обрыв ОБЯЗАТЕЛЕН: файл может быть на гигабайты
+            except Exception:
+                pass
+
+            def show():
+                try:
+                    selector.textbox.delete("1.0", "end")
+                    selector.append_to_textbox(preview)
+                    if len(preview) >= self.PREVIEW_LINES:
+                        selector.textbox.insert(
+                            "end",
+                            chr(10) + f"...показаны первые {self.PREVIEW_LINES}; "
+                            "остальное читается потоком во время работы...")
+                except Exception:
+                    pass
+            self._ui_call(show)
+
+            try:
+                total = StreamLoader(snapshot).count_total_lines()
+            except Exception:
+                total = 0
+            self._ui_call(lambda: label.configure(text=template.format(count=total)))
+
+        threading.Thread(target=work, daemon=True).start()
+        if log:
+            log("[INFO] Файлы подключены, читаю их в фоне — окно не ждёт.", "info")
+
     def _count_lines_async(self, sources, label, template):
         """Считает строки источников в фоне и подписывает результат.
 
@@ -1086,52 +370,13 @@ class ValidatorApp(ctk.CTk):
                 total = StreamLoader(list(sources)).count_total_lines()
             except Exception:
                 total = 0
-            self.after(0, lambda: label.configure(text=template.format(count=total)))
+            self._ui_call(lambda: label.configure(text=template.format(count=total)))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _build_proxy_panel(self):
-        """Вкладка «Прокси»: что за пул загружен и что им можно проверить.
-
-        Зачем она нужна. Валидатор умеет много такого, о чём по окну догадаться
-        было нельзя: он выясняет РЕАЛЬНЫЙ выходной IP каждого прокси, схлопывает
-        дубли (десять строк с одним выходом — это ротация из одного адреса),
-        определяет тип адреса и страну, спрашивает у почтовиков напрямую, пустят
-        ли они. Всё это уходило строчками в лог и прокручивалось наверх. Здесь
-        оно лежит на виду и не исчезает.
-        """
-        wrapper = ctk.CTkScrollableFrame(self.proxy_view, fg_color="transparent")
-        wrapper.pack(fill="both", expand=True)
-        self.proxy_panel_body = wrapper
-
-        self.proxy_panel_hint = ctk.CTkLabel(
-            wrapper,
-            text=("Профиль появится после запуска: валидатор сам определит\n"
-                  "выходной IP каждого прокси, схлопнет дубли и спросит\n"
-                  "у почтовиков, пустят ли они этот адрес."),
-            text_color=TEXT_MUTED, font=ctk.CTkFont(size=12), justify="left")
-        self.proxy_panel_hint.pack(anchor="w", padx=4, pady=8)
-
-        self.proxy_cards = {}
-
-    def _proxy_metric(self, parent, key, title, hint):
-        """Одна плитка сводки. Значение обновляется, не пересоздаётся."""
-        card = ctk.CTkFrame(parent, fg_color=BG_CARD_1, corner_radius=10,
-                            border_width=1, border_color=BORDER)
-        ctk.CTkLabel(card, text=title, text_color=TEXT_MUTED,
-                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14, pady=(10, 0))
-        value = ctk.CTkLabel(card, text="—", text_color=TEXT_MAIN,
-                             font=ctk.CTkFont(size=20, weight="bold"))
-        value.pack(anchor="w", padx=14, pady=(2, 0))
-        note = ctk.CTkLabel(card, text=hint, text_color=TEXT_DIM,
-                            font=ctk.CTkFont(size=10), justify="left")
-        note.pack(anchor="w", padx=14, pady=(0, 10))
-        self.proxy_cards[key] = (value, note)
-        return card
-
     def safe_proxy_profile(self, summary):
         """Колбэк пайплайна: сводка приходит из рабочего потока."""
-        self.after(0, lambda: self._store_proxy_summary(summary))
+        self._ui_call(lambda: self._store_proxy_summary(summary))
 
     def _store_proxy_summary(self, summary):
         self.proxy_summary = summary if isinstance(summary, dict) else None
@@ -1149,113 +394,16 @@ class ValidatorApp(ctk.CTk):
         if self._active_tab == "Прокси":
             self._render_proxy_panel()
 
-    def _render_proxy_panel(self):
-        """Перерисовывает панель. Вызывается по событию, а не по таймеру."""
-        summary = self.proxy_summary
-        if not summary:
-            return
-
-        for child in self.proxy_panel_body.winfo_children():
-            child.destroy()
-        self.proxy_cards = {}
-
-        total = summary.get("total", 0)
-        unique = summary.get("unique_ips", 0)
-        duplicates = summary.get("duplicates", 0)
-
-        grid = ctk.CTkFrame(self.proxy_panel_body, fg_color="transparent")
-        grid.pack(fill="x", pady=(0, 14))
-        grid.grid_columnconfigure((0, 1, 2), weight=1, uniform="pcard")
-
-        self._proxy_metric(grid, "rotation", "Реальная ротация",
-                           "разных выходных IP — столько адресов видит почтовик"
-                           ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        self._proxy_metric(grid, "dupes", "Дубли по выходу",
-                           "прокси, выходящих через уже занятый адрес"
-                           ).grid(row=0, column=1, sticky="ew", padx=8)
-        self._proxy_metric(grid, "speed", "Скорость (медиана)",
-                           "задержка до баннера, участвует в выборе прокси"
-                           ).grid(row=0, column=2, sticky="ew", padx=(8, 0))
-
-        self.proxy_cards["rotation"][0].configure(text=f"{unique} / {total}")
-        dup_value, dup_note = self.proxy_cards["dupes"]
-        dup_value.configure(text=str(duplicates),
-                            text_color=ACCENT_ERROR if duplicates else ACCENT_SUCCESS)
-        if duplicates:
-            dup_note.configure(
-                text=f"самая крупная группа — {summary.get('largest_group', 0)} прокси "
-                     "с одним IP")
-        median = summary.get("latency_median")
-        self.proxy_cards["speed"][0].configure(
-            text=f"{median} мс" if median is not None else "—")
-        if summary.get("latency_min") is not None:
-            self.proxy_cards["speed"][1].configure(
-                text=f"от {summary['latency_min']} до {summary['latency_max']} мс")
-
-        self._proxy_section(
-            "Пригодность по провайдерам",
-            "Спрошено у самих почтовиков пробой до MAIL FROM, а не выведено из списков.",
-            [(label, f"годны {c['ok']}   не пустят {c['no']}   не проверено {c['unknown']}",
-              ACCENT_SUCCESS if c["ok"] else (ACCENT_ERROR if c["no"] else TEXT_MUTED))
-             for label, c in (summary.get("fitness") or {}).items()])
-
-        by_type = summary.get("by_type") or {}
-        type_names = {"residential": "Жилые (лучшая репутация)",
-                      "datacenter": "Датацентровые (режут чаще всего)",
-                      "mobile": "Мобильные", "unknown": "Тип не определён"}
-        self._proxy_section(
-            "Тип выходных адресов",
-            "Фильтры смотрят именно на это: датацентровый IP блокируется заметно чаще жилого.",
-            [(type_names.get(kind, kind), f"{count} адресов",
-              ACCENT_WARNING if kind == "datacenter" else TEXT_MAIN)
-             for kind, count in sorted(by_type.items(), key=lambda kv: -kv[1])])
-
-        countries = summary.get("countries") or {}
-        if countries:
-            top = sorted(countries.items(), key=lambda kv: -kv[1])[:12]
-            self._proxy_section(
-                "География выходных адресов",
-                "Прокси из страны домена получателя выбирается первым — это снижает долю отказов.",
-                [(code, f"{count} адресов", TEXT_MAIN) for code, count in top])
-
-        self._proxy_section(
-            "Гигиена адресов",
-            "PTR нужен Yahoo и AOL; чёрные списки и «грязное» имя закрывают Outlook, iCloud и GMX.",
-            [("С обратным DNS (PTR)", f"{summary.get('with_ptr', 0)} прокси", ACCENT_SUCCESS),
-             ("PTR проверить не удалось", f"{summary.get('ptr_unknown', 0)} прокси", TEXT_MUTED),
-             ("В чёрных списках", f"{summary.get('in_dnsbl', 0)} прокси",
-              ACCENT_ERROR if summary.get('in_dnsbl') else TEXT_MAIN),
-             ("Имя в PTR выдаёт прокси/VPN", f"{summary.get('rdns_dirty', 0)} прокси",
-              ACCENT_WARNING if summary.get('rdns_dirty') else TEXT_MAIN)])
-
-    def _proxy_section(self, title, hint, rows):
-        """Блок «заголовок + пояснение + строки». Пустой блок не рисуется."""
-        if not rows:
-            return
-        block = ctk.CTkFrame(self.proxy_panel_body, fg_color=BG_CARD_1,
-                             corner_radius=10, border_width=1, border_color=BORDER)
-        block.pack(fill="x", pady=(0, 12))
-
-        ctk.CTkLabel(block, text=title, text_color=TEXT_MAIN,
-                     font=ctk.CTkFont(size=13, weight="bold")).pack(
-            anchor="w", padx=14, pady=(12, 0))
-        ctk.CTkLabel(block, text=hint, text_color=TEXT_DIM, justify="left",
-                     font=ctk.CTkFont(size=10)).pack(anchor="w", padx=14, pady=(2, 8))
-
-        for label, value, color in rows:
-            line = ctk.CTkFrame(block, fg_color="transparent")
-            line.pack(fill="x", padx=14, pady=1)
-            ctk.CTkLabel(line, text=label, text_color=TEXT_MUTED,
-                         font=ctk.CTkFont(size=12)).pack(side="left")
-            ctk.CTkLabel(line, text=value, text_color=color,
-                         font=ctk.CTkFont(size=12, weight="bold")).pack(side="right")
-        ctk.CTkFrame(block, height=8, fg_color="transparent").pack()
-
     def _switch_tab(self, value):
         # Активная вкладка запоминается: таблица перерисовывается только когда
         # она видна. На вкладке терминала эта работа не видна никому, а стоит
         # ровно столько же — именно она и съедала главный поток.
         self._active_tab = value
+        # Показ по требованию: пользователь только что попросил посмотреть,
+        # ждать очередного тика незачем.
+        self._stats_dirty = False
+        self._stats_throttle.reset()
+        self._refresh_stat_cards()
         for view in (self.terminal_view, self.table_view, self.proxy_view):
             view.pack_forget()
         if value == "Терминал":
@@ -1270,81 +418,6 @@ class ValidatorApp(ctk.CTk):
             self._table_throttle.reset()
             self.refresh_validator_tree(force=True)
 
-    def _switch_parser_tab(self, value):
-        if value == "Терминал":
-            self.parser_table_view.pack_forget()
-            self.parser_terminal_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-        else:
-            self.parser_terminal_view.pack_forget()
-            self.parser_table_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-
-    def copy_parser_logs(self):
-        text = self.parser_terminal_box.get("1.0", "end-1c")
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        messagebox.showinfo("Скопировано", "Логи терминала парсера скопированы в буфер обмена.")
-
-    def export_parser_results(self):
-        if not hasattr(self, 'parser_results_data') or not self.parser_results_data:
-            messagebox.showwarning("Пусто", "Нет собранных Email адресов для экспорта.")
-            return
-            
-        file_types = [("Text File (Только Email)", "*.txt"), ("CSV File (Email+Dork)", "*.csv")]
-        filepath = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=file_types, initialfile="parsed_emails.txt")
-        if filepath:
-            try:
-                import csv
-                if filepath.endswith(".csv"):
-                    with open(filepath, "w", newline="", encoding="utf-8") as f:
-                        writer = csv.writer(f)
-                        writer.writerow(["Email", "Dork Source"])
-                        for r in self.parser_results_data:
-                            writer.writerow([r["email"], r["dork"]])
-                else:
-                    # Txt mode: just distinct emails to save the user from deduplicating
-                    distinct_emails = list(set([r["email"] for r in self.parser_results_data]))
-                    with open(filepath, "w", encoding="utf-8") as f:
-                        for e in distinct_emails:
-                            f.write(e + "\n")
-                messagebox.showinfo("Экспорт", f"Успешно сохранено!\n\nВсего адресов в файле: {len(self.parser_results_data) if filepath.endswith('.csv') else len(distinct_emails)}")
-            except Exception as e:
-                messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
-
-    def copy_parser_results(self):
-        if not hasattr(self, 'parser_results_data') or not self.parser_results_data:
-            messagebox.showwarning("Пусто", "Нет собранных Email адресов для копирования.")
-            return
-            
-        distinct_emails = list(set([r["email"] for r in self.parser_results_data]))
-        text = "\n".join(distinct_emails)
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        messagebox.showinfo("Скопировано", f"Успешно скопировано {len(distinct_emails)} уникальных адресов в буфер обмена.")
-
-    def _create_stat_card(self, parent, row, col, title, value, val_color, icon, attr_name):
-        pad_x = (0, 10) if col < 2 else (0, 0)
-        pad_y = (0, 10) if row == 0 else (0, 0)
-        
-        card = ctk.CTkFrame(parent, fg_color=BG_CARD_1, border_color=BORDER, border_width=1, corner_radius=10)
-        card.grid(row=row, column=col, sticky="nsew", padx=pad_x, pady=pad_y)
-        
-        inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=15, pady=15)
-        
-        title_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        title_frame.pack(fill="x", anchor="w")
-        
-        lbl_icon = ctk.CTkLabel(title_frame, text=icon, font=ctk.CTkFont(size=14), text_color=TEXT_MUTED)
-        lbl_icon.pack(side="left", padx=(0, 8))
-        
-        lbl_title = ctk.CTkLabel(title_frame, text=title, text_color=TEXT_MUTED, font=ctk.CTkFont(size=13))
-        lbl_title.pack(side="left")
-        
-        lbl_val = ctk.CTkLabel(inner, text=value, text_color=val_color, font=ctk.CTkFont(size=36, weight="bold"))
-        lbl_val.pack(anchor="w", pady=(10, 0))
-        
-        setattr(self, attr_name, lbl_val)
-
     def get_hardware_limits(self):
         cores = psutil.cpu_count(logical=True) or 2
         ram_gb = psutil.virtual_memory().total / (1024 ** 3)
@@ -1356,49 +429,49 @@ class ValidatorApp(ctk.CTk):
         return max_threads, rank, color
 
     def load_file(self):
-        filepaths = filedialog.askopenfilenames(filetypes=[("Text/CSV Files", "*.txt *.csv")])
-        if filepaths:
-            is_massive = False
-            for filepath in filepaths:
-                file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
-                if file_size_mb > 20:
-                    is_massive = True
-                self.email_sources.append({"type": "file", "path": filepath})
-            
-            if is_massive:
-                self.db_selector.textbox.delete("1.0", "end")
-                self.db_selector.textbox.insert("1.0", "[ПРЕДПРОСМОТР ОТКЛЮЧЕН]\nОдин или несколько файлов слишком велики (>20 МБ).\nВключен режим потокового чтения (Lazy Loading).")
-                self.loaded_lbl.configure(text=f"Загружено источников: {len(self.email_sources)}")
-                self.safe_log(f"[INFO] Добавлены массивные файлы (>{len(filepaths)} шт.).", "info")
-            else:
-                loader = StreamLoader([{"type": "file", "path": fp} for fp in filepaths])
-                preview_emails = []
-                for idx, (email, _) in enumerate(loader.stream_emails()):
-                    if idx < 5000:
-                        preview_emails.append(email)
-                
-                self.db_selector.append_to_textbox(preview_emails)
-                if len(preview_emails) == 5000:
-                    self.db_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
-                
-                self._count_lines_async(self.email_sources, self.loaded_lbl,
-                                        "Загружено строк: {count}")
-                self.safe_log("[INFO] Файлы добавлены, считаю строки в фоне.", "info")
+        filepaths = filedialog.askopenfilenames(
+            filetypes=[("Text/CSV Files", "*.txt *.csv")])
+        if not filepaths:
+            return
+        self._attach_sources(filepaths, self.email_sources, self.db_selector,
+                             self.loaded_lbl, "Загружено строк: {count}",
+                             self.safe_log, mode="emails")
+        self._scan_base_composition()
 
-            self.db_selector.set_text("Несколько файлов" if len(filepaths) > 1 else filepaths[0])
-            self._scan_base_composition()
+    # Сколько адресов нюхать для отчёта о составе базы. Это доли, а не
+    # абсолютные числа: на двухстах тысячах адресов доля Gmail отличается от
+    # доли на пятидесяти миллионах в третьем знаке после запятой, а времени
+    # уходит в двести раз меньше.
+    BASE_SCAN_SAMPLE = 200_000
 
     def _scan_base_composition(self):
-        """Показывает состав базы по провайдерам. Без сети — только чтение файла."""
+        """Показывает состав базы по провайдерам. Без сети — только чтение файла.
+
+        Читается ВЫБОРКА, а не вся база. Раньше здесь стоял разбор всего входа
+        целиком: на файле в сотни мегабайт это минуты чтения и разбора ради
+        отчёта, который весь состоит из процентов, — и запускался он заново на
+        каждое добавление файла и каждую вставку текста.
+        """
         if not self.email_sources:
             return
+
+        sources = list(self.email_sources)
 
         def worker():
             try:
                 from core.provider import scan_base_providers, format_base_scan
-                scan = scan_base_providers(self.email_sources)
+                # breathe_every заставляет скан отпускать GIL. Без него этот
+                # поток — сплошной чистый Python, и окно подмерзает на треть
+                # секунды, хотя обработчик кнопки давно вернулся. См. пояснение
+                # в самой scan_base_providers.
+                scan = scan_base_providers(sources, limit=self.BASE_SCAN_SAMPLE,
+                                           breathe_every=self.BREATHE_EVERY)
                 for line in format_base_scan(scan):
                     self.safe_log(line, "info")
+                if scan.get("total", 0) >= self.BASE_SCAN_SAMPLE:
+                    self.safe_log(
+                        f"[INFO] Состав посчитан по первым {self.BASE_SCAN_SAMPLE} "
+                        "адресам — на долях это не сказывается.", "info")
             except Exception as e:
                 self.safe_log(f"[DEAD] Скан состава базы не удался: {type(e).__name__}", "dead")
 
@@ -1412,41 +485,14 @@ class ValidatorApp(ctk.CTk):
         self._scan_base_composition()
 
     def load_proxies(self):
+        # Предпросмотр показывает ровно то, что пойдёт в работу. Раньше здесь
+        # отсеивались socks4 и HTTP — и получалось враньё: валидация их
+        # использует, а в окне пользователь их не видит, хотя счётчик ниже
+        # считает все строки файла.
         filepaths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
-        if filepaths:
-            is_massive = False
-            for filepath in filepaths:
-                file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
-                if file_size_mb > 20:
-                    is_massive = True
-                self.proxy_sources.append({"type": "file", "path": filepath})
-            
-            if is_massive:
-                self.proxy_selector.textbox.delete("1.0", "end")
-                self.proxy_selector.textbox.insert("1.0", "[ПРЕДПРОСМОТР ОТКЛЮЧЕН]\nОдин или несколько файлов слишком велики (>20 МБ).\nВключен режим потокового чтения (Lazy Loading).")
-                self.loaded_proxies_lbl.configure(text=f"Прокси источников: {len(self.proxy_sources)}")
-                self.safe_log(f"[INFO] Добавлены массивные файлы прокси (>{len(filepaths)} шт.).", "info")
-            else:
-                # Предпросмотр показывает ровно то, что пойдёт в работу.
-                # Раньше здесь отсеивались socks4 и HTTP — и получалось враньё:
-                # валидация их использует, а в окне пользователь их не видит,
-                # хотя счётчик ниже считает все строки файла.
-                loader = StreamLoader([{"type": "file", "path": fp} for fp in filepaths])
-                preview_proxies = []
-                for p in loader.stream_lines():
-                    preview_proxies.append(p)
-                    if len(preview_proxies) >= 5000:
-                        break   # дальше не читаем: файл может быть огромным
-
-                self.proxy_selector.append_to_textbox(preview_proxies)
-                if len(preview_proxies) == 5000:
-                    self.proxy_selector.textbox.insert("end", "\n...и другие (показаны первые 5000)...")
-                
-                self._count_lines_async(self.proxy_sources, self.loaded_proxies_lbl,
-                                        "Прокси (оценка): {count}")
-                self.safe_log("[INFO] Прокси добавлены, считаю строки в фоне.", "info")
-            
-            self.proxy_selector.set_text("Несколько файлов" if len(filepaths) > 1 else filepaths[0])
+        self._attach_sources(filepaths, self.proxy_sources, self.proxy_selector,
+                             self.loaded_proxies_lbl, "Прокси (оценка): {count}",
+                             self.safe_log)
 
     def on_proxies_pasted(self, text):
         self.proxy_sources.append({"type": "text", "content": text})
@@ -1628,13 +674,13 @@ class ValidatorApp(ctk.CTk):
         self.terminal_box.configure(state="disabled")
 
     def safe_update_unique_count(self, count):
-        self.after(0, lambda: self.stat_0.configure(text=str(count)))
+        self._ui_call(lambda: self.stat_0.configure(text=str(count)))
 
     def safe_update_proxies_count(self, live_count, total_count):
-        self.after(0, lambda: self.loaded_proxies_lbl.configure(text=f"Прокси: {live_count} / {total_count} (Рабочих)"))
+        self._ui_call(lambda: self.loaded_proxies_lbl.configure(text=f"Прокси: {live_count} / {total_count} (Рабочих)"))
 
     def safe_update_progress(self, current, total):
-        self.after(0, lambda: self._update_progress_ui(current, total))
+        self._ui_call(lambda: self._update_progress_ui(current, total))
         
     def _update_progress_ui(self, current, total):
         pct = int((current / total) * 100) if total > 0 else 0
@@ -1679,8 +725,21 @@ class ValidatorApp(ctk.CTk):
 
         if added:
             self._table_dirty = True
-            if self._stats_throttle.ready():
-                self._refresh_stat_cards()
+            self._stats_dirty = True
+
+        # Счётчики обновляются по ТОМУ ЖЕ правилу, что и таблица: флаг
+        # «есть что показать» живёт до тех пор, пока показ не состоится.
+        #
+        # Раньше здесь стояло `if added and throttle.ready()`, и это был баг:
+        # если пачка результатов приходила раньше, чем через 0.25с после
+        # предыдущей, throttle её пропускал — а следующего шанса не было,
+        # потому что обновление было привязано к приходу НОВЫХ результатов.
+        # На базе из одного домена (все адреса Gmail) следующий результат
+        # приходил через минуты, и всё это время карточка «Валидные»
+        # показывала ноль при полной таблице валидных адресов.
+        if self._stats_dirty and self._stats_throttle.ready():
+            self._stats_dirty = False
+            self._refresh_stat_cards()
 
         # Таблицу перерисовываем, только когда она видна: на вкладке терминала
         # эта работа не видна никому, а стоит столько же.
@@ -1749,9 +808,15 @@ class ValidatorApp(ctk.CTk):
             self.refresh_validator_tree(force=True)
             
     def next_validator_page(self):
-        filtered = self._get_filtered_results()
         import math
-        total_pages = max(1, math.ceil(len(filtered) / self.validator_page_size))
+        # Число страниц берётся у счётчиков хранилища. Раньше здесь стояла
+        # _get_filtered_results() — она собирает ВСЮ выборку списком в память,
+        # то есть нажатие «След.» на многомиллионной базе означало собрать её
+        # целиком ради одного деления. Ровно то, ради чего хранилище и
+        # сделано потоковым, и ровно там, где это отменялось.
+        total = self.result_store.matching_count(self._selected_groups(),
+                                                 min_score=self._get_min_score())
+        total_pages = max(1, math.ceil(total / self.validator_page_size))
         if self.validator_page < total_pages:
             self.validator_page += 1
             self.refresh_validator_tree(force=True)
@@ -1771,9 +836,27 @@ class ValidatorApp(ctk.CTk):
 
         self.lbl_page.configure(text=f"Стр. {self.validator_page} / {total_pages}")
 
+        # ЗАПОЛНЕННАЯ страница больше не меняется, и перебирать её заново
+        # незачем. Строки нумеруются по порядку прихода, а новые результаты
+        # всегда получают номер БОЛЬШЕ всех прежних — значит попасть на уже
+        # набранную страницу они не могут в принципе. Меняется только
+        # последняя, неполная.
+        #
+        # Экономия не косметическая: на трёх миллионах строк выборка глубокой
+        # страницы стоит 0.85 с (SQL с большим OFFSET перебирает всё, что до
+        # неё). Дважды в секунду, пока идёт прогон, — это стоящее колом окно у
+        # того, кто просто пролистал таблицу далеко.
+        page_key = (tuple(groups), min_score, self.validator_page)
+        if (not force
+                and getattr(self, "_page_key", None) == page_key
+                and getattr(self, "_page_was_full", False)):
+            return
+
         page_data = self.result_store.page(
             groups, page=self.validator_page,
             size=self.validator_page_size, min_score=min_score)
+        self._page_key = page_key
+        self._page_was_full = len(page_data) >= self.validator_page_size
 
         # Сравнение «а изменилось ли что-нибудь» раньше дёргало tree.item()
         # на каждой видимой строке — сотня обращений к Tk только чтобы решить
@@ -1820,207 +903,8 @@ class ValidatorApp(ctk.CTk):
                 data.get("validated_at", ""),
             ), tags=(tag,))
 
-    def start_parsing(self):
-        if hasattr(self, 'parser_pipeline') and self.parser_pipeline and self.parser_pipeline.is_alive():
-            return
-            
-        if not self.dork_sources:
-            self.safe_parser_log("[Ошибка] Загрузите дорки перед стартом!", "dead")
-            return
-            
-        self.parser_results_data.clear()
-        
-        self.parser_stat_dorks.configure(text="0")
-        self.parser_stat_pages.configure(text="0")
-        self.parser_stat_snippets.configure(text="0")
-        self.parser_stat_emails.configure(text="0")
-        
-        for item in self.parser_tree.get_children():
-            self.parser_tree.delete(item)
-            
-        self._set_sidebar_state("disabled")
-        self._set_playback_state("running")
-            
-        self.parser_terminal_box.configure(state="normal")
-        self.parser_terminal_box.delete("1.0", "end")
-        self.parser_terminal_box.configure(state="disabled")
-        self.safe_parser_log("[Система] Инициализация конвейера парсера...", "info")
-
-        threads = int(self.parser_threads_slider.get())
-        timeout = float(self.parser_timeout_slider.get())
-        
-        # Как и у валидатора: берём прокси любого поддерживаемого протокола
-        # и схлопываем повторы по разобранным частям, а не по строке —
-        # один прокси, записанный дважды, занимал два места в ротации.
-        from core.network import dedupe_proxies
-        actual_proxies = dedupe_proxies(
-            list(StreamLoader(self.parser_proxy_sources).stream_lines()))
-
-        from core.parser_pipeline import ParserPipeline
-        self.parser_pipeline = ParserPipeline(
-            dork_sources=self.dork_sources,
-            proxies=actual_proxies,
-            max_threads=threads,
-            timeout=timeout,
-            on_log=self.safe_parser_log,
-            on_progress=self.safe_update_parser_progress,
-            on_stats_update=self.safe_update_parser_stats,
-            on_result_found=self.safe_add_parser_result,
-            on_complete=self.on_parser_complete,
-            engine_name=self.engine_var.get()
-        )
-        self.parser_pipeline.start()
-
-    def pause_parsing(self):
-        if hasattr(self, 'parser_pipeline') and self.parser_pipeline and self.parser_pipeline.is_alive():
-            if self.parser_pipeline._pause_event.is_set():
-                self.parser_pipeline.resume()
-                self.pause_btn.configure(text="⏸", fg_color=ACCENT_WARNING)
-                self.safe_parser_log("[Система] Парсинг возобновлен (RESUMED).", "info")
-            else:
-                self.parser_pipeline.pause()
-                self.pause_btn.configure(text="▶", fg_color=ACCENT_SUCCESS)
-                self.safe_parser_log("[Система] Парсинг приостановлен (PAUSE).", "info")
-
-    def stop_parsing(self):
-        if hasattr(self, 'parser_pipeline') and self.parser_pipeline and self.parser_pipeline.is_alive():
-            self.parser_pipeline.stop()
-            self.safe_parser_log("[Система] Остановка парсинга пользователем (STOP).", "info")
-
-    def _poll_queues(self):
-        import queue
-        
-        # Batch process logs to prevent UI freeze
-        logs_to_insert = []
-        for _ in range(1000): # Process up to 1000 logs per tick
-            try:
-                msg, tag = self.log_queue.get_nowait()
-                logs_to_insert.append((msg, tag))
-            except queue.Empty:
-                break
-                
-        if logs_to_insert:
-            self.parser_terminal_box.configure(state="normal")
-            for msg, tag in logs_to_insert:
-                self.parser_terminal_box.insert("end", msg + "\n", tag)
-            
-            # Keep only the last 1000 lines
-            try:
-                line_count = int(self.parser_terminal_box.index('end-1c').split('.')[0])
-                if line_count > 1000:
-                    self.parser_terminal_box.delete("1.0", f"{line_count - 1000}.0")
-            except Exception:
-                pass
-                
-            self.parser_terminal_box.see("end")
-            self.parser_terminal_box.configure(state="disabled")
-
-        # Process stats (only the latest matters)
-        latest_stats = None
-        while True:
-            try:
-                latest_stats = self.stats_queue.get_nowait()
-            except queue.Empty:
-                break
-        if latest_stats:
-            self._update_parser_stats_ui(*latest_stats)
-
-        # Process progress (only the latest matters)
-        latest_prog = None
-        while True:
-            try:
-                latest_prog = self.progress_queue.get_nowait()
-            except queue.Empty:
-                break
-        if latest_prog:
-            if len(latest_prog) == 3:
-                cur, tot, pct = latest_prog
-                label = "Парсинг"
-            else:
-                cur, tot, pct, label = latest_prog
-            self._update_parser_progress_ui(cur, tot, pct, label)
-
-        # Batch process results
-        results_to_insert = []
-        for _ in range(500):
-            try:
-                item = self.result_queue.get_nowait()
-                if len(item) == 2:
-                    email, dork = item
-                else:
-                    email, dork = item[0], item[1]
-                results_to_insert.append((email, dork))
-            except queue.Empty:
-                break
-                
-        if results_to_insert:
-            for email, dork in results_to_insert:
-                self.parser_results_data.append({"email": email, "dork": dork})
-                self.parser_tree.insert("", "end", values=(email, dork))
-            # Auto-scroll to the latest result
-            children = self.parser_tree.get_children()
-            if children:
-                self.parser_tree.see(children[-1])
-
-        self.after(50, self._poll_queues)
-
-    def safe_parser_log(self, message, tag="info"):
-        self.log_queue.put((message, tag))
-        
-    def _update_parser_log(self, message, tag):
-        self.parser_terminal_box.configure(state="normal")
-        self.parser_terminal_box.insert("end", message + "\n", tag)
-        
-        # Keep only the last 1000 lines to prevent Tkinter from freezing
-        try:
-            line_count = int(self.parser_terminal_box.index('end-1c').split('.')[0])
-            if line_count > 1000:
-                self.parser_terminal_box.delete("1.0", f"{line_count - 1000}.0")
-        except Exception:
-            pass
-            
-        self.parser_terminal_box.see("end")
-        self.parser_terminal_box.configure(state="disabled")
-
-    def safe_update_parser_stats(self, dorks_tot, dorks_done, pages, snippets, emails):
-        self.stats_queue.put((dorks_tot, dorks_done, pages, snippets, emails))
-
-    def _update_parser_stats_ui(self, dorks_tot, dorks_done, pages, snippets, emails):
-        self.parser_stat_dorks.configure(text=f"{dorks_done}/{dorks_tot}")
-        self.parser_stat_pages.configure(text=f"{pages:.0f}")
-        self.parser_stat_snippets.configure(text=str(int(snippets)))
-        self.parser_stat_emails.configure(text=str(emails))
-
-    def safe_update_parser_progress(self, current, total, pct, label="Парсинг"):
-        self.progress_queue.put((current, total, pct, label))
-        
-    def _update_parser_progress_ui(self, current, total, pct, label="Парсинг"):
-        status_text = "Завершено" if pct == 100 else f"{label}..."
-        self.parser_progress_lbl.configure(text=f"{status_text} ({current}/{total})")
-        self.parser_percent_lbl.configure(text=f"{pct}%")
-        self.parser_progress_bar.set(pct / 100.0)
-        
-        if total > 0 and pct == 100:
-            self.parser_progress_bar.configure(progress_color=ACCENT_SUCCESS)
-        else:
-            self.parser_progress_bar.configure(progress_color=ACCENT_PRIMARY)
-
-    def safe_add_parser_result(self, email, dork, *args, **kwargs):
-        self.result_queue.put((email, dork))
-        
-    def _add_parser_result_ui(self, email, dork, *args, **kwargs):
-        self.parser_results_data.append({"email": email, "dork": dork})
-        self.parser_tree.insert("", "end", values=(email, dork))
-
-    def on_parser_complete(self, aborted=False):
-        self.after(0, self._reset_ui_after_parser_complete)
-        
-    def _reset_ui_after_parser_complete(self):
-        self._set_playback_state("stopped")
-        self._set_sidebar_state("normal")
-
     def on_pipeline_complete(self):
-        self.after(0, self._reset_ui_after_complete)
+        self._ui_call(self._reset_ui_after_complete)
         
     def _reset_ui_after_complete(self):
         self._set_playback_state("stopped")
@@ -2053,46 +937,37 @@ class ValidatorApp(ctk.CTk):
             groups.append("unknown")
         return tuple(groups)
 
-    def _get_filtered_results(self):
-        """Вся выборка целиком — только для экспорта.
+    # Потолок на копирование в буфер обмена. Больше в него всё равно не
+    # вставляют, а Tk на многомиллионной строке подвешивает окно.
+    CLIPBOARD_LIMIT = 200_000
 
-        Для ПОКАЗА этим пользоваться нельзя: здесь материализуется вся база.
-        Раньше отсюда брались данные и для таблицы тоже, и полный перебор
-        случался двадцать раз в секунду. Таблица теперь ходит в
-        result_store.page(), который обрывается на нужной странице.
+    def _get_filtered_results(self, limit=None):
+        """Выборка списком. Только для маленьких выборок и тестов.
+
+        Для ПОКАЗА и для ЭКСПОРТА этим пользоваться нельзя: здесь
+        материализуется вся база. Таблица ходит в result_store.page(),
+        который обрывается на нужной странице, а выгрузка — в
+        result_store.iter_matching(), который отдаёт строки порциями.
         """
-        return list(self.result_store.iter_matching(
-            self._selected_groups(), min_score=self._get_min_score()))
+        stream = self.result_store.iter_matching(
+            self._selected_groups(), min_score=self._get_min_score())
+        if limit:
+            return list(itertools.islice(stream, limit))
+        return list(stream)
 
     def export_results(self):
         if not len(self.result_store):
             messagebox.showwarning("Пусто", "Нет данных для экспорта.")
             return
             
-        export_data = self._get_filtered_results()
-                
-        if not export_data:
+        if not self.result_store.matching_count(self._selected_groups(),
+                                                min_score=self._get_min_score()):
             messagebox.showwarning("Пусто", "По выбранным критериям не найдено ни одного адреса.")
             return
-            
-        # Вычитаем список отписок ДО записи: письмо тому, кто уже отписался,
-        # стоит жалобы на спам, а сравнивать надо по каноническому виду —
-        # John.Doe@Gmail.com и johndoe@gmail.com это один ящик.
-        suppressed = 0
-        if self.suppress_path:
-            try:
-                from core import baseops
-                removals = baseops.read_emails(self.suppress_path)
-                keep = {e.lower() for e in
-                        baseops.subtract([r["email"] for r in export_data], removals)}
-                before = len(export_data)
-                export_data = [r for r in export_data if r["email"].lower() in keep]
-                suppressed = before - len(export_data)
-            except Exception as e:
-                messagebox.showwarning("Отписки", f"Список отписок не применён:\n{e}")
 
-        if not export_data:
-            messagebox.showwarning("Пусто", "После вычитания отписок не осталось ни одного адреса.")
+        if self._export_busy:
+            messagebox.showinfo("Идёт выгрузка",
+                                "Предыдущая выгрузка ещё не закончилась.")
             return
 
         try:
@@ -2105,55 +980,157 @@ class ValidatorApp(ctk.CTk):
         filepath = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=file_types, initialfile=default_name)
 
         if filepath:
+            self._run_export(filepath, chunk_size)
+
+    def _run_export(self, filepath, chunk_size):
+        """Готовит выгрузку и уводит саму запись в фоновый поток.
+
+        Почему в фон. Здесь читается вся выборка и пишется на диск, и раньше
+        это происходило прямо в обработчике кнопки: замерено 6.6 с на миллионе
+        строк, то есть больше минуты на десяти миллионах — всё это время окно
+        не отвечает вовсе. Ровно тот случай, ради которого хранилище и сделано
+        потоковым: память не растёт, а окно всё равно замирало.
+
+        Диалоги остаются в главном потоке — и выбор файла до, и сообщение
+        после. В фон уходит только чтение выборки и запись на диск.
+        """
+        try:
+            groups = self._selected_groups()
+            min_score = self._get_min_score()
+            suppress_path = self.suppress_path
+        except Exception as e:
+            messagebox.showerror("Ошибка",
+                                 f"Не удалось собрать параметры выгрузки: {e}")
+            return
+
+        self._export_busy = True
+        try:
+            self.export_btn.configure(state="disabled", text="Сохраняю...")
+        except Exception:
+            pass
+        self.safe_log("[INFO] Выгрузка пошла в фоне — окно не ждёт.", "info")
+
+        def finish(kind, title, text):
+            self._export_busy = False
             try:
-                from core import baseops
+                self.export_btn.configure(state="normal", text="Сохранить")
+            except Exception:
+                pass
+            {"info": messagebox.showinfo,
+             "warn": messagebox.showwarning,
+             "error": messagebox.showerror}.get(kind, messagebox.showinfo)(title, text)
 
-                def write_csv(f, rows):
-                    import csv
-                    # csv.writer обязателен: reason содержит запятые (напр. "[DNS: SPF=..., DMARC=...]"),
-                    # из-за чего ручная склейка через "," разъезжала колонки в Excel.
-                    writer = csv.writer(f)
-                    writer.writerow(["Email", "Status", "Reason", "MX-Record", "Name", "Gender", "Country",
-                                     "BirthYear", "Score", "Grade", "Provider", "DomainType",
-                                     "NameSource", "GenderSource", "CountrySource",
-                                     "SocialAccounts", "ValidatedAt"])
-                    for r in rows:
-                        data = r.get("data", {})
-                        writer.writerow([
-                            r["email"], r["status"], r["reason"], r["mx"],
-                            data.get("name", ""), data.get("gender", ""), data.get("country", ""),
-                            data.get("birth_year", ""),
-                            data.get("engagement_score", ""), data.get("engagement_grade", ""),
-                            data.get("provider_name", ""), data.get("domain_type", ""),
-                            data.get("name_source", ""), data.get("gender_source", ""),
-                            data.get("country_source", ""), data.get("social_accounts", ""),
-                            data.get("validated_at", ""),
-                        ])
-
-                def write_txt(f, rows):
-                    for r in rows:
-                        data = r.get("data", {})
-                        name = data.get("name", "")
-                        gender = data.get("gender", "")
-                        country = data.get("country", "")
-                        if name or gender or country:
-                            f.write(f"{r['email']}:{name}:{gender}:{country}\n")
-                        else:
-                            f.write(f"{r['email']}\n")
-
-                writer_fn = write_csv if filepath.endswith(".csv") else write_txt
-                written = baseops.write_chunks(export_data, filepath, chunk_size, writer_fn)
-
-                note = f"Сохранено {len(export_data)} строк."
-                if suppressed:
-                    note += f"\nВычтено по списку отписок: {suppressed}."
-                if len(written) > 1:
-                    note += f"\nРазбито на файлов: {len(written)} (по {chunk_size})."
-                else:
-                    note += f"\nФайл: {os.path.basename(written[0] if written else filepath)}"
-                messagebox.showinfo("Успех", note)
+        def work():
+            try:
+                note = self._export_to_disk(filepath, chunk_size, groups,
+                                            min_score, suppress_path)
             except Exception as e:
-                messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
+                text = f"Не удалось сохранить файл: {type(e).__name__}: {e}"
+                self._ui_call(lambda: finish("error", "Ошибка", text))
+                return
+            if note is None:
+                self._ui_call(lambda: finish(
+                    "warn", "Пусто",
+                    "После вычитания отписок не осталось ни одного адреса."))
+                return
+            self._ui_call(lambda: finish("info", "Успех", note))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _export_to_disk(self, filepath, chunk_size, groups, min_score,
+                        suppress_path):
+        """Сама выгрузка. Живёт в фоновом потоке и виджеты не трогает.
+
+        Возвращает текст отчёта либо None, если после вычитания отписок не
+        осталось ни строки. Ни одного обращения к Tk отсюда быть не может —
+        иначе фон перестанет быть фоном.
+        """
+        from core import baseops
+
+        # Список отписок читается ЦЕЛИКОМ (он ограничен файлом отписок,
+        # а не базой), а выгрузка идёт потоком. Сравнение — по
+        # каноническому ключу: человек отписался как John.Doe@Gmail.com,
+        # а в базе лежит johndoe@gmail.com, и это один ящик. Письмо
+        # тому, кто прямо просил его не трогать, стоит жалобы на спам.
+        drop_keys = set()
+        if suppress_path:
+            try:
+                drop_keys = baseops.suppression_keys(suppress_path)
+            except Exception as e:
+                self.safe_log("[DEAD] Список отписок не применён: "
+                              f"{type(e).__name__}: {e}", "dead")
+
+        def write_csv(f, rows):
+            import csv
+            # csv.writer обязателен: reason содержит запятые (напр. "[DNS: SPF=..., DMARC=...]"),
+            # из-за чего ручная склейка через "," разъезжала колонки в Excel.
+            writer = csv.writer(f)
+            writer.writerow(["Email", "Status", "Reason", "MX-Record", "Name", "Gender", "Country",
+                             "BirthYear", "Company", "JobRole", "Score", "Grade",
+                             "Provider", "DomainType",
+                             "NameSource", "GenderSource", "CountrySource",
+                             "CompanySource", "JobRoleSource",
+                             "SocialAccounts", "ValidatedAt"])
+            for r in rows:
+                data = r.get("data", {})
+                writer.writerow([
+                    r["email"], r["status"], r["reason"], r["mx"],
+                    data.get("name", ""), data.get("gender", ""), data.get("country", ""),
+                    data.get("birth_year", ""),
+                    data.get("company", ""), data.get("job_role", ""),
+                    data.get("engagement_score", ""), data.get("engagement_grade", ""),
+                    data.get("provider_name", ""), data.get("domain_type", ""),
+                    data.get("name_source", ""), data.get("gender_source", ""),
+                    data.get("country_source", ""),
+                    data.get("company_source", ""), data.get("job_role_source", ""),
+                    data.get("social_accounts", ""),
+                    data.get("validated_at", ""),
+                ])
+
+        def write_txt(f, rows):
+            for r in rows:
+                data = r.get("data", {})
+                name = data.get("name", "")
+                gender = data.get("gender", "")
+                country = data.get("country", "")
+                if name or gender or country:
+                    f.write(f"{r['email']}:{name}:{gender}:{country}\n")
+                else:
+                    f.write(f"{r['email']}\n")
+
+        writer_fn = write_csv if filepath.endswith(".csv") else write_txt
+
+        # Выгрузка идёт ПОТОКОМ: строки берутся у хранилища порциями и
+        # сразу уходят на диск. Раньше здесь стоял список, то есть вся
+        # выборка собиралась в память — на многомиллионной базе это
+        # ровно тот случай, ради которого всё остальное делалось
+        # потоковым, и именно он падал.
+        from core.cleaner import normalize_for_dedup
+        counters = {"suppressed": 0}
+
+        def selected_rows():
+            for row in self.result_store.iter_matching(
+                    groups, min_score=min_score):
+                if drop_keys and normalize_for_dedup(row["email"]) in drop_keys:
+                    counters["suppressed"] += 1
+                    continue
+                yield row
+
+        written, saved = baseops.write_chunks_stream(
+            selected_rows(), filepath, chunk_size, writer_fn)
+
+        if not saved:
+            return None
+
+        note = f"Сохранено {saved} строк."
+        if counters["suppressed"]:
+            note += f"\nВычтено по списку отписок: {counters['suppressed']}."
+        if len(written) > 1:
+            note += f"\nРазбито на файлов: {len(written)} (по {chunk_size})."
+        else:
+            note += f"\nФайл: {os.path.basename(written[0] if written else filepath)}"
+        self.safe_log(f"[INFO] Выгрузка закончена: {saved} строк.", "info")
+        return note
 
     def choose_suppression(self):
         """Выбирает файл отписок. Повторное нажатие сбрасывает выбор."""
@@ -2186,14 +1163,13 @@ class ValidatorApp(ctk.CTk):
             messagebox.showwarning("Пусто", "Нет данных для копирования.")
             return
             
-        export_data = self._get_filtered_results()
-                
-        if not export_data:
-            messagebox.showwarning("Пусто", "По выбранным критериям не найдено ни одного адреса.")
-            return
-            
+        # Буфер обмена — не место для многомиллионной базы: и Tk, и сама
+        # Windows на таком объёме встают колом, а вставить его человеку всё
+        # равно некуда. Берём потоком и обрываемся на потолке, честно об этом
+        # сообщая; для всей выборки есть «Сохранить».
         lines = []
-        for r in export_data:
+        for r in self.result_store.iter_matching(self._selected_groups(),
+                                                 min_score=self._get_min_score()):
             data = r.get("data", {})
             name = data.get("name", "")
             gender = data.get("gender", "")
@@ -2202,7 +1178,17 @@ class ValidatorApp(ctk.CTk):
                 lines.append(f"{r['email']}:{name}:{gender}:{country}")
             else:
                 lines.append(r['email'])
-        text = "\n".join(lines)
+            if len(lines) >= self.CLIPBOARD_LIMIT:
+                break
+
+        if not lines:
+            messagebox.showwarning("Пусто", "По выбранным критериям не найдено ни одного адреса.")
+            return
+
         self.clipboard_clear()
-        self.clipboard_append(text)
-        messagebox.showinfo("Скопировано", f"Успешно скопировано {len(export_data)} адресов в буфер обмена.")
+        self.clipboard_append("\n".join(lines))
+        note = f"Успешно скопировано {len(lines)} адресов в буфер обмена."
+        if len(lines) >= self.CLIPBOARD_LIMIT:
+            note += (f"\n\nЭто потолок буфера ({self.CLIPBOARD_LIMIT}). "
+                     "Вся выборка целиком — кнопкой «Сохранить».")
+        messagebox.showinfo("Скопировано", note)

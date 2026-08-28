@@ -11,7 +11,10 @@
 случайно перестав считать, сделал бы всю проверку зелёной и бессмысленной.
 """
 import os
+import statistics
 import sys
+import threading
+import time
 import unittest
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -20,17 +23,38 @@ from ui.result_store import ResultStore, group_of, GROUPS
 from ui.log_buffer import LogBuffer, Throttle
 from core.proxy_profile import pool_summary, provider_fitness
 
+# Берём НАСТОЯЩИЙ метод окна, а не его копию: проверка обязана ломаться,
+# если защиту из окна уберут. Само окно поднимать незачем — метод не
+# зависит ни от чего, кроме after().
+from ui.gui import ValidatorApp
+ValidatorAppUiCall = ValidatorApp._ui_call
 
-class CountingList(list):
-    """Список, считающий обращения по индексу."""
 
-    def __init__(self, *a):
-        super().__init__(*a)
-        self.reads = 0
+def _new_window():
+    """Пустое окно тем же способом, каким его создаёт программа."""
+    import customtkinter as ctk
+    root = ctk.CTk()
+    root.withdraw()
+    return root
 
-    def __getitem__(self, item):
-        self.reads += 1
-        return super().__getitem__(item)
+
+class CountingStore(ResultStore):
+    """Хранилище, считающее, сколько СТРОК оно на самом деле достало.
+
+    Раньше здесь подменялся внутренний список `_rows`. Списка больше нет:
+    содержимое строк уехало в SQLite, чтобы память не росла вместе с базой,
+    а в ОЗУ остались только позиции. Считать теперь надо не обращения к
+    списку, а поднятые строки — это ровно та же величина «сколько работы
+    стоил показ» и она не зависит от того, где строки лежат.
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.rows_fetched = 0
+
+    def _fetch(self, positions):
+        self.rows_fetched += len(positions)
+        return super()._fetch(positions)
 
 
 def build(store, count, status="Valid", score=90):
@@ -43,13 +67,12 @@ class TestPagingCost(unittest.TestCase):
     """Стоимость показа страницы не должна расти вместе с базой."""
 
     def _reads_for_first_page(self, size):
-        store = ResultStore()
+        store = CountingStore()
+        self.addCleanup(store.close)
         build(store, size)
-        # Подменяем хранилище строк на считающее — сам код при этом обычный
-        store._rows = CountingList(store._rows)
         rows = store.page(("valid",), page=1, size=100)
         self.assertEqual(len(rows), 100)
-        return store._rows.reads
+        return store.rows_fetched
 
     def test_paging_cost_is_independent_of_base_size(self):
         small = self._reads_for_first_page(1000)
@@ -57,7 +80,7 @@ class TestPagingCost(unittest.TestCase):
         self.assertLessEqual(small, 120, "даже на малой базе трогается лишнее")
         self.assertLessEqual(
             large, 120,
-            f"на базе в 100k строк для одной страницы прочитано {large} строк — "
+            f"на базе в 100k строк для одной страницы поднято {large} строк — "
             "стоимость показа зависит от размера базы")
         self.assertLessEqual(
             large, small * 2,
@@ -65,20 +88,21 @@ class TestPagingCost(unittest.TestCase):
 
     def test_positive_control_old_approach_would_be_caught(self):
         """Счётчик обязан ловить старый способ — иначе он ничего не проверяет."""
-        store = ResultStore()
+        store = CountingStore()
+        self.addCleanup(store.close)
         build(store, 5000)
-        rows = CountingList(store._rows)
         # Ровно то, что делал прежний _get_filtered_results: перебор ВСЕЙ базы
-        filtered = [rows[i] for i in range(len(rows))
-                    if rows[i]["status"] == "Valid"][:100]
+        filtered = [row for row in store.all_rows()
+                    if row["status"] == "Valid"][:100]
         self.assertEqual(len(filtered), 100)
         self.assertGreater(
-            rows.reads, 1000,
+            store.rows_fetched, 1000,
             "положительный контроль не сработал: счётчик не видит полный перебор, "
             "значит и основную проверку он не доказывает")
 
     def test_deep_page_still_returns_right_rows(self):
         store = ResultStore()
+        self.addCleanup(store.close)
         build(store, 5000)
         page_one = store.page(("valid",), page=1, size=100)
         page_ten = store.page(("valid",), page=10, size=100)
@@ -91,22 +115,22 @@ class TestStatsAreCheap(unittest.TestCase):
     """Счётчики берутся готовыми, а не пересчитываются перебором."""
 
     def test_counts_do_not_scan_rows(self):
-        store = ResultStore()
+        store = CountingStore()
+        self.addCleanup(store.close)
         build(store, 20000)
-        store._rows = CountingList(store._rows)
         counts = store.counts()
         self.assertEqual(counts["valid"], 20000)
         self.assertEqual(counts["total"], 20000)
         self.assertEqual(counts["names"], 20000)
-        self.assertEqual(store._rows.reads, 0,
+        self.assertEqual(store.rows_fetched, 0,
                          "счётчики перебирают строки, хотя должны быть готовыми")
 
     def test_matching_count_without_score_filter_is_free(self):
-        store = ResultStore()
+        store = CountingStore()
+        self.addCleanup(store.close)
         build(store, 20000)
-        store._rows = CountingList(store._rows)
         self.assertEqual(store.matching_count(("valid",)), 20000)
-        self.assertEqual(store._rows.reads, 0,
+        self.assertEqual(store.rows_fetched, 0,
                          "подсчёт подходящих строк без порога всё ещё перебирает базу")
 
     def test_stats_updates_are_throttled(self):
@@ -276,6 +300,187 @@ class TestProxyPanelData(unittest.TestCase):
             s = pool_summary(junk)
             self.assertIsInstance(s, dict)
             self.assertIn("unique_ips", s)
+
+
+class TestBackgroundThreadDoesNotStarveTheWindow(unittest.TestCase):
+    """Пока в фоне разбирается база, окно обязано продолжать тикать.
+
+    Меряется не время и не «худшая задержка», а СКОЛЬКО РАЗ успел сработать
+    повторяющийся таймер окна за один и тот же кусок фоновой работы. Обе
+    отвергнутые метрики врали, и стоит сказать чем, чтобы их не вернули:
+
+      * «Худшая задержка» бесполезна: на ХОЛОСТОМ ходу окно само даёт разрыв
+        в 212 мс. Любой порог либо ниже этого шума, либо выше настоящей беды.
+      * Замер через update() в цикле меряет не то: главный поток при этом сам
+        непрерывно борется за GIL, и картина получается обратная настоящей.
+        Через него выходило, что со вдохами 14 мс, а без них 274 — числа
+        правдоподобные и по сути случайные.
+
+    Настоящий mainloop на пятнадцати секундах фонового скана дал вот что:
+
+        холостой ход   468 тиков | медиана 11 мс | p99  12.6 мс
+        скан БЕЗ вдохов 21 тик   | медиана 67 мс | p99  9915 мс
+        скан СО вдохами 473 тика | медиана 11 мс | p99  15.9 мс
+
+    То есть без вдохов окно замирало почти на десять секунд подряд, а со
+    вдохами неотличимо от простоя. Разница в числе тиков двадцатикратная —
+    по ней и проверяем: она не зависит от того, чем ещё занята машина.
+    """
+
+    SAMPLE = 200_000
+    TICK_MS = 20
+    # Нагрузка держится фиксированное время, а не один проход. Один проход
+    # длится полсекунды, и половину тиков окно успевает выдать на старте
+    # mainloop, ещё до того как фоновый поток разогнался: разница выходит
+    # трёхкратной вместо двадцатикратной и на шуме теряется. Под непрерывной
+    # нагрузкой видно то, что видит человек, который ждёт у окна.
+    LOAD_SECONDS = 4.0
+    MIN_RATIO = 4.0
+    MIN_TICKS_PER_SECOND = 10.0
+
+    # Окно на весь класс, одно. Второй Tk-корень в том же процессе на этой
+    # сборке Python не поднимается — интерпретатор теряет путь к init.tcl,
+    # хотя первое окно работает. Замерам это безразлично: между прогонами
+    # окно ничего не накапливает.
+    root = None
+
+    @classmethod
+    def setUpClass(cls):
+        # Берём НАСТОЯЩЕЕ окно программы, а не пустой корень Tk. Разница
+        # решает исход: на пустом корне разрыв между «со вдохами» и «без»
+        # выходит двукратным, на настоящем — двадцатикратным. Пустое окно
+        # почти ничего не делает и потому восстанавливается там, где окно с
+        # тремя вкладками, таблицей и собственным опросом очередей — нет.
+        # Проверять надо то, что подмерзает у пользователя.
+        #
+        # Окно общее на весь прогон и НЕ уничтожается: второй корень Tk в
+        # этом процессе не поднимается, и своё окно здесь означало бы, что
+        # эта проверка молча уходит в skip внутри полного прогона. См.
+        # tests/gui_fixture.py.
+        from tests.gui_fixture import shared_app
+        try:
+            cls.root = shared_app()
+        except RuntimeError as exc:
+            raise unittest.SkipTest(str(exc))
+
+    def _base(self):
+        text = chr(10).join(f"user{i}@gmail.com" for i in range(self.SAMPLE))
+        return [{"type": "text", "content": text}]
+
+    def _ticks_per_second(self, breathe_every):
+        """Частота тиков окна, пока в фоне НЕПРЕРЫВНО идёт разбор базы."""
+        from core.provider import scan_base_providers
+
+        root = self.root
+        sources = self._base()          # строку готовим ДО замера
+        finished = threading.Event()
+        ticks = [0]
+
+        def heartbeat():
+            ticks[0] += 1
+            if finished.is_set():
+                root.quit()
+                return
+            root.after(self.TICK_MS, heartbeat)
+
+        def work():
+            try:
+                end = time.perf_counter() + self.LOAD_SECONDS
+                while time.perf_counter() < end:
+                    scan_base_providers(sources, limit=self.SAMPLE,
+                                        breathe_every=breathe_every)
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=work, daemon=True)
+        started = time.perf_counter()
+        worker.start()
+        root.after(self.TICK_MS, heartbeat)
+        root.mainloop()
+        worker.join(timeout=60)
+        elapsed = max(0.001, time.perf_counter() - started)
+        return ticks[0] / elapsed
+
+    def test_window_keeps_ticking_and_would_not_without_breathing(self):
+        """Один прогон, два утверждения — и оба обязаны держаться."""
+        breathed = self._ticks_per_second(1000)
+        starved = self._ticks_per_second(0)
+
+        self.assertGreaterEqual(
+            breathed, self.MIN_TICKS_PER_SECOND,
+            f"под фоновым разбором окно тикало {breathed:.1f} раз в секунду "
+            f"вместо {1000 / self.TICK_MS:.0f} — оно подмерзает")
+        self.assertGreaterEqual(
+            breathed, starved * self.MIN_RATIO,
+            "замер не различает поток со вдохами и без — он слеп, и зелёный "
+            f"результат ничего не значит (со вдохами {breathed:.1f} тиков/с, "
+            f"без вдохов {starved:.1f})")
+
+    def test_breathing_does_not_change_the_answer(self):
+        from core.provider import scan_base_providers
+        sources = [{"type": "text",
+                    "content": chr(10).join(f"user{i}@gmail.com" for i in range(5000))}]
+        plain = scan_base_providers(sources, limit=5000)
+        breathed = scan_base_providers(sources, limit=5000, breathe_every=100)
+        self.assertEqual(plain["total"], breathed["total"])
+        self.assertEqual(dict(plain["providers"]), dict(breathed["providers"]))
+
+    def test_garbage_breathe_value_does_not_crash(self):
+        from core.provider import scan_base_providers
+        sources = [{"type": "text",
+                    "content": chr(10).join(f"user{i}@gmail.com" for i in range(100))}]
+        for junk in (None, "часто", -5, 1.5, [], {}):
+            scan = scan_base_providers(sources, limit=100, breathe_every=junk)
+            self.assertEqual(scan["total"], 100)
+
+    def test_window_actually_asks_the_scan_to_breathe(self):
+        """Само окно обязано просить вдохи — иначе починка живёт только в тесте."""
+        import inspect
+        source = inspect.getsource(ValidatorApp._scan_base_composition)
+        self.assertIn("breathe_every", source)
+        self.assertGreater(int(ValidatorApp.BREATHE_EVERY), 0)
+
+
+class TestClosedWindowIsNotAnError(unittest.TestCase):
+    """Фоновое чтение переживает закрытие окна, а не падает стеком в консоль.
+
+    Пользователь выбрал файл на гигабайт и передумал. Поток предпросмотра в
+    этот момент зовёт after() у уничтоженного окна — раньше это был
+    RuntimeError, стек в консоли и поток, умерший не закрыв файл.
+    """
+
+    class FakeApp:
+        def __init__(self, error):
+            self.error = error
+            self.calls = 0
+
+        def after(self, delay, fn):
+            self.calls += 1
+            if self.error is not None:
+                raise self.error
+            fn()
+
+        _ui_call = ValidatorAppUiCall
+
+    def test_closed_window_returns_false_instead_of_raising(self):
+        import tkinter as tk
+        for error in (RuntimeError("main thread is not in main loop"),
+                      tk.TclError("application has been destroyed")):
+            app = self.FakeApp(error)
+            self.assertFalse(app._ui_call(lambda: None))
+            self.assertEqual(app.calls, 1)
+
+    def test_live_window_still_runs_the_work(self):
+        app = self.FakeApp(None)
+        seen = []
+        self.assertTrue(app._ui_call(lambda: seen.append(1)))
+        self.assertEqual(seen, [1])
+
+    def test_real_error_is_not_swallowed(self):
+        """Ошибка САМОЙ работы обязана быть видна, а не съедена глушилкой."""
+        app = self.FakeApp(None)
+        with self.assertRaises(ZeroDivisionError):
+            app._ui_call(lambda: 1 / 0)
 
 
 if __name__ == "__main__":

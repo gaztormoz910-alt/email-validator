@@ -1,0 +1,93 @@
+name: CI
+
+# Зачем этот файл. До него единственной проверкой был прогон тестов на машине
+# разработчика — то есть «работает у меня». Сломанный импорт, забытая
+# зависимость в requirements.txt или тест, зелёный только из-за кэша .pyc,
+# обнаруживались уже на живой базе.
+#
+# Здесь три независимых сита, и каждое ловит свой класс поломок:
+#   1. Тесты на чистом окружении — ловят забытую зависимость.
+#   2. Типы на ядре — ловят несуществующий атрибут и None там, где ждали строку.
+#   3. Разбор ledger'а — ловит модуль, снова выросший в монолит.
+
+on:
+  push:
+    branches: [master, main, "validator-*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Тесты (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows — рабочая площадка владельца, Linux — то, на чём соберётся
+        # сервер под REST API. Расхождения между ними ловятся именно здесь.
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Прогнать тесты
+        # Чужой .pyc не должен решать судьбу прогона: -B выключает запись
+        # кэша, чтобы зелёный результат означал зелёный ИСХОДНИК.
+        run: python -B -m pytest -q
+        env:
+          PYTHONIOENCODING: utf-8
+          # В CI нет ни сети до почтовых серверов, ни дисплея: тесты, которым
+          # нужны они, пропускают себя сами по этому флагу.
+          VALIDATOR_CI: "1"
+
+  types:
+    name: Типы на ядре
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: mypy
+        run: python -m mypy
+
+  structure:
+    name: Модули не превращаются обратно в монолиты
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Проверить размеры модулей
+        run: python .unlazy/precision/verify_module_sizes.py
+
+  requirements:
+    name: requirements.txt сходится с импортами
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Сверить зависимости
+        run: python audit/verify_requirements.py

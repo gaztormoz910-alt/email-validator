@@ -85,6 +85,14 @@ _HEADER_COUNTRY = {'country', 'location', 'region', 'страна', 'город'
 
 
 def clean_input_line_fast(line):
+    """Снимает нумерацию вида "12. " в начале строки.
+
+    Мусор на входе не роняет: сюда приходят строки из ЧУЖИХ файлов, а
+    падение внутри обработки адреса проглатывается except-ом уровнем выше —
+    адрес молча выпадет из выдачи, а счётчик его засчитает.
+    """
+    if not isinstance(line, str):
+        return ""
     return CLEAN_PREFIX_RE.sub('', line.strip())
 
 
@@ -93,6 +101,16 @@ def _detect_delimiter(sample_lines):
     candidates = [',', ';', ':', '|', '\t']
     best_delim = ':'
     best_score = 0
+
+    # Сюда приходит выборка из ЧУЖОГО файла. Нестрока в списке — не повод
+    # ронять чтение всей базы: падение уровнем выше проглатывается, и адреса
+    # молча выпадут из выдачи.
+    if not sample_lines or isinstance(sample_lines, (str, bytes)):
+        return best_delim
+    try:
+        sample_lines = [line for line in sample_lines if isinstance(line, str)]
+    except TypeError:
+        return best_delim
 
     for delim in candidates:
         counts = [line.count(delim) for line in sample_lines if line.strip()]
@@ -118,9 +136,26 @@ def _detect_delimiter(sample_lines):
     return best_delim
 
 
+def _is_known_name(word):
+    """Знает ли индекс такое имя. Индекс подгружается лениво и не обязателен.
+
+    Импорт локальный намеренно: streamer читает файлы и не должен тянуть за
+    собой парсер имён на каждом запуске. Если индекса нет, ответ «не знаю» —
+    и классификация ведёт себя ровно так, как вела до его появления.
+    """
+    try:
+        from core.parser.names_index import is_known_name
+    except Exception:
+        return False
+    try:
+        return is_known_name(word)
+    except Exception:
+        return False
+
+
 def _classify_field(value):
     """Определяет тип поля: 'email', 'gender', 'country', 'name', 'junk'."""
-    if not value or not value.strip():
+    if not isinstance(value, str) or not value.strip():
         return 'empty'
 
     v = value.strip()
@@ -148,7 +183,21 @@ def _classify_field(value):
         return 'junk'  # Скорее всего пароль (спецсимволы + цифры)
     
     if has_alpha and has_digit and not has_space and len(v) >= 4:
-        return 'junk'  # Буквы + цифры без пробелов = пароль (password123, abc789)
+        # Буквы + цифры без пробелов — почти всегда пароль из связки
+        # `email:password`, и такие базы здесь обычное дело.
+        #
+        # Но не всегда: в колонке имени встречается `Mohammed2`, `Anna3` —
+        # человек с тем же именем, что и кто-то до него, получил номер при
+        # выгрузке из CRM. Отличить одно от другого по форме нельзя, зато
+        # можно СПРОСИТЬ: если отбросить хвост из цифр и остаток окажется
+        # настоящим именем из индекса, это имя, а не пароль. Индекс на 43
+        # тысячи отобранных имён, а не база на 138 млн: в базе такого размера
+        # находится почти любое буквосочетание, и её ответ ничего не различал
+        # бы. Про `password123` индекс скажет «нет», и пароль останется junk.
+        stem = v.rstrip("0123456789")
+        if len(stem) >= 3 and len(v) - len(stem) <= 4 and _is_known_name(stem):
+            return 'name'
+        return 'junk'
 
     # Если чисто числовое — junk (ID, телефон и т.д.)
     if v.isdigit():
@@ -167,8 +216,16 @@ def _detect_column_map(sample_lines, delimiter):
     Возвращает dict: {column_index: field_type}
     field_type = 'email', 'name', 'gender', 'country', 'junk'
     """
+    if not sample_lines or isinstance(sample_lines, (str, bytes)):
+        return {0: 'email'}, False
+    try:
+        sample_lines = [line for line in sample_lines if isinstance(line, str)]
+    except TypeError:
+        return {0: 'email'}, False
     if not sample_lines:
-        return {0: 'email'}
+        return {0: 'email'}, False
+    if not isinstance(delimiter, str) or not delimiter:
+        delimiter = ':'
 
     # Проверяем первую строку на наличие заголовков CSV
     first_line = sample_lines[0].strip()
@@ -195,8 +252,10 @@ def _detect_column_map(sample_lines, delimiter):
 
     # Нет заголовков — определяем по содержимому (голосование)
     # Берём до 10 строк для анализа
-    analysis_lines = sample_lines[:10]
-    num_cols = max(len(line.split(delimiter)) for line in analysis_lines if line.strip())
+    analysis_lines = [line for line in sample_lines[:10] if line.strip()]
+    if not analysis_lines:
+        # Все строки пустые: колонок нет, но и падать не за что.
+        return {0: 'email'}, False
 
     # Для каждой колонки считаем голоса
     votes = {}  # {col_index: {type: count}}
@@ -255,6 +314,12 @@ def _detect_column_map(sample_lines, delimiter):
 
 def _parse_line_smart(line, delimiter, col_map):
     """Парсит строку с помощью определённой карты колонок."""
+    if not isinstance(line, str):
+        return "", {"name": "", "gender": "", "country": ""}
+    if not isinstance(delimiter, str) or not delimiter:
+        delimiter = ':'
+    if not isinstance(col_map, dict):
+        col_map = {}
     parts = line.split(delimiter)
 
     email = ""
@@ -387,16 +452,108 @@ class StreamLoader:
                             if line:
                                 yield clean_input_line_fast(line)
 
+    # Размер куска при подсчёте строк. Мегабайт — компромисс между числом
+    # системных вызовов и памятью: меньше даёт лишние вызовы, больше уже не
+    # ускоряет, потому что упирается в скорость диска.
+    _COUNT_CHUNK = 1 << 20
+
     def count_total_lines(self):
-        """Быстрый подсчет строк без загрузки в память"""
+        """Точное число строк во всех источниках, без загрузки их в память.
+
+        Читаем кусками и считаем переводы строк, а не итерируем построчно.
+        Построчная итерация на каждой строке создаёт объект bytes, и на файле
+        в 700 МБ это сотни миллионов ненужных объектов: тот же ответ получался
+        в разы дольше. Здесь же вся работа — это str.count по куску, то есть
+        один проход memchr на уровне Си.
+        """
         total = 0
         for source in self.sources:
             if source["type"] == "text":
                 total += len([line for line in source["content"].split("\n") if line.strip()])
             elif source["type"] == "file":
                 filepath = source["path"]
-                if os.path.exists(filepath):
-                    # Очень быстрый подсчет через генератор
-                    with open(filepath, "rb") as f:
-                        total += sum(1 for _ in f)
+                if not os.path.exists(filepath):
+                    continue
+                try:
+                    with open(filepath, "rb") as handle:
+                        tail = b""
+                        while True:
+                            chunk = handle.read(self._COUNT_CHUNK)
+                            if not chunk:
+                                break
+                            total += chunk.count(b"\n")
+                            tail = chunk[-1:]
+                        # Последняя строка без перевода в конце файла тоже строка.
+                        if tail and tail != b"\n":
+                            total += 1
+                except OSError:
+                    continue
+        return total
+
+    # Сколько строк нюхать, чтобы оценить среднюю длину строки. Двести строк
+    # хватает: разброс длин внутри одного файла невелик, а ошибка оценки в
+    # несколько процентов знаменателю прогресс-бара безразлична.
+    _ESTIMATE_SAMPLE = 200
+
+    def estimate_total_lines(self):
+        """Оценка числа строк ПО РАЗМЕРУ ФАЙЛА, без чтения его целиком.
+
+        Зачем нужна отдельно от точного счёта. Прогон начинался с точного
+        подсчёта всех строк — то есть с полного прохода по файлу ДО первого
+        проверенного адреса. На базе в сотни мегабайт это минуты, в течение
+        которых окно показывает 0/0 и выглядит зависшим, хотя работа даже не
+        начиналась. Знаменателю прогресс-бара точность не нужна: настоящее
+        число уникальных адресов всё равно известно только фидеру, и он его
+        уточняет, когда закончит.
+
+        Нюхаем файл В ТРЁХ МЕСТАХ — в начале, в середине и ближе к концу — и
+        делим размер на среднюю длину строки. Пробы только из начала файла
+        недостаточно, и это измерено: на реальном списке дорков в 712 МБ
+        оценка по первым двумстам строкам ошиблась ВДВОЕ, потому что короткие
+        запросы лежали в начале, а длинные в конце. Три точки убирают перекос
+        почти полностью и стоят двух лишних seek — то есть ничего.
+        """
+        total = 0
+        for source in self.sources:
+            if source["type"] == "text":
+                total += len([line for line in source["content"].split("\n") if line.strip()])
+                continue
+            if source["type"] != "file":
+                continue
+            filepath = source["path"]
+            if not os.path.exists(filepath):
+                continue
+            try:
+                size = os.path.getsize(filepath)
+                if not size:
+                    continue
+                sampled = 0
+                sampled_bytes = 0
+                per_point = max(1, self._ESTIMATE_SAMPLE // 3)
+                with open(filepath, "rb") as handle:
+                    for fraction in (0.0, 0.5, 0.85):
+                        offset = int(size * fraction)
+                        if offset:
+                            handle.seek(offset)
+                            # Прыжок почти наверняка попал в середину строки —
+                            # её огрызок в статистику брать нельзя.
+                            handle.readline()
+                        taken = 0
+                        for raw in handle:
+                            sampled += 1
+                            sampled_bytes += len(raw)
+                            taken += 1
+                            if taken >= per_point:
+                                break
+                        if not taken:
+                            break   # дошли до конца файла, дальше проб нет
+                if not sampled or not sampled_bytes:
+                    continue
+                if sampled_bytes >= size:
+                    # Файл целиком уместился в выборку — оценка стала точной.
+                    total += sampled
+                else:
+                    total += max(sampled, int(size / (sampled_bytes / sampled)))
+            except OSError:
+                continue
         return total

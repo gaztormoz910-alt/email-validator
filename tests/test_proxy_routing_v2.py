@@ -187,13 +187,16 @@ class TestSpamhaus(unittest.TestCase):
                 raise Exception("не отвечает")
 
         v.__class__  # резолвер подменяем через сам метод ниже
-        original = N.ProxiedResolver
+        # Резолвер Spamhaus создаётся в core/dns_checks.py — туда переехали
+        # проверки по DNS. Подмена в core.network была бы холостой.
+        import core.dns_checks as DC
+        original = DC.ProxiedResolver
         try:
             N.ProxiedResolver = lambda **kw: Broken()
             self.assertFalse(v.set_spamhaus_resolver(["10.0.0.53"]))
             self.assertIsNone(v._spamhaus_lists("1.2.3.4"))
         finally:
-            N.ProxiedResolver = original
+            DC.ProxiedResolver = original
 
     def test_spamhaus_accepts_resolver_passing_sanity_contract(self):
         v = NetworkValidator(timeout=1)
@@ -212,9 +215,12 @@ class TestSpamhaus(unittest.TestCase):
                     return [Rdata("127.0.0.2")]
                 raise N.dns.resolver.NXDOMAIN
 
-        original = N.ProxiedResolver
+        # Резолвер Spamhaus создаётся в core/dns_checks.py — туда переехали
+        # проверки по DNS. Подмена в core.network была бы холостой.
+        import core.dns_checks as DC
+        original = DC.ProxiedResolver
         try:
-            N.ProxiedResolver = lambda **kw: Good()
+            DC.ProxiedResolver = lambda **kw: Good()
             self.assertTrue(v.set_spamhaus_resolver(["10.0.0.53"]))
             # На вход идёт ОБЫЧНЫЙ ip, разворачивает его сам _spamhaus_lists —
             # ровно как check_dnsbl_ip. Раньше здесь стоял уже развёрнутый
@@ -223,7 +229,7 @@ class TestSpamhaus(unittest.TestCase):
             self.assertIs(v._spamhaus_lists("127.0.0.2"), True)
             self.assertIs(v._spamhaus_lists("9.9.9.9"), False)
         finally:
-            N.ProxiedResolver = original
+            DC.ProxiedResolver = original
 
     def test_spamhaus_zone_is_not_in_public_list(self):
         """Из общего списка Spamhaus по-прежнему исключён: там он не работает."""

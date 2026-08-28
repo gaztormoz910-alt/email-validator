@@ -119,6 +119,84 @@ def chunks(items, size):
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
+def suppression_keys(path):
+    """Множество канонических ключей из файла отписок.
+
+    Отдельная функция, потому что этим же ключом обязаны сравниваться все три
+    операции — дедуп, вычитание отписок и пересечение баз. Человек отписался
+    как `john.doe@gmail.com`, попал в базу как `johndoe@gmail.com`, и сверка
+    по сырой строке отправит ему письмо снова. Цена такой ошибки выше, чем у
+    обычного дубля: это жалоба от того, кто уже прямо просил его не трогать.
+    """
+    return {_key(e) for e in read_emails(path) if _key(e)}
+
+
+def write_chunks_stream(rows, path, size, writer):
+    """То же, что write_chunks, но вход — ГЕНЕРАТОР, а не список.
+
+    Зачем понадобилось. write_chunks режет список срезами, то есть требует
+    всю выборку в памяти целиком — а выгружают как раз большие базы, ради
+    которых всё остальное сделано потоковым. Здесь строки приходят порциями и
+    уходят на диск, поэтому пиковая память равна одному куску, а не всей
+    выгрузке.
+
+    Возвращает (список путей, сколько строк записано).
+    """
+    try:
+        size = int(size)
+    except (TypeError, ValueError):
+        size = 0
+
+    # Мусор на входе не должен ронять выгрузку: эта функция зовётся и из окна,
+    # и из консоли, и падение здесь означало бы молча потерянные адреса.
+    if not isinstance(path, (str, bytes, os.PathLike)) or not path:
+        return [], 0
+    if rows is None or not hasattr(rows, "__iter__") or isinstance(rows, (str, bytes)):
+        return [], 0
+    if not callable(writer):
+        return [], 0
+
+    base, ext = os.path.splitext(path)
+    written = []
+    total = 0
+    buffer = []
+    index = 0
+
+    def flush(final=False):
+        nonlocal buffer, index, total
+        if not buffer and not (final and not written):
+            return
+        index += 1
+        # Имя первого файла заранее не известно: пока не кончились строки,
+        # неясно, будет он единственным или первым из многих. Поэтому пишем
+        # под номером, а в конце единственный файл переименовываем обратно.
+        target = path if (size < 1) else f"{base}_{index:03d}{ext}"
+        with open(target, "w", newline="", encoding="utf-8") as handle:
+            writer(handle, buffer)
+        written.append(target)
+        total += len(buffer)
+        buffer = []
+
+    for row in rows:
+        buffer.append(row)
+        if size >= 1 and len(buffer) >= size:
+            flush()
+    if buffer or not written:
+        flush(final=True)
+
+    # Один-единственный кусок не нужно нумеровать: человек просил файл, а не
+    # файл_001. Переименование дешевле, чем два прохода по генератору.
+    if size >= 1 and len(written) == 1 and written[0] != path:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+            os.rename(written[0], path)
+            written = [path]
+        except OSError:
+            pass
+    return written, total
+
+
 def write_chunks(rows, path, size, writer):
     """Пишет строки кусками по size, нумеруя файлы. Возвращает список путей.
 
