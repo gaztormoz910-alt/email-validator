@@ -218,21 +218,28 @@ def check_ui_full_scan():
     """Показ страницы стоит порядка страницы, а не всей базы."""
     from ui.result_store import ResultStore
 
-    class Counting(list):
-        reads = 0
+    # Содержимое строк уехало в SQLite (см. ui/result_store.py), поэтому
+    # считаем не обращения к списку, а СТРОКИ, которые хранилище реально
+    # подняло. Это та же величина «сколько работы стоил показ», просто
+    # замеренная там, где строки теперь лежат.
+    class Counting(ResultStore):
+        def __init__(self):
+            super().__init__()
+            self.rows_fetched = 0
 
-        def __getitem__(self, item):
-            Counting.reads += 1
-            return list.__getitem__(self, item)
+        def _fetch(self, positions):
+            self.rows_fetched += len(positions)
+            return super()._fetch(positions)
 
-    store = ResultStore()
-    for i in range(30000):
-        store.append(f"u{i}@x.com", "Valid", "", "", {})
-    Counting.reads = 0
-    store._rows = Counting(store._rows)
-    rows = store.page(("valid",), page=1, size=100)
-    # 30000 строк в базе, но прочитать позволено порядка ста
-    return len(rows) == 100 and Counting.reads <= 150
+    store = Counting()
+    try:
+        for i in range(30000):
+            store.append(f"u{i}@x.com", "Valid", "", "", {})
+        rows = store.page(("valid",), page=1, size=100)
+        # 30000 строк в базе, но поднять позволено порядка ста
+        return len(rows) == 100 and store.rows_fetched <= 150
+    finally:
+        store.close()
 
 
 def check_requirements():
@@ -463,6 +470,192 @@ def check_gui_sync_counting():
     return not offenders
 
 
+
+
+# --- Изъяны, закрытые в третьем круге работ ---------------------------------
+
+def check_smtp_enhanced_codes():
+    """Расширенный код RFC 3463 решает вердикт, а не украшает причину."""
+    from core.smtp_codes import classify_smtp_response as c
+    if c(550, b"5.1.1 rejected")["status"] != "invalid":
+        return False
+    if c(550, b"5.7.1 rejected")["status"] == "invalid":
+        return False
+    if c(552, b"5.2.2 mailbox")["status"] != "valid":
+        return False
+    return c(550, b"5.1.10 recipient not found")["status"] == "invalid"
+
+
+def check_false_valid_substring():
+    """Подстрока не делает ящик живым."""
+    from core.smtp_codes import classify_smtp_response as c
+    traps = [(452, b"4.5.3 server overloaded"),
+             (452, b"4.7.1 you have sent over the allowed number"),
+             (552, b"5.3.4 message too large"),
+             (552, b"5.7.0 content rejected")]
+    if any(c(code, msg)["status"] == "valid" for code, msg in traps):
+        return False
+    return c(452, b"4.2.2 over quota")["status"] == "valid"
+
+
+def check_code_551_553():
+    """551 и 553 не хоронят ящик: они про маршрут и про отправителя."""
+    from core.smtp_codes import classify_smtp_response as c
+    if c(551, b"user not local")["status"] == "invalid":
+        return False
+    if c(553, b"5.7.1 sender address rejected")["status"] == "invalid":
+        return False
+    return c(550, b"no such user")["status"] == "invalid"
+
+
+def check_syntax_bytes():
+    """Длины считаются в октетах, а не в символах."""
+    from core.email_syntax import validate_email_syntax
+    if validate_email_syntax("\u0438" * 33 + "@example.com"):
+        return False
+    return validate_email_syntax("\u0438" * 20 + "@example.com")
+
+
+def check_name_dictionary_gate():
+    """Английский словарь больше не хоронит настоящие имена."""
+    from core.parser.name_extractor import NameExtractor
+    extractor = NameExtractor()
+    if extractor.extract_name("justinkyle89@gmail.com") != "Justin Kyle":
+        return False
+    if extractor.extract_name("leo.duquesnel@gmail.com") != "Leo Duquesnel":
+        return False
+    return not (extractor.extract_name("fff089739@gmail.com") or "")
+
+
+def check_names_table_behind_ai_flag():
+    """База имён грузится и при выключенном ИИ."""
+    from core.parser.ml_predictor import MLPredictor
+    predictor = MLPredictor(enable_ml=False)
+    if predictor.nd is None:
+        return False
+    return bool(predictor.predict_country("Justin Kyle"))
+
+
+def check_scoring_status_vocabulary():
+    """Скоринг понимает и словарь движка, и словарь окна."""
+    from core.scoring import calculate_engagement_score as s
+    engine = s(email="a@gmail.com", smtp_status="valid")["score"]
+    window = s(email="a@gmail.com", smtp_status="Valid")["score"]
+    if engine != window or engine <= 0:
+        return False
+    dead = s(email="a@gmail.com", smtp_status="invalid", has_gravatar=True,
+             dns_health_score=3, domain_age_days=4000)
+    return dead["score"] == 0
+
+
+def check_result_store_memory():
+    """Строки результата лежат на диске, в памяти только позиции."""
+    import tracemalloc
+    from ui.result_store import ResultStore
+
+    rows = 30000
+    tracemalloc.start()
+    try:
+        store = ResultStore()
+        try:
+            for i in range(rows):
+                store.append(f"u{i}@x.com", "Valid", "250 OK", "mx",
+                             {"name": f"User {i}", "engagement_score": 80})
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            store.close()
+    finally:
+        tracemalloc.stop()
+    return peak / rows < 100        # байт на строку; словарями было бы ~480
+
+
+def check_gui_preview_full_read():
+    """Предпросмотр обрывается на потолке и не читает файл целиком."""
+    import inspect
+    from ui.gui import ValidatorApp
+    source = inspect.getsource(ValidatorApp._attach_sources)
+    if "break" not in source or "PREVIEW_LINES" not in source:
+        return False
+    if "threading.Thread" not in source:
+        return False
+    for name in ("load_file", "load_proxies"):
+        body = inspect.getsource(getattr(ValidatorApp, name))
+        if "StreamLoader" in body:
+            return False
+    return True
+
+
+def check_blocking_precount():
+    """Прогон не начинается с полного подсчёта строк."""
+    import inspect
+    from core.pipeline import ValidationPipeline
+    from core.streamer import StreamLoader
+    source = inspect.getsource(ValidationPipeline.run_pipeline)
+    if "estimate_total_lines" not in source:
+        return False
+    return hasattr(StreamLoader, "estimate_total_lines")
+
+
+def check_parser_ram_dedup():
+    """Парсер помнит найденные адреса на диске и по каноническому ключу."""
+    import inspect
+    from core.parser_pipeline import ParserPipeline
+    source = inspect.getsource(ParserPipeline)
+    if "normalize_for_dedup" not in source or "add_if_new" not in source:
+        return False
+    pipeline = ParserPipeline(dork_sources=[{"type": "text", "content": "a"}],
+                              proxies=[], max_threads=1)
+    try:
+        return type(pipeline._seen).__name__ == "RunState"
+    finally:
+        pipeline._seen.close()
+
+
+def check_export_materialisation():
+    """Выгрузка идёт порциями, а не списком."""
+    import tempfile
+    from core import baseops
+    if not hasattr(baseops, "write_chunks_stream"):
+        return False
+    target = os.path.join(tempfile.mkdtemp(), "out.txt")
+    rows = ({"email": f"u{i}@x.com"} for i in range(2500))
+
+    def writer(handle, chunk):
+        for row in chunk:
+            handle.write(row["email"] + chr(10))
+
+    written, total = baseops.write_chunks_stream(rows, target, 1000, writer)
+    return total == 2500 and len(written) == 3
+
+
+def check_osint_breadth():
+    """Компания и должность выводятся, и оба помечены источником."""
+    from core.org_role import enrich_org_role
+    corporate = enrich_org_role("sales@acme-corp.com", "Corporate")
+    if corporate["company"] != "Acme Corp" or not corporate["job_role"]:
+        return False
+    if not corporate["company_source"]:
+        return False
+    free = enrich_org_role("john.smith@gmail.com", "Personal")
+    return not free["company"]
+
+
+def check_monoliths():
+    """Ни один модуль проекта не длиннее 1500 строк, и есть CI."""
+    budget = 1500
+    for folder in ("core", "core/parser", "ui", "api"):
+        directory = os.path.join(ROOT, folder)
+        if not os.path.isdir(directory):
+            continue
+        for name in os.listdir(directory):
+            if not name.endswith(".py"):
+                continue
+            with open(os.path.join(directory, name), "rb") as handle:
+                if handle.read().count(b"\n") > budget:
+                    return False
+    return os.path.isdir(os.path.join(ROOT, ".github", "workflows"))
+
+
 CLOSED_CHECKS = {
     "invalid_heuristic": check_invalid_heuristic,
     "control_rcpt": check_control_rcpt,
@@ -492,12 +685,25 @@ CLOSED_CHECKS = {
     "junk_stripping": check_junk_stripping,
     "lazy_proxy_input": check_lazy_proxy_input,
     "gui_sync_counting": check_gui_sync_counting,
+    "smtp_enhanced_codes": check_smtp_enhanced_codes,
+    "false_valid_substring": check_false_valid_substring,
+    "code_551_553": check_code_551_553,
+    "syntax_bytes": check_syntax_bytes,
+    "name_dictionary_gate": check_name_dictionary_gate,
+    "names_table_behind_ai_flag": check_names_table_behind_ai_flag,
+    "scoring_status_vocabulary": check_scoring_status_vocabulary,
+    "result_store_memory": check_result_store_memory,
+    "gui_preview_full_read": check_gui_preview_full_read,
+    "blocking_precount": check_blocking_precount,
+    "parser_ram_dedup": check_parser_ram_dedup,
+    "export_materialisation": check_export_materialisation,
+    "osint_breadth": check_osint_breadth,
+    "monoliths": check_monoliths,
 }
 
-OPEN_CHECKS = {
-    "osint_breadth": open_osint_breadth,
-    "monoliths": open_monoliths,
-}
+# Открытых изъянов не осталось. Функции open_* сохранены намеренно: они
+# описывают, КАК выглядел каждый изъян, и понадобятся, если он вернётся.
+OPEN_CHECKS = {}
 
 
 def main():

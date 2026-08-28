@@ -9,6 +9,7 @@
 ведёт себя по-разному (разные лимиты, разные пороги жалоб).
 """
 
+import time
 from collections import Counter
 
 # Провайдер -> его домены
@@ -495,11 +496,25 @@ _VERDICT_LABEL = {
 }
 
 
-def scan_base_providers(email_sources, limit=None):
+def scan_base_providers(email_sources, limit=None, breathe_every=0):
     """Считает разбивку базы по провайдерам БЕЗ единого сетевого запроса.
 
     Нужно, чтобы понять до запуска: какая доля базы вообще проверяема
     с текущего IP и стоит ли вкладываться в прокси с PTR.
+
+    `breathe_every` — через сколько адресов отпускать GIL. Ноль означает
+    «не отпускать» и оставляет прежнее поведение для консоли и тестов.
+
+    Зачем это вообще нужно. Скан живёт в фоновом потоке, но он ЦЕЛИКОМ на
+    чистом Python: разбор строки, classify_domain, два счётчика. Такой поток
+    держит GIL почти всё время, и главный поток Tk получает его редко — на
+    двухстах тысячах адресов замерено 344 мс без единого отклика окна, хотя
+    сам скан занимает 0.62 с и «в фоне». Обработчик кнопки возвращался
+    мгновенно, а окно всё равно подмерзало, и причину было не видно: она не
+    в главном потоке, а в соседнем.
+
+    Короткий sleep именно СОН, а не `sleep(0)`: нулевой сон на Windows
+    возвращает управление тому же потоку, и GIL остаётся у нас.
 
     Возвращает dict: {'total', 'providers', 'verifiability'}
     """
@@ -512,6 +527,10 @@ def scan_base_providers(email_sources, limit=None):
     providers = Counter()
     verdicts = Counter()
     total = 0
+    try:
+        breathe_every = int(breathe_every or 0)
+    except (TypeError, ValueError):
+        breathe_every = 0
 
     for email, _ in StreamLoader(email_sources).stream_emails():
         if not email or "@" not in email:
@@ -520,6 +539,8 @@ def scan_base_providers(email_sources, limit=None):
         prov, _dom_type = classify_domain(email)
         providers[prov] += 1
         verdicts[VERIFIABILITY.get(prov, "unknown")] += 1
+        if breathe_every > 0 and total % breathe_every == 0:
+            time.sleep(0.001)
         if limit and total >= limit:
             break
 

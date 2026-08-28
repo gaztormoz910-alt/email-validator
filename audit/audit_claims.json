@@ -1,18 +1,18 @@
 {
   "_comment": "Числовые и поведенческие утверждения из отчёта аудита 2026-08-25. Скрипт verify_audit_claims.py измеряет реальность и сверяет с этим файлом. Расхождение = провал гейта, а не тихая правка отчёта.",
   "inventory": {
-    "py_files_total": 91,
-    "py_lines_total": 22051,
-    "core_modules": 20,
+    "py_files_total": 114,
+    "py_lines_total": 26082,
+    "core_modules": 30,
     "parser_modules": 7,
-    "tests_files": 29,
+    "tests_files": 39,
     "entrypoints": [
       "main.py",
       "cli.py"
     ],
-    "biggest_module": "core/network.py",
-    "biggest_module_lines": 2828,
-    "_note": "Числа обновлены после внедрения улучшений: из корня убраны 13 отладочных файлов (остались в истории git), добавлены core/proxy_profile.py, core/runstate.py, ui/result_store.py, ui/log_buffer.py и новые наборы тестов."
+    "biggest_module": "core/pipeline.py",
+    "biggest_module_lines": 1225,
+    "_note": "Числа пересчитаны после разбора монолитов. core/network.py (2828 строк) разрезан на восемь модулей: email_syntax, smtp_codes, proxy_transport, proxy_probe, proxy_pool, dns_resolver, dns_checks, mail_constants. ui/gui.py (2227) разрезан на четыре: widgets, panels, parser_tab и сам gui. Ни один модуль проекта не длиннее 1500 строк — это проверяется гейтом .unlazy/precision/verify_module_sizes.py на каждом прогоне CI."
   },
   "smtp": {
     "dnsbl_zones": 7,

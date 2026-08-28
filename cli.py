@@ -31,8 +31,9 @@ from core.provider import format_base_scan, scan_base_providers
 
 EXPORT_FIELDS = [
     "email", "status", "reason", "mx", "name", "gender", "country",
-    "birth_year", "score", "grade", "provider", "domain_type",
-    "name_source", "gender_source", "country_source", "validated_at",
+    "birth_year", "company", "job_role", "score", "grade", "provider",
+    "domain_type", "name_source", "gender_source", "country_source",
+    "company_source", "job_role_source", "validated_at",
 ]
 
 
@@ -47,6 +48,8 @@ def _row(entry):
         "gender": data.get("gender", ""),
         "country": data.get("country", ""),
         "birth_year": data.get("birth_year", ""),
+        "company": data.get("company", ""),
+        "job_role": data.get("job_role", ""),
         "score": data.get("engagement_score", ""),
         "grade": data.get("engagement_grade", ""),
         "provider": data.get("provider_name", ""),
@@ -54,6 +57,8 @@ def _row(entry):
         "name_source": data.get("name_source", ""),
         "gender_source": data.get("gender_source", ""),
         "country_source": data.get("country_source", ""),
+        "company_source": data.get("company_source", ""),
+        "job_role_source": data.get("job_role_source", ""),
         "validated_at": data.get("validated_at", ""),
     }
 
@@ -158,15 +163,24 @@ def cmd_validate(args):
     # Список отписок вычитается ВСЕГДА перед записью: повторное письмо тому,
     # кто уже отписался, стоит жалобы на спам.
     if args.suppress:
-        removals = baseops.read_emails(args.suppress)
+        # Сравнение по КАНОНИЧЕСКОМУ ключу — тому же, которым идёт дедуп.
+        # Человек отписался как John.Doe@Gmail.com, а в базе лежит
+        # johndoe@gmail.com: это один ящик, и сверка по сырой строке отправит
+        # ему письмо снова. Раньше здесь строился промежуточный список через
+        # subtract() и множество по .lower() — три прохода и лишняя копия
+        # базы в памяти ради того же результата.
+        from core.cleaner import normalize_for_dedup
+        drop = baseops.suppression_keys(args.suppress)
         before = len(rows)
-        keep = {e.lower() for e in baseops.subtract([r["email"] for r in rows], removals)}
-        rows = [r for r in rows if r["email"].lower() in keep]
+        rows = [r for r in rows if normalize_for_dedup(r["email"]) not in drop]
         on_log(f"[INFO] Вычтено по списку отписок: {before - len(rows)}")
 
-    written = baseops.write_chunks(rows, args.out, args.chunk, _make_writer(args.format))
+    # Потоковая запись: на большой базе строки не собираются в памяти дважды.
+    written, saved = baseops.write_chunks_stream(
+        iter(rows), args.out, args.chunk, _make_writer(args.format))
     for path in written:
         print(path)
+    on_log(f"[INFO] Записано строк: {saved}")
 
     counts = {}
     for row in rows:

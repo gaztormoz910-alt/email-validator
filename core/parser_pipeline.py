@@ -66,7 +66,22 @@ class ParserPipeline(threading.Thread):
         
         self.stats_lock = threading.Lock()
         self.seen_lock = threading.Lock()
-        self.global_seen_emails = set()
+        # Найденные адреса помнит ДИСК, а не ОЗУ.
+        #
+        # Раньше здесь стоял обычный set: он рос линейно по числу найденных
+        # почт, и на большом прогоне по дорк-файлу в сотни мегабайт съедал
+        # память целиком. Тот же самый изъян в валидаторе уже был вылечен
+        # RunState — здесь используется он же, чтобы не заводить второй
+        # механизм для той же задачи.
+        #
+        # Ключ КАНОНИЧЕСКИЙ, а не сырая строка: John.Doe@Gmail.com и
+        # johndoe@gmail.com — один ящик, и собирать их как два разных контакта
+        # значит потом дважды написать одному человеку.
+        # Импорт локальный: core.cleaner импортирует GLOBAL_VERIFIED_DOMAINS
+        # отсюда, и импорт на уровне файла замкнул бы круг.
+        from .runstate import RunState, run_id_for
+        self._seen = RunState(run_id_for(dork_sources) + ":parsed", resume=False)
+        self.global_seen_emails = self._seen
         
         self.feeder_thread = threading.Thread(target=self._feed_dorks, daemon=True)
         
@@ -127,10 +142,24 @@ class ParserPipeline(threading.Thread):
             self.name_extractor = NameExtractor(enable_osint=self.enable_osint)
         
         from core.streamer import StreamLoader
-        self.log("[Система] Подсчёт количества дорков...")
-        self.total_dorks = StreamLoader(self.dork_sources).count_total_lines()
-        
-        self.log(f"[Система] Инициализация парсера. Поисковик: {self.engine_name}. Загружено дорков: {self.total_dorks}")
+        # Сначала ОЦЕНКА по размеру файла — она мгновенна и даёт знаменатель
+        # прогресса сразу. Точный счёт уточняет её следом: на списке в 712 МБ
+        # он стоит доли секунды, но на холодном диске может занять и больше,
+        # а прогон к тому времени уже идёт.
+        self.total_dorks = StreamLoader(self.dork_sources).estimate_total_lines()
+        self.log(f"[Система] Инициализация парсера. Поисковик: {self.engine_name}. "
+                 f"Дорков примерно: {self.total_dorks}")
+
+        def refine_total():
+            try:
+                exact = StreamLoader(self.dork_sources).count_total_lines()
+            except Exception:
+                return
+            if exact and not self._stop_event.is_set():
+                self.total_dorks = exact
+                self.log(f"[Система] Точное число дорков: {exact}")
+
+        threading.Thread(target=refine_total, daemon=True).start()
         
         tor_engines = ["AOL (Tor)", "Yahoo (Tor)"]
         use_tor = self.engine_name in tor_engines
@@ -269,11 +298,14 @@ class ParserPipeline(threading.Thread):
                             emails = valid_emails
                         
                         if emails:
+                            from .cleaner import normalize_for_dedup
                             new_unique_emails = []
                             with self.seen_lock:
                                 for e in emails:
-                                    if e not in self.global_seen_emails:
-                                        self.global_seen_emails.add(e)
+                                    # add_if_new возвращает False на повторе —
+                                    # проверка и запись одним действием, без
+                                    # окна между ними.
+                                    if self._seen.add_if_new(normalize_for_dedup(e)):
                                         new_unique_emails.append(e)
                                         
                             new_emails_count = len(new_unique_emails)

@@ -141,6 +141,65 @@ def _is_free_provider(domain: str) -> bool:
     return domain_type in ("Personal", "ISP")
 
 
+# Как называется один и тот же вердикт в двух словарях проекта.
+#
+# Движок отдаёт `valid` / `invalid` / `risky` / `unknown` / `catchall`,
+# интерфейс показывает `Valid` / `Invalid/Bounce` / `Risky` / `Unknown` /
+# `Catch-All`. Скоринг сравнивал строки с ОТОБРАЖАЕМЫМИ именами, поэтому
+# вызов с вердиктом движка молча давал ноль: подтверждённо живой ящик
+# получал grade «Dead». Пайплайн передаёт отображаемое имя и работал верно, а
+# вот REST API, консоль и любой будущий потребитель — нет.
+_STATUS_ALIASES = {
+    "valid": "Valid",
+    "250 ok": "Valid",
+    "invalid": "Invalid/Bounce",
+    "invalid/bounce": "Invalid/Bounce",
+    "bounce": "Invalid/Bounce",
+    "risky": "Risky",
+    "unknown": "Unknown",
+    "greylisted": "Unknown",
+    "catchall": "Catch-All",
+    "catch-all": "Catch-All",
+    "role-based": "Role-based",
+    "trap/disposable": "Trap/Disposable",
+    "disposable": "Trap/Disposable",
+}
+
+
+# Формулировки «ящик переполнен» на всех языках, которыми их писал проект.
+#
+# Это САМЫЙ ценный положительный сигнал после чистого 250: переполненный ящик
+# доказывает не только что он существует, но и что им пользуются. Проверка
+# шла по трём английским строкам из старого разбора ответов; когда разбор
+# переписали и причины стали русскими, бонус молча перестал начисляться —
+# а старые причины остались в кэше вердиктов, и их тоже надо понимать.
+_FULL_INBOX_MARKERS = (
+    "full inbox", "mailbox full", "over quota", "overquota",
+    "quota exceeded", "exceeded storage", "storage allocation",
+    "переполнен", "полный ящик",
+)
+
+
+def _looks_like_full_inbox(reason):
+    """Говорит ли причина о переполненном ящике владельца."""
+    if not isinstance(reason, str) or not reason:
+        return False
+    low = reason.lower()
+    return any(marker in low for marker in _FULL_INBOX_MARKERS)
+
+
+def _canonical_status(status):
+    """Приводит вердикт к отображаемому имени, каким бы словарём его ни назвали."""
+    if not isinstance(status, str):
+        return ""
+    low = status.strip().lower()
+    if low in _STATUS_ALIASES:
+        return _STATUS_ALIASES[low]
+    # Неизвестное имя оставляем как есть: молча превратить чужой статус в
+    # «Valid» хуже, чем не набрать по нему баллов.
+    return status.strip()
+
+
 def calculate_engagement_score(
     email: str,
     smtp_status: str,
@@ -173,7 +232,8 @@ def calculate_engagement_score(
     score = 0
     signals = []
     
-    scoring_status = original_smtp_status if original_smtp_status is not None else smtp_status
+    scoring_status = _canonical_status(
+        original_smtp_status if original_smtp_status is not None else smtp_status)
 
     email = email if isinstance(email, str) else ""
     smtp_reason = smtp_reason if isinstance(smtp_reason, str) else ""
@@ -200,7 +260,7 @@ def calculate_engagement_score(
     # с прежним весом +30 подтверждённый живой Gmail упирался в потолок 50/100
     # и вечно показывался как "Neutral".
     if scoring_status == "Valid":
-        if "Full Inbox" in smtp_reason or "Mailbox Full" in smtp_reason or "Over Quota" in smtp_reason:
+        if _looks_like_full_inbox(smtp_reason):
             score += W("smtp_valid_full_inbox")
             signals.append(f'+{W("smtp_valid_full_inbox")}: Полный ящик (активно используется)')
         else:

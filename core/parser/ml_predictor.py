@@ -148,6 +148,25 @@ class MLPredictor:
         except ImportError:
             logging.warning("gender-guesser module not found.")
 
+        # База имён грузится ВСЕГДА, по той же причине, что и словарь пола:
+        # names_dataset — это ТАБЛИЦА распределений, а не нейросеть, и
+        # прятать её за переключателем «AI фильтр (ML)» незачем.
+        #
+        # Пока она пряталась, страна по имени не определялась вообще: колонка
+        # «Страна» оставалась пустой на всей базе у всех, кто не включил ИИ, —
+        # а переключатель режима строгости, ради которого заводились два
+        # набора порогов, не делал при этом ничего. На прогоне по базе
+        # владельца это выглядело так: имя есть, пол есть, страна пуста у
+        # каждого адреса до единого.
+        try:
+            from names_dataset import NameDataset
+            self.nd = NameDataset()
+        except ImportError:
+            logging.warning("names_dataset module not found.")
+            self.nd = None
+
+        # А вот spaCy — настоящая модель, и она действительно опциональна:
+        # без неё не делается только NER-проверка «это человек или компания».
         if self.enable_ml:
             try:
                 import spacy
@@ -155,13 +174,6 @@ class MLPredictor:
             except Exception as e:
                 logging.warning(f"spaCy module not found or model not downloaded: {e}")
                 self.nlp = None
-
-            try:
-                from names_dataset import NameDataset
-                self.nd = NameDataset()
-            except ImportError:
-                logging.warning("names_dataset module not found.")
-                self.nd = None
 
     def is_person(self, text):
         """
