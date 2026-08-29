@@ -30,7 +30,8 @@ from core.pipeline import ValidationPipeline
 from core.provider import format_base_scan, scan_base_providers
 
 EXPORT_FIELDS = [
-    "email", "status", "reason", "mx", "name", "gender", "country",
+    "email", "status", "reason", "mx", "name", "first_name", "last_name",
+    "gender", "country",
     "birth_year", "company", "job_role", "score", "grade", "provider",
     "domain_type", "name_source", "gender_source", "country_source",
     "company_source", "job_role_source", "validated_at",
@@ -45,6 +46,8 @@ def _row(entry):
         "reason": entry["reason"],
         "mx": entry["mx"],
         "name": data.get("name", ""),
+        "first_name": data.get("first_name", ""),
+        "last_name": data.get("last_name", ""),
         "gender": data.get("gender", ""),
         "country": data.get("country", ""),
         "birth_year": data.get("birth_year", ""),

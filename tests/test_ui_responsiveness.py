@@ -187,12 +187,25 @@ class TestStatusGrouping(unittest.TestCase):
             "Invalid/Bounce": "invalid",
             "Trap/Disposable": "spam",
             "Role-based": "spam",
-            "Risky": "spam",
+            # Risky — это «не доказано», а не спам. Пока он лежал в spam,
+            # карточка «Спам / Ловушки» показывала 58 при шести настоящих
+            # ловушках, и владелец принимал по этому числу решение о рассылке.
+            "Risky": "unknown",
             "Unknown": "unknown",
             "Unverified": "other",
         }
         for status, expected in cases.items():
             self.assertEqual(group_of(status), expected, f"статус {status}")
+
+    def test_risky_is_never_counted_as_spam(self):
+        """Отдельно и явно: смешение прямо влияет на решение о рассылке."""
+        self.assertNotEqual(group_of("Risky"), "spam")
+        self.assertEqual(group_of("Risky"), group_of("Unknown"),
+                         "Risky и Unknown одинаково означают «вердикта нет»")
+
+    def test_things_that_must_never_be_sent_stay_together(self):
+        for status in ("Trap/Disposable", "Role-based"):
+            self.assertEqual(group_of(status), "spam", f"статус {status}")
 
     def test_every_group_is_declared(self):
         for status in ("Valid", "Invalid/Bounce", "Trap/Disposable",
