@@ -109,6 +109,25 @@ class TestRiskyIsNotSpam(unittest.TestCase):
             with self.subTest(status=status):
                 self.assertEqual(group_of(status), "spam")
 
+    def test_log_still_says_RISKY_not_UNKNOWN(self):
+        """Группы укрупняют, терминал — нет.
+
+        Risky ушёл к Unknown в ГРУППАХ фильтра, и вместе с этим строка в
+        терминале стала писаться как [UNKNOWN]. Это регрессия: у владельца в
+        логах было [RISKY], и различие между «сервер промолчал» и «ответ был,
+        но неоднозначный» ему нужно.
+        """
+        app = shared_app()
+        app.safe_add_result("r@example.com", "Risky", "таймаут", "mx", {})
+        app.safe_add_result("u@example.com", "Unknown", "нет ответа", "mx", {})
+        app.on_pipeline_complete()
+        app.update()
+
+        text = app.terminal_box.get("1.0", "end-1c")
+        self.assertIn("[RISKY] r@example.com", text,
+                      "Risky в терминале потерял свою метку")
+        self.assertIn("[UNKNOWN] u@example.com", text)
+
     def test_card_labels_do_not_promise_spam(self):
         """Подпись карточки обязана описывать то, что в ней лежит."""
         import inspect
