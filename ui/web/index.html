@@ -16,7 +16,7 @@
 <header class="topbar">
   <div class="brand">
     <span class="brand__mark" aria-hidden="true">
-      <svg viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2 5.5 5.6v5.1c0 4.2 2.7 7.9 6.5 9.1 3.8-1.2 6.5-4.9 6.5-9.1V5.6L12 3.2z"/><path d="m9.3 11.8 1.9 1.9 3.5-3.5"/></svg>
     </span>
     <span class="brand__text">
       <b>Email Validator</b>
@@ -48,9 +48,9 @@
       <section class="step" data-step="1">
         <h2 class="step__head"><span class="step__num">1</span> Адреса для проверки</h2>
 
-        <div class="drop" id="dropEmails" tabindex="0" role="button"
+        <div class="drop" id="dropEmails" data-lock tabindex="0" role="button"
              aria-label="Выбрать файл со списком адресов">
-          <svg class="drop__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm0 7V3.5L19.5 9H14z"/></svg>
+          <svg class="drop__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 3H7.5A2.5 2.5 0 0 0 5 5.5v13A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V8.5L13.5 3z"/><path d="M13.5 3v5.5H19"/><path d="M8.5 13h7M8.5 16.5h4.5"/></svg>
           <div class="drop__text">
             <b id="emailsTitle">Выберите файл</b>
             <small id="emailsHint">txt или csv · можно перетащить сюда</small>
@@ -58,17 +58,17 @@
         </div>
 
         <div class="src-actions">
-          <button class="btn btn--ghost" id="pasteEmails">Вставить текстом</button>
-          <button class="btn btn--ghost btn--danger" id="clearEmails" hidden>Очистить</button>
+          <button class="btn btn--ghost" id="pasteEmails" data-lock>Вставить текстом</button>
+          <button class="btn btn--ghost btn--danger is-gone" id="clearEmails" data-lock>Очистить</button>
         </div>
       </section>
 
       <section class="step" data-step="2">
         <h2 class="step__head"><span class="step__num">2</span> Прокси</h2>
 
-        <div class="drop" id="dropProxies" tabindex="0" role="button"
+        <div class="drop" id="dropProxies" data-lock tabindex="0" role="button"
              aria-label="Выбрать файл со списком прокси">
-          <svg class="drop__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2c1.7 0 3.2 2.4 3.8 6H8.2C8.8 6.4 10.3 4 12 4zM4.3 11h3.4c-.1 1.3-.1 2.7 0 4H4.3a8 8 0 0 1 0-4zm0 6h3.9c.6 3.6 2.1 6 3.8 6-3.4 0-6.4-2.4-7.7-6zm5.6 0h4.2c-.6 3.6-2.1 6-2.1 6s-1.5-2.4-2.1-6zm6.2 0h3.9c-1.3 3.6-4.3 6-7.7 6 1.7 0 3.2-2.4 3.8-6zm.2-2c.1-1.3.1-2.7 0-4h3.4a8 8 0 0 1 0 4h-3.4zM12 4c3.4 0 6.4 2.4 7.7 6h-3.9C15.2 6.4 13.7 4 12 4z"/></svg>
+          <svg class="drop__icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5c2.2 2.3 3.4 5.3 3.4 8.5S14.2 18.2 12 20.5c-2.2-2.3-3.4-5.3-3.4-8.5S9.8 5.8 12 3.5z"/></svg>
           <div class="drop__text">
             <b id="proxiesTitle">Выберите файл</b>
             <small id="proxiesHint">socks5, socks4 или http</small>
@@ -76,8 +76,8 @@
         </div>
 
         <div class="src-actions">
-          <button class="btn btn--ghost" id="pasteProxies">Вставить текстом</button>
-          <button class="btn btn--ghost btn--danger" id="clearProxies" hidden>Очистить</button>
+          <button class="btn btn--ghost" id="pasteProxies" data-lock>Вставить текстом</button>
+          <button class="btn btn--ghost btn--danger is-gone" id="clearProxies" data-lock>Очистить</button>
         </div>
       </section>
 
@@ -87,7 +87,7 @@
         <button class="btn btn--primary btn--xl" id="btnStart">Начать проверку</button>
         <p class="start-hint" id="startHint">Не хватает: адреса и прокси</p>
 
-        <div class="run-controls" hidden id="runControls">
+        <div class="run-controls is-gone" id="runControls">
           <button class="btn btn--ghost" id="btnPause">Пауза</button>
           <button class="btn btn--ghost btn--danger" id="btnStop">Стоп</button>
         </div>
@@ -97,7 +97,7 @@
            запоминается на время сеанса. -->
       <details class="settings" id="settings">
         <summary class="settings__head">
-          <svg viewBox="0 0 24 24" class="chev" aria-hidden="true"><path d="M8 5l8 7-8 7z"/></svg>
+          <svg viewBox="0 0 24 24" class="chev" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg>
           Настройки
         </summary>
 
@@ -105,7 +105,7 @@
           <label class="field">
             <span class="field__label">Одновременных проверок</span>
             <span class="field__row">
-              <input type="range" id="threads" min="1" max="300" value="300">
+              <input type="range" id="threads" data-lock min="1" max="300" value="300">
               <output id="threadsOut">300</output>
             </span>
             <small class="field__hint">больше — быстрее, но выше нагрузка на сеть</small>
@@ -114,14 +114,14 @@
           <label class="field">
             <span class="field__label">Ожидание ответа, сек</span>
             <span class="field__row">
-              <input type="range" id="timeout" min="1" max="120" value="5">
+              <input type="range" id="timeout" data-lock min="1" max="120" value="5">
               <output id="timeoutOut">5</output>
             </span>
             <small class="field__hint">на одно соединение; на адрес — до ×6 (попытки через разные прокси)</small>
           </label>
 
           <label class="toggle">
-            <input type="checkbox" id="optAi" checked>
+            <input type="checkbox" id="optAi" data-lock checked>
             <span class="toggle__track"></span>
             <span class="toggle__text">
               Отсеивать адреса-роботы
@@ -130,7 +130,7 @@
           </label>
 
           <label class="toggle">
-            <input type="checkbox" id="optOsint" checked>
+            <input type="checkbox" id="optOsint" data-lock checked>
             <span class="toggle__track"></span>
             <span class="toggle__text">
               Искать имя, пол и страну
@@ -139,7 +139,7 @@
           </label>
 
           <label class="toggle">
-            <input type="checkbox" id="optCache" checked>
+            <input type="checkbox" id="optCache" data-lock checked>
             <span class="toggle__track"></span>
             <span class="toggle__text">
               Не перепроверять известное
@@ -150,8 +150,8 @@
           <div class="field">
             <span class="field__label">Колонка «Страна»</span>
             <div class="seg" role="group">
-              <button class="seg__item is-active" data-country="coverage">Заполненность</button>
-              <button class="seg__item" data-country="accuracy">Точность</button>
+              <button class="seg__item is-active" data-country="coverage" data-lock>Заполненность</button>
+              <button class="seg__item" data-country="accuracy" data-lock>Точность</button>
             </div>
             <small class="field__hint" id="countryHint">заполнено почти всегда, ~треть стран — догадка</small>
           </div>
@@ -226,10 +226,6 @@
             <label class="chip chip--unk"><input type="checkbox" value="unknown"><span>Не доказано</span></label>
           </div>
 
-          <label class="minscore">Качество от
-            <input type="number" id="minScore" min="0" max="100" value="0">
-          </label>
-
           <div class="spacer"></div>
 
           <div class="pane__actions">
@@ -240,6 +236,43 @@
             </label>
             <button class="btn btn--ok btn--sm" id="btnExport">Сохранить</button>
           </div>
+        </div>
+
+        <!-- Вторая строка отбора: поиск и грани. Вынесена отдельно от
+             вердиктов сознательно — вердикт отвечает на вопрос «слать или
+             нет», а эти поля сужают уже отобранное. Смешивать их в одну
+             ленту значит заставлять глаз каждый раз разбираться заново. -->
+        <div class="pane__bar pane__bar--wrap facets">
+          <label class="search">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="10.8" cy="10.8" r="6.3"/><path d="m20 20-4.7-4.7"/>
+            </svg>
+            <input type="search" id="search" placeholder="Поиск адреса в базе"
+                   autocomplete="off" spellcheck="false">
+            <button type="button" class="search__clear is-gone" id="searchClear"
+                    aria-label="Очистить поиск">×</button>
+          </label>
+
+          <details class="facet" id="facetCountry">
+            <summary>Страна <span class="facet__count"></span></summary>
+            <div class="facet__list"></div>
+          </details>
+
+          <details class="facet" id="facetGender">
+            <summary>Пол <span class="facet__count"></span></summary>
+            <div class="facet__list"></div>
+          </details>
+
+          <details class="facet" id="facetProvider">
+            <summary>Почтовик <span class="facet__count"></span></summary>
+            <div class="facet__list"></div>
+          </details>
+
+          <label class="minscore">Скор от
+            <input type="number" id="minScore" min="0" max="100" value="0">
+          </label>
+
+          <button class="btn btn--ghost btn--sm is-gone" id="resetFilters">Сбросить</button>
         </div>
 
         <div class="tablewrap" id="tablewrap">
@@ -261,7 +294,7 @@
           </table>
 
           <div class="empty" id="gridEmpty">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6H4v12h16V6zm0-2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h16zM6 9h12v2H6V9zm0 4h8v2H6v-2z"/></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M3.5 10h17M9.5 10v9"/></svg>
             <b>Здесь появятся проверенные адреса</b>
             <span>Загрузите базу и прокси, затем нажмите «Начать проверку»</span>
           </div>
@@ -279,7 +312,7 @@
       <div class="tabpane" data-pane="proxy">
         <div class="proxy" id="proxyBody">
           <div class="empty">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16z"/></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5c2.2 2.3 3.4 5.3 3.4 8.5S14.2 18.2 12 20.5c-2.2-2.3-3.4-5.3-3.4-8.5S9.8 5.8 12 3.5z"/></svg>
             <b>Профиль прокси появится после запуска</b>
             <span>Валидатор определит выходной IP каждого прокси, схлопнет дубли
                   и спросит у почтовиков, пустят ли они этот адрес</span>
@@ -305,9 +338,9 @@
       <section class="step" data-step="1">
         <h2 class="step__head"><span class="step__num">1</span> Поисковые запросы</h2>
 
-        <div class="drop" id="dropDorks" tabindex="0" role="button"
+        <div class="drop" id="dropDorks" data-lock tabindex="0" role="button"
              aria-label="Выбрать файл с поисковыми запросами">
-          <svg class="drop__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.8l-.3-.3a6.5 6.5 0 1 0-.7.7l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"/></svg>
+          <svg class="drop__icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.3"/><path d="m20 20-4.7-4.7"/></svg>
           <div class="drop__text">
             <b id="dorksTitle">Выберите файл</b>
             <small id="dorksHint">по запросу в строке · можно перетащить сюда</small>
@@ -315,8 +348,8 @@
         </div>
 
         <div class="src-actions">
-          <button class="btn btn--ghost" id="pasteDorks">Вставить текстом</button>
-          <button class="btn btn--ghost btn--danger" id="clearDorks" hidden>Очистить</button>
+          <button class="btn btn--ghost" id="pasteDorks" data-lock>Вставить текстом</button>
+          <button class="btn btn--ghost btn--danger is-gone" id="clearDorks" data-lock>Очистить</button>
         </div>
       </section>
 
@@ -324,9 +357,9 @@
         <h2 class="step__head"><span class="step__num">2</span> Прокси
           <span class="step__note">необязательно</span></h2>
 
-        <div class="drop" id="dropPproxy" tabindex="0" role="button"
+        <div class="drop" id="dropPproxy" data-lock tabindex="0" role="button"
              aria-label="Выбрать файл со списком прокси для сбора">
-          <svg class="drop__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2c1.7 0 3.2 2.4 3.8 6H8.2C8.8 6.4 10.3 4 12 4zM4.3 11h3.4c-.1 1.3-.1 2.7 0 4H4.3a8 8 0 0 1 0-4zm0 6h3.9c.6 3.6 2.1 6 3.8 6-3.4 0-6.4-2.4-7.7-6zm5.6 0h4.2c-.6 3.6-2.1 6-2.1 6s-1.5-2.4-2.1-6zm6.2 0h3.9c-1.3 3.6-4.3 6-7.7 6 1.7 0 3.2-2.4 3.8-6zm.2-2c.1-1.3.1-2.7 0-4h3.4a8 8 0 0 1 0 4h-3.4z"/></svg>
+          <svg class="drop__icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5c2.2 2.3 3.4 5.3 3.4 8.5S14.2 18.2 12 20.5c-2.2-2.3-3.4-5.3-3.4-8.5S9.8 5.8 12 3.5z"/></svg>
           <div class="drop__text">
             <b id="pproxyTitle">Выберите файл</b>
             <small id="pproxyHint">нужны движкам с пометкой Proxies</small>
@@ -334,8 +367,8 @@
         </div>
 
         <div class="src-actions">
-          <button class="btn btn--ghost" id="pastePproxy">Вставить текстом</button>
-          <button class="btn btn--ghost btn--danger" id="clearPproxy" hidden>Очистить</button>
+          <button class="btn btn--ghost" id="pastePproxy" data-lock>Вставить текстом</button>
+          <button class="btn btn--ghost btn--danger is-gone" id="clearPproxy" data-lock>Очистить</button>
         </div>
       </section>
 
@@ -344,14 +377,14 @@
 
         <label class="field">
           <span class="field__label">Где искать</span>
-          <select class="select" id="pEngine"></select>
+          <select class="select" id="pEngine" data-lock></select>
           <small class="field__hint" id="pEngineHint">DuckDuckGo Lite ходит напрямую, прокси ему не нужны</small>
         </label>
 
         <button class="btn btn--primary btn--xl" id="pBtnStart">Начать сбор</button>
         <p class="start-hint" id="pStartHint">Не хватает: дорки</p>
 
-        <div class="run-controls" hidden id="pRunControls">
+        <div class="run-controls is-gone" id="pRunControls">
           <button class="btn btn--ghost" id="pBtnPause">Пауза</button>
           <button class="btn btn--ghost btn--danger" id="pBtnStop">Стоп</button>
         </div>
@@ -359,7 +392,7 @@
 
       <details class="settings" id="pSettings">
         <summary class="settings__head">
-          <svg viewBox="0 0 24 24" class="chev" aria-hidden="true"><path d="M8 5l8 7-8 7z"/></svg>
+          <svg viewBox="0 0 24 24" class="chev" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg>
           Настройки
         </summary>
 
@@ -367,7 +400,7 @@
           <label class="field">
             <span class="field__label">Одновременных запросов</span>
             <span class="field__row">
-              <input type="range" id="pThreads" min="1" max="200" value="20">
+              <input type="range" id="pThreads" data-lock min="1" max="200" value="20">
               <output id="pThreadsOut">20</output>
             </span>
             <small class="field__hint">поисковики банят за напор быстрее, чем почтовики</small>
@@ -376,7 +409,7 @@
           <label class="field">
             <span class="field__label">Ожидание ответа, сек</span>
             <span class="field__row">
-              <input type="range" id="pTimeout" min="1" max="120" value="15">
+              <input type="range" id="pTimeout" data-lock min="1" max="120" value="15">
               <output id="pTimeoutOut">15</output>
             </span>
             <small class="field__hint">через Tor ответы приходят медленнее, чем напрямую</small>
@@ -438,7 +471,7 @@
             <tbody id="pGridBody"></tbody>
           </table>
           <div class="empty" id="pGridEmpty">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.8l-.3-.3a6.5 6.5 0 1 0-.7.7l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"/></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.3"/><path d="m20 20-4.7-4.7"/></svg>
             <b>Адреса появятся здесь по ходу сбора</b>
             <span>Каждый найденный адрес показывается один раз, даже если
                   он попался сразу нескольким запросам</span>
@@ -460,8 +493,10 @@
 <dialog class="modal" id="pasteModal">
   <form method="dialog" class="modal__box">
     <h3 id="pasteTitle">Вставьте список</h3>
+    <p class="modal__hint" id="pasteHint"></p>
     <textarea id="pasteArea" rows="12" spellcheck="false"
               placeholder="Одна запись в строке"></textarea>
+    <p class="modal__error is-gone" id="pasteError"></p>
     <menu>
       <button class="btn btn--ghost" value="cancel">Отмена</button>
       <button class="btn btn--primary" id="pasteOk" value="ok">Добавить</button>
