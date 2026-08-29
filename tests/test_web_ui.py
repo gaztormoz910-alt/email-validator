@@ -32,6 +32,23 @@ def read(name):
         return handle.read()
 
 
+def styles(css, selector):
+    """Тела ВСЕХ правил, где селектор стоит сам или в перечислении.
+
+    Одно правило задаёт основу, другое дописывает поведение — брать только
+    первое совпадение значит проверять половину оформления.
+    """
+    out = []
+    # Комментарии убираются заранее: они стоят перед селектором и попадают в
+    # ту же группу, из-за чего селектор перестаёт совпадать сам с собой.
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    for head, body in re.findall(r"([^{}]+)\{([^}]*)\}", css):
+        parts = [part.strip() for part in head.split(",")]
+        if selector in parts:
+            out.append(body)
+    return "\n".join(out)
+
+
 def rule(css, selector):
     """Тело правила по точному селектору (первое вхождение)."""
     pattern = re.compile(r"(^|\})\s*" + re.escape(selector) + r"\s*\{([^}]*)\}",
@@ -363,7 +380,9 @@ def test_parser_endpoints_exist():
 def test_parser_sources_are_kept_apart_from_the_validator():
     """Дорки не должны попадать в прокси, а прокси сбора — в прокси проверки."""
     api = make_api()
-    api.paste({"kind": "emails", "text": "a@b.c"})
+    # Адрес настоящий, а не «a@b.c»: проверка ввода теперь отвергает домены
+    # верхнего уровня из одной буквы, каких не существует.
+    api.paste({"kind": "emails", "text": "ivan@gmail.com"})
     api.paste({"kind": "proxies", "text": "1.1.1.1:8080"})
     api.paste({"kind": "dorks", "text": "site:example.com"})
     api.paste({"kind": "pproxy", "text": "2.2.2.2:1080"})
@@ -501,3 +520,500 @@ def test_wiring_tabs_of_one_screen_do_not_touch_the_other():
     assert '$$(".tabpane")' not in js
     assert '$$("#viewValidator .tab")' in js
     assert '$$("#viewParser .tab")' in js
+
+# ══════════════════════════════════════════════════ Иконки
+
+def test_icons_are_drawn_with_strokes_not_overlapping_fills():
+    """Требование 1: «нормальные иконки, а не искажённые».
+
+    Искажение шло от заливки: у самодельного глобуса контуры накладывались
+    друг на друга и слипались в кашу. Обводка так не ломается.
+    """
+    css = read("style.css")
+    body = rule(css, "svg")
+    assert body is not None
+    assert "fill: none" in body, body
+    assert "stroke: currentColor" in body, body
+    assert "stroke-linecap: round" in body, body
+    assert "stroke-linejoin: round" in body, body
+
+
+def test_icons_have_no_leftover_filled_paths():
+    """Ни одной иконки со старой заливкой не осталось.
+
+    Признак самопальной заливки — команда `z` внутри пути, замыкающая
+    контур, вместе с дугой `a`: именно так были нарисованы глобус и щит,
+    которые слипались.
+    """
+    html = read("index.html")
+    paths = re.findall(r'<path d="([^"]+)"', html)
+    assert paths, "в разметке вообще нет иконок"
+    guilty = [d for d in paths if d.lower().count("z") >= 2 and "a" in d.lower()]
+    assert not guilty, guilty
+
+
+def test_icons_use_the_same_grid():
+    """Все иконки на одной сетке 24×24 — иначе толщина линий гуляет."""
+    html = read("index.html")
+    boxes = set(re.findall(r'<svg[^>]*viewBox="([^"]+)"', html))
+    assert boxes == {"0 0 24 24"}, boxes
+
+
+def test_icon_box_never_squeezes():
+    """Требование 1, вторая половина: иконка не растягивается соседом.
+
+    Внутри флекса картинка сжимается по ширине, но не по высоте — круг
+    превращается в овал. flex: none это и лечит.
+    """
+    css = read("style.css")
+    body = rule(css, "svg")
+    assert body is not None
+    assert "flex: none" in body, body
+    # Ширина и высота заданы обе и равны: иначе бокс не квадратный.
+    width = re.search(r"width:\s*(\d+)px", body)
+    height = re.search(r"height:\s*(\d+)px", body)
+    assert width and height and width.group(1) == height.group(1), body
+
+
+# ══════════════════════════════════════════════════ Запор ввода
+
+
+LOCKABLE_IDS = [
+    "dropEmails", "dropProxies", "dropDorks", "dropPproxy",
+    "pasteEmails", "pasteProxies", "pasteDorks", "pastePproxy",
+    "clearEmails", "clearProxies", "clearDorks", "clearPproxy",
+    "threads", "timeout", "pThreads", "pTimeout",
+    "optAi", "optOsint", "optCache", "pEngine",
+]
+
+
+def test_lock_inputs_every_control_is_marked():
+    """Требование 2: во время прогона ничего не редактируется.
+
+    Список берётся из разметки, а не из памяти автора: добавить переключатель
+    и забыть его запереть — ровно та ошибка, которую эта проверка ловит.
+    """
+    html = read("index.html")
+    for element_id in LOCKABLE_IDS:
+        found = re.search(r'<[^>]*id="%s"[^>]*>' % element_id, html)
+        assert found, "нет элемента %s" % element_id
+        assert "data-lock" in found.group(0), \
+            "элемент %s не заперт во время прогона" % element_id
+
+    # Режим страны — две кнопки без id, ищем по своему атрибуту.
+    for mode in ("coverage", "accuracy"):
+        found = re.search(r'<button[^>]*data-country="%s"[^>]*>' % mode, html)
+        assert found and "data-lock" in found.group(0), mode
+
+
+def test_lock_inputs_no_control_in_the_sidebar_is_forgotten():
+    """Каждое поле ввода боковой панели заперто — без списка-исключений.
+
+    Кнопки запуска, паузы и стопа не в счёт: ими прогон и управляют.
+    """
+    html = read("index.html")
+    allowed = {"btnStart", "btnPause", "btnStop",
+               "pBtnStart", "pBtnPause", "pBtnStop"}
+    for chunk in re.findall(r'<aside class="side"[^>]*>(.*?)</aside>', html, re.S):
+        for tag in re.findall(r'<(?:input|select|textarea)[^>]*>', chunk):
+            found = re.search(r'id="([\w-]+)"', tag)
+            name = found.group(1) if found else tag
+            assert "data-lock" in tag, "не заперт: %s" % name
+        for tag in re.findall(r'<button[^>]*>', chunk):
+            found = re.search(r'id="([\w-]+)"', tag)
+            name = found.group(1) if found else ""
+            if name in allowed:
+                continue
+            assert "data-lock" in tag, "не заперта кнопка: %s" % (name or tag)
+
+
+def test_lock_inputs_script_locks_by_the_marker():
+    """Скрипт запирает по метке из разметки, а не по своему списку."""
+    js = read("app.js")
+    assert 'function setLocked(' in js
+    assert '$$("[data-lock]")' in js
+    assert "el.disabled = on" in js
+    # Зона перетаскивания — не поле ввода, у неё нет disabled: до неё можно
+    # дойти табом, поэтому у неё убирается фокус.
+    assert "tabIndex" in js
+
+
+def test_lock_inputs_locking_is_visible():
+    """Запертое поле должно выглядеть запертым, иначе это похоже на зависание."""
+    css = read("style.css")
+    body = rule(css, "[data-lock][disabled],\n[data-lock].is-locked")
+    assert body is not None, "нет правила для запертых полей"
+    assert "pointer-events: none" in body, body
+    assert "opacity" in body, body
+
+
+def test_lock_allows_tabs_and_reading_results():
+    """Требование 2, вторая половина: переключаться и читать — можно.
+
+    Владелец просил оставить именно это: вкладки валидатор/парсер, вкладки
+    внутри экрана, фильтры и страницы по уже полученным результатам.
+    """
+    html = read("index.html")
+    must_stay_free = [
+        r'<button class="mode[^"]*" data-mode="\w+"',      # валидатор / сбор
+        r'<button class="tab[^"]*" data-tab="\w+"',        # вкладки проверки
+        r'<button class="tab[^"]*" data-ptab="\w+"',       # вкладки сбора
+    ]
+    for pattern in must_stay_free:
+        found = re.findall(pattern + r'[^>]*>', html)
+        assert found, pattern
+        for tag in found:
+            assert "data-lock" not in tag, "заперто лишнее: %s" % tag
+
+    # Отбор и постраничник тоже остаются живыми.
+    for element_id in ("search", "minScore", "pagePrev", "pageNext",
+                       "btnCopy", "btnExport", "resetFilters"):
+        found = re.search(r'<[^>]*id="%s"[^>]*>' % element_id, html)
+        assert found, element_id
+        assert "data-lock" not in found.group(0), element_id
+
+
+def test_lock_allows_facet_lists_stay_open():
+    """Списки граней — не поля ввода панели, запирать их нечем и незачем."""
+    html = read("index.html")
+    for facet in ("facetCountry", "facetGender", "facetProvider"):
+        found = re.search(r'<details class="facet" id="%s">' % facet, html)
+        assert found, facet
+
+
+def test_lock_backend_refuses_source_changes_during_a_run():
+    """Требование 2, третья половина: запор держится и на стороне питона.
+
+    Блокировка только на странице — рисунок: запрос уходит мимо неё одной
+    строкой, и база подменяется прямо посреди чтения.
+    """
+    api = make_api()
+    api.paste({"kind": "emails", "text": "ivan@gmail.com"})
+    api.paste({"kind": "proxies", "text": "1.2.3.4:8080"})
+    assert len(api.email_sources) == 1
+
+    class Busy:
+        is_running = True
+
+    api.pipeline = Busy()
+    assert api._busy() is True
+
+    refused = api.paste({"kind": "emails", "text": "anna@yahoo.com"})
+    assert refused.get("error"), "вставка прошла во время прогона"
+    assert len(api.email_sources) == 1, "источник изменился во время прогона"
+
+    refused = api.clear({"kind": "emails"})
+    assert refused.get("error"), "очистка прошла во время прогона"
+    assert len(api.email_sources) == 1
+
+    refused = api.choose({"kind": "emails"})
+    assert refused.get("error"), "выбор файла прошёл во время прогона"
+
+
+def test_lock_backend_lets_go_when_the_run_ends():
+    """Положительный контроль: без него запор мог бы просто не отпускать."""
+    api = make_api()
+
+    class Idle:
+        is_running = False
+
+    api.pipeline = Idle()
+    assert api._busy() is False
+    assert not api.paste({"kind": "emails", "text": "ivan@gmail.com"}).get("error")
+    assert len(api.email_sources) == 1
+
+
+def test_lock_backend_watches_the_parser_by_its_real_interface():
+    """Сбор адресов запирает ввод так же, как проверка.
+
+    Признак берётся тот, что есть у НАСТОЯЩЕГО ParserPipeline. Он наследует
+    threading.Thread, и своего is_running у него нет: первая версия этой
+    проверки спрашивала его — и тест проходил на подставном объекте, пока
+    живой сбор не запирал ничего вовсе.
+    """
+    from core.parser_pipeline import ParserPipeline
+
+    assert callable(getattr(ParserPipeline, "is_alive", None)),         "у сбора адресов больше нет is_alive — признак занятости надо чинить"
+    assert not hasattr(ParserPipeline, "is_running"),         "у сбора появился is_running: проверьте, какой признак верный"
+
+    api = make_api()
+
+    class Idle:
+        is_running = False
+
+    class RunningParser:
+        """Ровно тот признак, что у ParserPipeline: живой поток."""
+
+        def is_alive(self):
+            return True
+
+    api.pipeline = Idle()
+    api.parser = RunningParser()
+    assert api._busy() is True
+    assert api.paste({"kind": "dorks", "text": "site:vk.com"}).get("error")
+
+    class FinishedParser:
+        def is_alive(self):
+            return False
+
+    api.parser = FinishedParser()
+    assert api._busy() is False
+    assert not api.paste({"kind": "dorks", "text": "site:vk.com"}).get("error")
+
+
+def test_lock_backend_numbers_from_the_page_are_clamped():
+    """Требование 4 «везде во всём софте»: числовые поля тоже проверяются.
+
+    Голый int() падает на «abc» и пропускает 999999 потоков в движок.
+    """
+    api = make_api()
+    assert api._number({"threads": "abc"}, "threads", 100, 1, 500) == 100
+    assert api._number({"threads": 999999}, "threads", 100, 1, 500) == 500
+    assert api._number({"threads": -5}, "threads", 100, 1, 500) == 1
+    assert api._number({}, "threads", 100, 1, 500) == 100
+    assert api._number({"threads": None}, "threads", 100, 1, 500) == 100
+    assert api._number({"threads": float("nan")}, "threads", 100, 1, 500) == 100
+    assert api._number({"threads": "42"}, "threads", 100, 1, 500) == 42
+
+
+def test_lock_backend_a_junk_payload_never_starts_a_run():
+    """Мусор в полях не должен ронять запуск исключением."""
+    api = make_api()
+    result = api.start({"threads": "abc", "timeout": [], "country": None})
+    # Источников нет, поэтому отказ ожидаем — важно, что это отказ, а не
+    # проброшенное наружу исключение.
+    assert result["ok"] is False and result["error"]
+
+
+def test_lock_backend_reading_results_is_never_refused():
+    """Читать выборку во время прогона можно — это и просил владелец."""
+    api = make_api()
+    api._on_result("ivan@gmail.com", "Valid", "250 OK", "mx",
+                   {"engagement_score": 90, "country": "США"})
+
+    class Busy:
+        is_running = True
+
+    api.pipeline = Busy()
+    assert api.page({"groups": ["valid"]})["total"] == 1
+    assert api.facets({"groups": ["valid"]})["total"] == 1
+    assert api.state()["counts"]["valid"] == 1
+
+
+# ══════════════════════════════════════════════════ Ползунки
+
+def test_slider_track_is_filled_up_to_the_thumb():
+    """Требование 3: закрашена не только ручка, но и линия до неё."""
+    css = read("style.css")
+    body = rule(css, 'input[type="range"]')
+    assert body is not None
+    assert "linear-gradient" in body, body
+    assert "var(--accent)" in body, body
+    assert "--fill" in body, body
+
+    thumb = rule(css, 'input[type="range"]::-webkit-slider-thumb')
+    assert thumb is not None
+    assert "var(--accent)" in thumb, thumb
+
+
+def test_slider_fill_is_recomputed_on_every_move():
+    """Долю считает скрипт: Chromium своего псевдоэлемента для неё не даёт."""
+    js = read("app.js")
+    assert "function paintRange(" in js
+    assert 'setProperty("--fill"' in js
+    # Каждый из четырёх ползунков перекрашивается при движении и на старте.
+    for name in ("threads", "timeout", "pThreads", "pTimeout"):
+        assert re.search(r"%s\.addEventListener\(\"input\"" % name, js), name
+    assert "[threads, timeout, pThreads, pTimeout].forEach(paintRange)" in js
+
+
+# ══════════════════════════════════════════════════ Плейсхолдеры
+
+def test_placeholder_shows_every_accepted_format():
+    """Требование 4: в поле вставки перечислены все принимаемые форматы."""
+    js = read("app.js")
+    assert "PASTE_FORMATS" in js
+    assert "Одна запись в строке" not in read("index.html").replace(
+        'placeholder="Одна запись в строке"', ""), "старый плейсхолдер остался"
+
+    # Адреса: голый адрес, адрес с полями через разные разделители,
+    # заголовок CSV и кириллический адрес.
+    assert "ivan@gmail.com" in js
+    for separator in (";", ",", "|"):
+        assert separator in js
+    assert "email;name;gender;country" in js
+    assert "иван@почта.рф" in js
+
+    # Прокси: все четыре формата, которые разбирает движок.
+    assert "1.2.3.4:8080" in js
+    assert "1.2.3.4:8080:логин:пароль" in js
+    assert "логин:пароль@1.2.3.4:8080" in js
+    assert "socks5://1.2.3.4:1080" in js
+
+    # Запросы: операторы поисковиков.
+    assert "site:linkedin.com" in js
+    assert "intext:" in js
+
+
+def test_placeholder_examples_really_parse():
+    """Примеры в плейсхолдере обязаны проходить ту самую проверку ввода.
+
+    Иначе получается издевательство: владельцу показывают образец, вставка
+    которого тут же отвергается.
+    """
+    from core.input_guard import detect_kind
+
+    js = read("app.js")
+    blocks = re.findall(r'placeholder: \[(.*?)\]\.join', js, re.S)
+    assert len(blocks) >= 3, "не нашлись примеры в PASTE_FORMATS"
+
+    expected = ["email", "proxy", "dork"]
+    for kind, block in zip(expected, blocks):
+        lines = []
+        for raw in block.splitlines():
+            raw = raw.strip().rstrip(",").strip()
+            if len(raw) > 1 and raw[0] in "\"'" and raw[-1] == raw[0]:
+                lines.append(raw[1:-1])
+        assert lines, block
+        for line in lines:
+            if line.startswith("email;"):
+                continue          # заголовок CSV, не запись
+            assert detect_kind(line) == kind, (kind, line, detect_kind(line))
+
+
+def test_placeholder_explains_the_rules_above_the_field():
+    """Кроме примеров есть словами: про разделители, про порт 25."""
+    js = read("app.js")
+    assert "hint:" in js
+    assert "разделитель" in js.lower()
+    assert "порт 25" in js
+    html = read("index.html")
+    assert 'id="pasteHint"' in html
+
+
+def test_placeholder_refusal_keeps_the_window_open():
+    """Отказ не должен закрывать окно и терять набранное."""
+    js = read("app.js")
+    assert 'querySelector("form").addEventListener("submit"' in js
+    assert "event.preventDefault()" in js
+    assert 'id="pasteError"' in read("index.html")
+
+
+# ══════════════════════════════════════════════════ Ничего не сдвигается
+
+def test_reserves_space_hidden_elements_keep_their_place():
+    """Требование 5: ничего не съезжает.
+
+    hidden выкидывает элемент из потока, и соседи прыгают. Класс is-gone
+    прячет, оставляя место занятым.
+    """
+    css = read("style.css")
+    body = rule(css, ".is-gone")
+    assert body is not None, "нет класса, который прячет без сдвига"
+    assert "visibility: hidden" in body, body
+    assert "display" not in body, "display:none снова уберёт элемент из потока"
+
+
+def test_reserves_space_no_toggled_element_uses_hidden():
+    """Ни один переключаемый по ходу работы элемент не пользуется hidden."""
+    html = read("index.html")
+    js = read("app.js")
+
+    # В разметке hidden остаётся только у второго экрана целиком: он не
+    # соседствует ни с чем, что могло бы съехать.
+    leftovers = re.findall(r'<[^>]*\bid="([\w-]+)"[^>]*\shidden[^>]*>', html)
+    assert set(leftovers) <= {"viewParser", "toast"}, leftovers
+
+    # И скрипт больше не дёргает .hidden у того, что стоит в потоке.
+    guilty = re.findall(r'\$\("#([\w-]+)"\)\.hidden', js)
+    assert set(guilty) <= {"viewValidator", "viewParser"}, guilty
+
+
+def test_reserves_space_for_every_element_that_appears():
+    """Под каждый появляющийся элемент место зарезервировано поимённо."""
+    css = read("style.css")
+    for selector in (".start-hint", ".run-controls",
+                     "#logNote", "#pLogNote", "#pFoundNote"):
+        body = styles(css, selector)
+        assert body, selector
+        assert "min-height" in body, (selector, body)
+
+
+def test_tabular_numbers_do_not_shove_neighbours():
+    """Требование 5: растущее число не должно растаскивать плитку.
+
+    В пропорциональном шрифте единица уже семёрки, и счётчик, дойдя от 1111
+    до 7777, заметно меняет ширину.
+    """
+    css = read("style.css")
+    for selector in (".tile__num", ".mini b", "output", "#pageLabel",
+                     "#pageCount", ".grid .c-score"):
+        body = styles(css, selector)
+        assert body, "нет правил для %s" % selector
+        assert "tabular-nums" in body, (selector, body)
+
+
+# ══════════════════════════════════════════════════ Фильтры на странице
+
+def test_contract_every_api_call_still_exists():
+    """Страница и питон не разъехались после всех правок."""
+    from ui.webapp import ValidatorApi
+
+    js = read("app.js")
+    called = sorted(set(re.findall(r'\bapi\(\s*"(\w+)"', js)))
+    assert called, "скрипт вообще не зовёт мост"
+    missing = [name for name in called
+               if not callable(getattr(ValidatorApi, name, None))]
+    assert not missing, missing
+
+
+def test_contract_every_element_the_script_touches_exists():
+    html = read("index.html")
+    js = read("app.js")
+    ids_html = set(re.findall(r'id="([\w-]+)"', html))
+    ids_js = set(re.findall(r'\$\(\s*"#([\w-]+)"', js))
+    ids_js |= set(re.findall(r'getElementById\(\s*"([\w-]+)"', js))
+    assert ids_js - ids_html == set(), ids_js - ids_html
+
+
+def test_contract_filters_reach_every_action():
+    """Копирование и выгрузка берут ту же выборку, что и таблица.
+
+    Иначе сохранённый файл не совпадает с тем, что владелец видит на
+    экране, — а он по этому файлу шлёт письма.
+    """
+    js = read("app.js")
+    assert "function selection(" in js
+    for call in ('api("page", selection', 'api("facets", selection',
+                 'api("copy_rows", selection', 'api("export", selection'):
+        assert call in js, call
+
+
+def test_contract_search_is_debounced():
+    """Запрос на каждое нажатие клавиши — десяток обращений к базе на слово."""
+    js = read("app.js")
+    assert "searchTimer" in js
+    assert "clearTimeout(searchTimer)" in js
+
+
+def test_contract_facet_markup_matches_the_script():
+    """Разметка граней и имена в скрипте совпадают."""
+    html = read("index.html")
+    js = read("app.js")
+    assert "FACET_TITLE" in js
+    for facet in ("Country", "Gender", "Provider"):
+        assert 'id="facet%s"' % facet in html, facet
+    assert 'class="facet__list"' in html
+
+def test_contract_polling_backs_off_when_the_bridge_is_down():
+    """Опрос не должен долбить упавший мост четыре раза в секунду.
+
+    Замечено вживую: браузер перестаёт выдавать сокеты и сыплет
+    ERR_INSUFFICIENT_RESOURCES, а вместе с неудачными запросами тонут и
+    удачные, когда мост возвращается.
+    """
+    js = read("app.js")
+    for name in ("missed", "skip", "parserMissed", "parserSkip"):
+        assert name in js, name
+    assert "Math.min(8, missed)" in js
+    assert "Math.min(8, parserMissed)" in js
