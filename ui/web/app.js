@@ -45,6 +45,48 @@ function setText(el, value) {
   if (el.textContent !== next) el.textContent = next;
 }
 
+/* Показать/спрятать, НЕ трогая раскладку.
+
+   Атрибут hidden выкидывает элемент из потока, и всё, что ниже, прыгает
+   вверх: появилась кнопка «Очистить» — уехали настройки; начался прогон —
+   уехало всё под кнопкой запуска. Класс is-gone оставляет место занятым. */
+function show(el, on) {
+  if (el) el.classList.toggle("is-gone", !on);
+}
+
+/* Закрасить пройденную часть дорожки ползунка.
+
+   Chromium (а WebView2 — это он) не даёт стилизовать заполненную часть
+   отдельным псевдоэлементом, как Firefox, поэтому доля считается тут и
+   уезжает в градиент переменной --fill. */
+function paintRange(el) {
+  if (!el) return;
+  const min = Number(el.min || 0);
+  const max = Number(el.max || 100);
+  const value = Number(el.value || 0);
+  const share = max > min ? ((value - min) / (max - min)) * 100 : 0;
+  el.style.setProperty("--fill", `${share}%`);
+}
+
+/* Запереть весь ввод на время прогона.
+
+   Список берётся по атрибуту data-lock из самой разметки, а не перечисляется
+   здесь: иначе новый переключатель добавляют, а запереть его забывают, и
+   владелец меняет настройки посреди проверки. Вкладки, фильтры, поиск,
+   страницы и выгрузка этой пометки не носят — по уже полученным результатам
+   ходить можно и нужно. */
+function setLocked(on) {
+  for (const el of $$("[data-lock]")) {
+    if ("disabled" in el) el.disabled = on;
+    el.classList.toggle("is-locked", on);
+    // У div-зоны перетаскивания нет disabled — ей убираем и фокус, иначе
+    // до неё можно дойти табом и нажать Enter.
+    if (!("disabled" in el)) el.tabIndex = on ? -1 : 0;
+  }
+  document.body.classList.toggle("is-running", on);
+  $$(".side").forEach((side) => side.classList.toggle("is-locked", on));
+}
+
 /* ============================================================
    Состояние страницы
    ============================================================ */
@@ -58,7 +100,30 @@ const ui = {
   running: false,
   mode: "validator",
   lastSig: "",          // отпечаток выборки: по нему решаем, перезапрашивать ли
+  // Грани отбора и поиск. Выбранное хранится множествами: порядок значений в
+  // списке меняется по мере прогона (сортировка по количеству), а выбор от
+  // этого зависеть не должен.
+  facets: { country: new Set(), gender: new Set(), provider: new Set() },
+  search: "",
+  facetSig: "",
 };
+
+const FACET_TITLE = { country: "Страна", gender: "Пол", provider: "Почтовик" };
+
+/* Запрос выборки — в одном месте: он уходит и за страницей, и за списками
+   значений, и за копированием, и за выгрузкой. Разъехавшиеся копии этого
+   объекта означали бы, что сохранённый файл не совпадает с тем, что на
+   экране. */
+function selection(extra = {}) {
+  return Object.assign({
+    groups: ui.groups,
+    minScore: ui.minScore,
+    country: [...ui.facets.country],
+    gender: [...ui.facets.gender],
+    provider: [...ui.facets.provider],
+    search: ui.search,
+  }, extra);
+}
 
 /* Сбор адресов держит своё состояние отдельно: два прогона могут идти
    одновременно, и мешать их счётчики в одну кучу нельзя. */
@@ -80,11 +145,11 @@ function renderSources(data) {
     if (info.count) {
       setText(hint, info.detail);
       $(dropId).classList.add("is-set");
-      $(clearId).hidden = false;
+      show($(clearId), true);
     } else {
       setText(hint, EMPTY_HINT[prefix] || "");
       $(dropId).classList.remove("is-set");
-      $(clearId).hidden = true;
+      show($(clearId), false);
     }
   };
   bind("emails", data.emails, "#dropEmails", "#clearEmails");
@@ -227,12 +292,86 @@ function renderRows(data) {
 
 async function refreshRows(force = false) {
   if (ui.tab !== "results") return;
-  const sig = [ui.groups.join(","), ui.minScore, ui.page].join("|");
+  const sig = JSON.stringify(selection({ page: ui.page }));
   if (!force && sig === ui.lastSig && !ui.running) return;
   ui.lastSig = sig;
-  renderRows(await api("page", {
-    groups: ui.groups, minScore: ui.minScore, page: ui.page,
-  }));
+  renderRows(await api("page", selection({ page: ui.page })));
+  await refreshFacets();
+}
+
+/* ── грани отбора ─────────────────────────────────────────── */
+
+/* Списки значений приходят из базы вместе с количествами. Показывать
+   справочник стран целиком было бы враньём: пункт, за которым нет ни одной
+   строки, обещает выборку, которой не существует. */
+async function refreshFacets() {
+  let data;
+  try {
+    data = await api("facets", selection());
+  } catch {
+    return;
+  }
+
+  for (const facet of Object.keys(FACET_TITLE)) {
+    const box = $(`#facet${facet[0].toUpperCase()}${facet.slice(1)}`);
+    if (!box) continue;
+    const list = box.querySelector(".facet__list");
+    const values = data.facets[facet] || [];
+    const chosen = ui.facets[facet];
+
+    const frag = document.createDocumentFragment();
+    for (const item of values) {
+      const label = document.createElement("label");
+      label.className = "facet__item";
+
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = item.value;
+      input.checked = chosen.has(item.value);
+      input.addEventListener("change", () => {
+        if (input.checked) chosen.add(item.value); else chosen.delete(item.value);
+        ui.page = 1;
+        refreshRows(true);
+      });
+
+      const text = document.createElement("span");
+      // Пустое значение — это «не определено», а не безымянный пункт: без
+      // подписи в списке была бы пустая строка с галочкой.
+      text.textContent = item.value === "" ? "не определено" : item.value;
+      text.title = text.textContent;
+
+      const count = document.createElement("b");
+      count.textContent = num(item.count);
+
+      label.append(input, text, count);
+      frag.appendChild(label);
+    }
+    if (!values.length) {
+      const empty = document.createElement("div");
+      empty.className = "facet__empty";
+      empty.textContent = "в выборке пусто";
+      frag.appendChild(empty);
+    }
+    list.replaceChildren(frag);
+
+    box.classList.toggle("is-on", chosen.size > 0);
+    setText(box.querySelector(".facet__count"), chosen.size ? `· ${chosen.size}` : "");
+  }
+
+  const any = ui.search || ui.minScore ||
+    Object.values(ui.facets).some((set) => set.size > 0);
+  show($("#resetFilters"), !!any);
+}
+
+function resetFacets() {
+  for (const set of Object.values(ui.facets)) set.clear();
+  ui.search = "";
+  ui.minScore = 0;
+  $("#search").value = "";
+  $("#minScore").value = 0;
+  show($("#searchClear"), false);
+  ui.page = 1;
+  refreshRows(true);
 }
 
 /* ── панель прокси ────────────────────────────────────────── */
@@ -326,13 +465,28 @@ function syncRunState() {
 
 let lastProxySig = "";
 
+/* Отступление при недоступном мосте.
+
+   Опрос идёт четыре раза в секунду, и когда мост падает или окно закрывают,
+   страница продолжает стучаться с той же частотой. Замечено вживую: браузер
+   перестаёт выдавать сокеты и сыплет ERR_INSUFFICIENT_RESOURCES, а вместе с
+   неудачными запросами тонут и удачные, когда мост возвращается. Пропускаем
+   тики, удваивая паузу до восьми, — восстановление занимает максимум две
+   секунды, а холостых запросов на порядок меньше. */
+let missed = 0;
+let skip = 0;
+
 async function tick() {
+  if (skip > 0) { skip -= 1; return; }
   let s;
   try {
     s = await api("state");
   } catch {
-    return;                       // мост ещё не поднялся или окно закрывается
+    missed += 1;
+    skip = Math.min(8, missed);   // мост ещё не поднялся или окно закрывается
+    return;
   }
+  missed = 0;
 
   ui.running = s.running;
 
@@ -357,9 +511,14 @@ async function tick() {
   appendLog(s.log);
   setText($("#logNote"), s.dropped ? `строк лога пропущено: ${num(s.dropped)}` : "");
 
-  $("#runControls").hidden = !(s.state === "running" || s.state === "paused");
+  show($("#runControls"), s.state === "running" || s.state === "paused");
   $("#btnStart").disabled = s.running || $("#startHint").classList.contains("is-ready") === false;
   setText($("#btnPause"), s.state === "paused" ? "Продолжить" : "Пауза");
+
+  // Запор общий на оба экрана: пока идёт хоть один прогон, менять исходные
+  // данные нельзя нигде. Иначе можно уйти на сбор адресов и подменить базу
+  // проверке, которая её как раз читает.
+  syncLock();
 
   if (s.proxy) {
     const sig = JSON.stringify(s.proxy).slice(0, 200);
@@ -375,7 +534,11 @@ async function tick() {
 
 function bindDrop(dropId, kind) {
   const el = $(dropId);
-  el.addEventListener("click", async () => renderSources(await api("choose", { kind })));
+  el.addEventListener("click", async () => {
+    const data = await api("choose", { kind });
+    renderSources(data);
+    if (data.error) toast(data.error, "bad");
+  });
   el.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); el.click(); }
   });
@@ -390,8 +553,11 @@ function bindDrop(dropId, kind) {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = async () => {
-      renderSources(await api("paste", { kind, text: String(reader.result || "") }));
-      toast(`Загружено: ${file.name}`, "ok");
+      const data = await api("paste", { kind, text: String(reader.result || "") });
+      renderSources(data);
+      // Перетаскивание проходит ту же проверку, что и вставка: файл, брошенный
+      // не в ту зону, — самый частый способ перепутать списки.
+      toast(data.error || `Загружено: ${file.name}`, data.error ? "bad" : "ok");
     };
     reader.readAsText(file);
   });
@@ -409,33 +575,115 @@ $("#clearProxies").addEventListener("click", async (e) => {
   renderSources(await api("clear", { kind: "proxies" }));
 });
 
-/* Вставка текстом */
+/* Вставка текстом.
+
+   Плейсхолдер показывает ВСЕ форматы, которые движок действительно
+   разбирает, — примерами, а не описанием. «Одна запись в строке» не
+   отвечает ни на один вопрос, который возникает перед вставкой: с
+   разделителем или без, можно ли имя, что делать с логином и паролем
+   прокси. */
+const PASTE_FORMATS = {
+  emails: {
+    title: "Вставьте список адресов",
+    hint: "Одна запись в строке. Кроме адреса можно дать имя, пол и страну — " +
+          "разделитель любой из , ; : | или табуляция. Первая строка может " +
+          "быть заголовком CSV.",
+    placeholder: [
+      "ivan@gmail.com",
+      "anna@yahoo.com;Анна;Женский;США",
+      "petr@mail.ru,Пётр Смирнов,Мужской,Россия",
+      "olga@outlook.com|Ольга|Женский",
+      "email;name;gender;country",
+      "иван@почта.рф",
+    ].join("\n"),
+  },
+  proxies: {
+    title: "Вставьте список прокси",
+    hint: "Одна запись в строке. Схема необязательна; логин и пароль можно " +
+          "дать двумя способами. Нужен открытый порт 25 — 587 и 465 для " +
+          "проверки не годятся.",
+    placeholder: [
+      "1.2.3.4:8080",
+      "1.2.3.4:8080:логин:пароль",
+      "логин:пароль@1.2.3.4:8080",
+      "socks5://1.2.3.4:1080",
+      "http://логин:пароль@proxy.example.com:3128",
+    ].join("\n"),
+  },
+  dorks: {
+    title: "Вставьте поисковые запросы",
+    hint: "По запросу в строке. Работают операторы поисковиков; кавычки " +
+          "ищут точное совпадение.",
+    placeholder: [
+      'site:linkedin.com "@gmail.com" маркетинг',
+      'intext:"@yahoo.com" контакты',
+      'inurl:contact "@aol.com"',
+      'filetype:pdf "@gmail.com" резюме',
+      '"@mail.ru" отдел продаж',
+    ].join("\n"),
+  },
+};
+PASTE_FORMATS.pproxy = PASTE_FORMATS.proxies;
+
 let pasteKind = "emails";
 const pasteModal = $("#pasteModal");
-$("#pasteEmails").addEventListener("click", () => {
-  pasteKind = "emails";
-  setText($("#pasteTitle"), "Вставьте список адресов");
-  $("#pasteArea").value = "";
+
+function openPaste(kind) {
+  pasteKind = kind;
+  const spec = PASTE_FORMATS[kind] || PASTE_FORMATS.emails;
+  setText($("#pasteTitle"), spec.title);
+  setText($("#pasteHint"), spec.hint);
+  const area = $("#pasteArea");
+  area.value = "";
+  area.placeholder = spec.placeholder;
+  setText($("#pasteError"), "");
+  show($("#pasteError"), false);
   pasteModal.showModal();
-});
-$("#pasteProxies").addEventListener("click", () => {
-  pasteKind = "proxies";
-  setText($("#pasteTitle"), "Вставьте список прокси");
-  $("#pasteArea").value = "";
-  pasteModal.showModal();
-});
-pasteModal.addEventListener("close", async () => {
-  if (pasteModal.returnValue !== "ok") return;
+}
+
+$("#pasteEmails").addEventListener("click", () => openPaste("emails"));
+$("#pasteProxies").addEventListener("click", () => openPaste("proxies"));
+
+/* Отправка идёт через submit, а не через закрытие окна: при отказе окно
+   должно ОСТАТЬСЯ открытым с набранным текстом. Закрыть его и показать
+   всплывашку значит заставить владельца искать и вставлять список заново. */
+pasteModal.querySelector("form").addEventListener("submit", async (event) => {
+  if (pasteModal.returnValue === "cancel" ||
+      (event.submitter && event.submitter.value === "cancel")) return;
+
+  event.preventDefault();
   const text = $("#pasteArea").value;
-  if (!text.trim()) return;
-  renderSources(await api("paste", { kind: pasteKind, text }));
+  if (!text.trim()) {
+    setText($("#pasteError"), "Пусто — нечего добавлять.");
+    show($("#pasteError"), true);
+    return;
+  }
+
+  const data = await api("paste", { kind: pasteKind, text });
+  renderSources(data);
+  if (data.error) {
+    // Проверку делает питон, а не страница: два разных разбора одних и тех
+    // же данных разъезжаются, и тогда окно принимает то, что движок потом
+    // не прочтёт.
+    setText($("#pasteError"), data.error);
+    show($("#pasteError"), true);
+    return;
+  }
+  show($("#pasteError"), false);
+  pasteModal.close();
   toast("Список добавлен", "ok");
 });
 
 /* Настройки */
 const threads = $("#threads"), timeout = $("#timeout");
-threads.addEventListener("input", () => setText($("#threadsOut"), threads.value));
-timeout.addEventListener("input", () => setText($("#timeoutOut"), timeout.value));
+threads.addEventListener("input", () => {
+  setText($("#threadsOut"), threads.value);
+  paintRange(threads);
+});
+timeout.addEventListener("input", () => {
+  setText($("#timeoutOut"), timeout.value);
+  paintRange(timeout);
+});
 
 $$(".seg__item").forEach((btn) => btn.addEventListener("click", () => {
   $$(".seg__item").forEach((b) => b.classList.remove("is-active"));
@@ -494,6 +742,44 @@ $$("#filters input").forEach((box) => box.addEventListener("change", () => {
   refreshRows(true);
 }));
 
+/* Поиск с задержкой: запрос на каждое нажатие клавиши — это десяток
+   обращений к базе на одно слово, и на большой базе они начинают
+   наступать друг другу на пятки. */
+let searchTimer = null;
+$("#search").addEventListener("input", () => {
+  const value = $("#search").value.trim();
+  show($("#searchClear"), value.length > 0);
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    ui.search = value;
+    ui.page = 1;
+    refreshRows(true);
+  }, 220);
+});
+
+$("#search").addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    $("#search").value = "";
+    $("#search").dispatchEvent(new Event("input"));
+  }
+});
+
+$("#searchClear").addEventListener("click", () => {
+  $("#search").value = "";
+  $("#search").dispatchEvent(new Event("input"));
+  $("#search").focus();
+});
+
+$("#resetFilters").addEventListener("click", resetFacets);
+
+/* Список граней закрывается по щелчку мимо него — иначе три раскрытых
+   списка перекрывают таблицу, ради которой всё и затевалось. */
+document.addEventListener("click", (event) => {
+  for (const box of $$(".facet[open]")) {
+    if (!box.contains(event.target)) box.open = false;
+  }
+});
+
 $("#minScore").addEventListener("change", () => {
   ui.minScore = Math.max(0, Math.min(100, Number($("#minScore").value) || 0));
   $("#minScore").value = ui.minScore;
@@ -506,7 +792,7 @@ $("#pageNext").addEventListener("click", () => { ui.page += 1; refreshRows(true)
 
 /* Действия над выборкой */
 $("#btnCopy").addEventListener("click", async () => {
-  const res = await api("copy_rows", { groups: ui.groups, minScore: ui.minScore });
+  const res = await api("copy_rows", selection());
   if (!res.count) { toast("В выборке пусто", "bad"); return; }
   await navigator.clipboard.writeText(res.text);
   toast(`Скопировано адресов: ${num(res.count)}` + (res.capped ? " (потолок буфера)" : ""), "ok");
@@ -514,13 +800,16 @@ $("#btnCopy").addEventListener("click", async () => {
 
 $("#btnSuppress").addEventListener("click", async () => {
   const res = await api("choose_suppression");
+  if (res.error) { toast(res.error, "bad"); return; }
   toast(res.path ? `Отписки: ${res.path}` : "Список отписок снят");
 });
 
 $("#btnExport").addEventListener("click", async () => {
-  const res = await api("export", {
-    groups: ui.groups, minScore: ui.minScore, chunk: Number($("#chunk").value) || 0,
-  });
+  // Поле «файлы по» тоже приводится к числу: пустое и мусорное значит «одним
+  // файлом», отрицательное — опечатка, а не пожелание.
+  const chunk = Math.max(0, Math.floor(Number($("#chunk").value) || 0));
+  $("#chunk").value = chunk;
+  const res = await api("export", selection({ chunk }));
   if (res.cancelled) return;
   toast(res.ok ? "Сохраняю в фоне — окно не ждёт" : (res.error || "Не удалось"),
         res.ok ? "ok" : "bad");
@@ -570,7 +859,7 @@ function renderFound(data) {
     frag.appendChild(tr);
   }
   body.replaceChildren(frag);
-  $("#pGridEmpty").hidden = data.total > 0;
+  show($("#pGridEmpty"), data.total === 0);
   setText($("#pPageInfo"), `Стр. ${data.page} / ${data.pages}`);
   setText($("#pFoundNote"), data.total ? `${num(data.total)} адресов` : "");
   parser.page = data.page;
@@ -587,13 +876,20 @@ async function refreshFound(force = false) {
 
 let enginesFilled = false;
 
+let parserMissed = 0;
+let parserSkip = 0;
+
 async function parserTick() {
+  if (parserSkip > 0) { parserSkip -= 1; return; }
   let s;
   try {
     s = await api("parser_state");
   } catch {
+    parserMissed += 1;
+    parserSkip = Math.min(8, parserMissed);
     return;
   }
+  parserMissed = 0;
 
   if (!enginesFilled && s.engines.length) {
     enginesFilled = true;
@@ -610,6 +906,7 @@ async function parserTick() {
   parser.state = s.state;
   parser.running = s.running;
   syncRunState();
+  syncLock();
 
   setText($("#pStatDorks"), `${num(s.stats.dorksDone)} / ${num(s.stats.dorksTotal)}`);
   setText($("#pStatPages"), num(s.stats.pages));
@@ -625,7 +922,7 @@ async function parserTick() {
 
   appendParserLog(s.log);
 
-  $("#pRunControls").hidden = !(s.state === "running" || s.state === "paused");
+  show($("#pRunControls"), s.state === "running" || s.state === "paused");
   setText($("#pBtnPause"), s.state === "paused" ? "Продолжить" : "Пауза");
   $("#pBtnStart").disabled = s.running ||
     $("#pStartHint").classList.contains("is-ready") === false;
@@ -647,22 +944,18 @@ $("#clearPproxy").addEventListener("click", async (e) => {
   renderSources(await api("clear", { kind: "pproxy" }));
 });
 
-$("#pasteDorks").addEventListener("click", () => {
-  pasteKind = "dorks";
-  setText($("#pasteTitle"), "Вставьте поисковые запросы");
-  $("#pasteArea").value = "";
-  pasteModal.showModal();
-});
-$("#pastePproxy").addEventListener("click", () => {
-  pasteKind = "pproxy";
-  setText($("#pasteTitle"), "Вставьте список прокси");
-  $("#pasteArea").value = "";
-  pasteModal.showModal();
-});
+$("#pasteDorks").addEventListener("click", () => openPaste("dorks"));
+$("#pastePproxy").addEventListener("click", () => openPaste("pproxy"));
 
 const pThreads = $("#pThreads"), pTimeout = $("#pTimeout");
-pThreads.addEventListener("input", () => setText($("#pThreadsOut"), pThreads.value));
-pTimeout.addEventListener("input", () => setText($("#pTimeoutOut"), pTimeout.value));
+pThreads.addEventListener("input", () => {
+  setText($("#pThreadsOut"), pThreads.value);
+  paintRange(pThreads);
+});
+pTimeout.addEventListener("input", () => {
+  setText($("#pTimeoutOut"), pTimeout.value);
+  paintRange(pTimeout);
+});
 
 /* Подсказка под выбором поисковика: у Tor-движков и прокси-движков
    требования разные, и узнавать об этом из пустого лога — плохо. */
@@ -724,7 +1017,15 @@ $("#pExport").addEventListener("click", async () => {
   toast(`Сохраняю ${num(res.count)} адресов в ${res.path}`, "ok");
 });
 
+/* Запор общий: прогон валидатора и прогон сбора одинаково запрещают менять
+   исходные данные. Отдельная функция, потому что состояние приходит двумя
+   разными опросами, и каждый должен уметь его пересчитать. */
+function syncLock() {
+  setLocked(!!(ui.running || parser.running));
+}
+
 /* ============================================================ Старт */
+[threads, timeout, pThreads, pTimeout].forEach(paintRange);
 refreshSources();
 /* Хвост лога — чтобы после перезагрузки страницы терминал не оказался пустым
    при идущем прогоне: очередь к тому моменту уже отдана прошлой странице. */
