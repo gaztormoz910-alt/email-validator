@@ -830,17 +830,27 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         # терминале — это то, ради чего окно и открыто. Дорогой её делала не
         # запись, а немедленная вставка в Tk; вставка теперь идёт пачками,
         # а буфер имеет потолок и не может съесть память.
-        if group == "valid":
-            self.safe_log(f"[VALID] {email} -> {reason}", "valid")
-        elif group == "spam":
-            label = "ROLE" if status == "Role-based" else str(status).upper()
-            self.safe_log(f"[{label}] {email} -> {reason}", "trap")
-        elif group == "unknown":
-            self.safe_log(f"[UNKNOWN] {email} -> {reason}", "trap")
-        elif group == "invalid":
+        # Метка в логе — от САМОГО статуса, а не от группы фильтра. Группы
+        # укрупняют: Risky и Unknown лежат в одной («вердикта нет»), но в
+        # терминале это разные строки, и слить их значит отнять у владельца
+        # различие между «сервер промолчал» и «ответ был, но неоднозначный».
+        _LABELS = {
+            "Valid": ("VALID", "valid"),
+            "Risky": ("RISKY", "trap"),
+            "Unknown": ("UNKNOWN", "trap"),
+            "Role-based": ("ROLE", "trap"),
+            "Catch-All": ("CATCH-ALL", "trap"),
+            "Trap/Disposable": ("TRAP/DISPOSABLE", "trap"),
+        }
+        if group == "invalid":
             self.safe_log(f"[DEAD] {email} -> {reason}", "dead")
-        else:
+        elif status in _LABELS:
+            label, tag = _LABELS[status]
+            self.safe_log(f"[{label}] {email} -> {reason}", tag)
+        elif group == "other":
             self.safe_log(f"[SKIP] {email} -> {reason}", "info")
+        else:
+            self.safe_log(f"[{str(status).upper()}] {email} -> {reason}", "trap")
             
     def _on_filter_change(self):
         self.validator_page = 1
