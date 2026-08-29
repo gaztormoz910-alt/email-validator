@@ -84,13 +84,14 @@
       <section class="step" data-step="3">
         <h2 class="step__head"><span class="step__num">3</span> Запуск</h2>
 
-        <button class="btn btn--primary btn--xl" id="btnStart">Начать проверку</button>
-        <p class="start-hint" id="startHint">Не хватает: адреса и прокси</p>
-
-        <div class="run-controls is-gone" id="runControls">
-          <button class="btn btn--ghost" id="btnPause">Пауза</button>
-          <button class="btn btn--ghost btn--danger" id="btnStop">Стоп</button>
+        <div class="launch">
+          <button class="btn btn--primary btn--xl" id="btnStart">Начать проверку</button>
+          <div class="run-controls is-gone" id="runControls">
+            <button class="btn btn--ghost" id="btnPause">Пауза</button>
+            <button class="btn btn--ghost btn--danger" id="btnStop">Стоп</button>
+          </div>
         </div>
+        <p class="start-hint" id="startHint">Не хватает: адреса и прокси</p>
       </section>
 
       <!-- Экспертное — свёрнуто. Раскрывается по щелчку, состояние
@@ -122,7 +123,6 @@
 
           <label class="toggle">
             <input type="checkbox" id="optAi" data-lock checked>
-            <span class="toggle__track"></span>
             <span class="toggle__text">
               Отсеивать адреса-роботы
               <small>распознаёт бессмысленные имена вроде xk3n9fj2q@</small>
@@ -131,7 +131,6 @@
 
           <label class="toggle">
             <input type="checkbox" id="optOsint" data-lock checked>
-            <span class="toggle__track"></span>
             <span class="toggle__text">
               Искать имя, пол и страну
               <small>медленнее, но заполняет колонки для сегментации</small>
@@ -140,7 +139,6 @@
 
           <label class="toggle">
             <input type="checkbox" id="optCache" data-lock checked>
-            <span class="toggle__track"></span>
             <span class="toggle__text">
               Не перепроверять известное
               <small>выключите, если базе больше месяца или сменили прокси</small>
@@ -381,13 +379,14 @@
           <small class="field__hint" id="pEngineHint">DuckDuckGo Lite ходит напрямую, прокси ему не нужны</small>
         </label>
 
-        <button class="btn btn--primary btn--xl" id="pBtnStart">Начать сбор</button>
-        <p class="start-hint" id="pStartHint">Не хватает: дорки</p>
-
-        <div class="run-controls is-gone" id="pRunControls">
-          <button class="btn btn--ghost" id="pBtnPause">Пауза</button>
-          <button class="btn btn--ghost btn--danger" id="pBtnStop">Стоп</button>
+        <div class="launch">
+          <button class="btn btn--primary btn--xl" id="pBtnStart">Начать сбор</button>
+          <div class="run-controls is-gone" id="pRunControls">
+            <button class="btn btn--ghost" id="pBtnPause">Пауза</button>
+            <button class="btn btn--ghost btn--danger" id="pBtnStop">Стоп</button>
+          </div>
         </div>
+        <p class="start-hint" id="pStartHint">Не хватает: дорки</p>
       </section>
 
       <details class="settings" id="pSettings">

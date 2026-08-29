@@ -1017,3 +1017,81 @@ def test_contract_polling_backs_off_when_the_bridge_is_down():
         assert name in js, name
     assert "Math.min(8, missed)" in js
     assert "Math.min(8, parserMissed)" in js
+
+# ══════════════════════════════════════════════════ Закреплённое окно
+
+def test_viewport_root_is_exactly_the_window_height():
+    """Корень страницы не выше окна — иначе интерфейсу есть куда уезжать.
+
+    Замерено вживую: корень был на 181 пиксель выше окна, и любой фокус
+    внутри утаскивал за собой всю раскладку вместе с шапкой. Полосы
+    прокрутки при этом не видно — overflow:hidden прячет её, но саму
+    прокрутку не запрещает.
+    """
+    css = read("style.css")
+    # Правило записано перечислением, поэтому спрашиваем каждую часть.
+    body = styles(css, "html") + styles(css, "body")
+    assert body, "нет базового правила для html и body"
+    assert "height: 100vh" in body, body
+    assert "max-height: 100vh" in body, body
+    assert "overflow: hidden" in body, body
+    assert "overscroll-behavior: none" in body, body
+
+
+def test_viewport_toggle_is_the_checkbox_itself():
+    """Переключатель нарисован на самом чекбоксе, а не на прозрачной подложке.
+
+    Прозрачный элемент браузер считает невидимым и честно «прокручивает к
+    нему» при фокусе — панель уезжала на 342 пикселя от одного щелчка по
+    галочке. Ни position, ни scroll-margin это не лечат.
+    """
+    css = read("style.css")
+    html = read("index.html")
+
+    assert "toggle__track" not in css, "прозрачная подложка вернулась в стили"
+    assert "toggle__track" not in html, "прозрачная подложка вернулась в разметку"
+
+    body = styles(css, ".toggle input")
+    assert body, "нет правила для самого переключателя"
+    assert "appearance: none" in body, body
+    # Прозрачности быть не должно: именно она и делала элемент невидимым.
+    assert "opacity: 0" not in body, body
+    assert "position: absolute" not in body, body
+
+    # Состояния рисуются на нём же, а не на соседнем узле.
+    assert styles(css, ".toggle input:checked"), "нет вида включённого состояния"
+    assert styles(css, ".toggle input::after"), "нет кружка переключателя"
+
+
+def test_viewport_launch_and_run_controls_share_one_cell():
+    """Настройки идут сразу за запуском, без дыры под кнопкой.
+
+    Место под «Пауза/Стоп» резервировалось пустотой ниже кнопки, и между
+    третьим шагом и настройками зияло полторы сотни пикселей — настройки
+    оказывались посреди панели. Теперь обе кнопки занимают ту же ячейку.
+    """
+    html = read("index.html")
+    css = read("style.css")
+
+    # Обе кнопки лежат внутри одного блока запуска — на обоих экранах.
+    launches = re.findall(r'<div class="launch">(.*?)</div>\s*</div>', html, re.S)
+    assert len(launches) == 2, len(launches)
+    for block in launches:
+        assert "btn--xl" in block, "в блоке запуска нет главной кнопки"
+        assert "run-controls" in block, "пауза и стоп вне блока запуска"
+
+    body = styles(css, ".launch")
+    assert body and "grid" in body, body
+    layer = styles(css, ".launch > *")
+    assert layer and "grid-area: 1 / 1" in layer, layer
+
+    # Прежний резерв высоты убран: он и создавал дыру.
+    reserve = styles(css, ".run-controls")
+    assert "min-height: 40px" not in reserve, reserve
+
+
+def test_viewport_start_button_hides_while_the_run_controls_show():
+    """Иначе кнопки наложатся друг на друга в общей ячейке."""
+    js = read("app.js")
+    assert 'show($("#btnStart"), !active)' in js
+    assert 'show($("#pBtnStart"), !pActive)' in js
