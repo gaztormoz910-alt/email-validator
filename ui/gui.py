@@ -558,6 +558,15 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
             
         self.stats = {"valid": 0, "invalid": 0, "spam": 0, "unknown": 0, "names": 0}
         self.result_store.clear()
+        # Карточки — это виджеты, они хранят прошлый текст сами. Пустое
+        # хранилище их не обнуляет, и до первого результата наверху висели
+        # числа ПРЕДЫДУЩЕГО прогона.
+        self._shown_emails = None
+        self._page_key = None
+        self._page_was_full = False
+        self.validator_page = 1
+        self._refresh_stat_cards()
+        self.refresh_validator_tree(force=True)
         
         self.stat_0.configure(text="0")
         self.stat_1.configure(text="0")
@@ -694,6 +703,55 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         else:
             self.progress_bar.configure(progress_color=ACCENT_PRIMARY)
 
+    def _drain_validator_queues(self):
+        """Разбирает всё, что накопили рабочие потоки, и обновляет виджеты.
+
+        Вынесено из тика отдельно, потому что вызывать это надо не только по
+        таймеру, но и в момент завершения прогона. Иначе последняя пачка
+        результатов остаётся в очереди, а отчёт «Валидация завершена» уходит
+        в лог раньше неё — и владелец видит строки ПОСЛЕ завершения, бар на
+        100% при идущих проверках и ноль в карточке при полной таблице.
+        Три разные жалобы, причина одна.
+
+        Порядок внутри тоже исправлен. Раньше лог сливался ПЕРВЫМ, а строки
+        результатов рождаются при их разборе — то есть попадали в уже слитый
+        буфер и показывались лишь на следующем тике. Теперь сначала разбор,
+        потом слив: строка результата и её показ происходят в одном тике.
+        """
+        import queue
+
+        added = 0
+        for _ in range(2000):
+            try:
+                email, status, reason, mx, data = self.validator_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._add_result_ui(email, status, reason, mx, data)
+            added += 1
+
+        if added:
+            self._table_dirty = True
+            self._stats_dirty = True
+
+        self._flush_log_ui(self.validator_log_queue.drain(limit=400))
+        return added
+
+    def _finish_validator_view(self):
+        """Показывает ВСЁ, что осталось в очередях. Зовётся при завершении.
+
+        Крутится до опустошения очередей, а не один раз: пока идёт разбор,
+        рабочие потоки могли дописать ещё. Потолок на число кругов есть —
+        подвесить окно наглухо нельзя даже при сбое.
+        """
+        for _ in range(200):
+            if not self._drain_validator_queues():
+                break
+        self._stats_dirty = False
+        self._refresh_stat_cards()
+        if self._active_tab == "Результаты":
+            self._table_dirty = False
+            self.refresh_validator_tree(force=True)
+
     def _poll_validator_queues(self):
         """Тик интерфейса. Здесь была главная причина зависаний.
 
@@ -708,24 +766,10 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         таблица — не чаще двух раз в секунду и только на своей вкладке,
         счётчики — четыре раза в секунду, лог — одной пачкой.
         """
-        import queue
-
-        self._flush_log_ui(self.validator_log_queue.drain(limit=400))
-
         # Результаты забираем пачкой и кладём в хранилище — это чистый Python
-        # без единого обращения к Tk, поэтому предел здесь щедрый.
-        added = 0
-        for _ in range(2000):
-            try:
-                email, status, reason, mx, data = self.validator_result_queue.get_nowait()
-            except queue.Empty:
-                break
-            self._add_result_ui(email, status, reason, mx, data)
-            added += 1
-
-        if added:
-            self._table_dirty = True
-            self._stats_dirty = True
+        # без единого обращения к Tk, поэтому предел там щедрый. Сам разбор
+        # живёт в _drain_validator_queues: им же пользуется завершение прогона.
+        self._drain_validator_queues()
 
         # Счётчики обновляются по ТОМУ ЖЕ правилу, что и таблица: флаг
         # «есть что показать» живёт до тех пор, пока показ не состоится.
@@ -907,9 +951,16 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         self._ui_call(self._reset_ui_after_complete)
         
     def _reset_ui_after_complete(self):
+        # Сначала показать всё, что рабочие потоки успели положить в очереди,
+        # и только потом объявлять о завершении. Иначе отчёт обгоняет
+        # результаты: они лежат в очереди, а в терминале уже «завершена».
+        self._finish_validator_view()
         self._set_playback_state("stopped")
         self._set_sidebar_state("normal")
         self.safe_log("[INFO] Валидация базы полностью завершена.", "info")
+        # Ещё один слив — ради самой этой строки: она положена в буфер лога
+        # только что и иначе ждала бы следующего тика.
+        self._flush_log_ui(self.validator_log_queue.drain(limit=400))
 
     def copy_terminal_logs(self):
         text = self.terminal_box.get("1.0", "end-1c")
@@ -1065,7 +1116,8 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
             # csv.writer обязателен: reason содержит запятые (напр. "[DNS: SPF=..., DMARC=...]"),
             # из-за чего ручная склейка через "," разъезжала колонки в Excel.
             writer = csv.writer(f)
-            writer.writerow(["Email", "Status", "Reason", "MX-Record", "Name", "Gender", "Country",
+            writer.writerow(["Email", "Status", "Reason", "MX-Record",
+                             "Name", "FirstName", "LastName", "Gender", "Country",
                              "BirthYear", "Company", "JobRole", "Score", "Grade",
                              "Provider", "DomainType",
                              "NameSource", "GenderSource", "CountrySource",
@@ -1075,7 +1127,9 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
                 data = r.get("data", {})
                 writer.writerow([
                     r["email"], r["status"], r["reason"], r["mx"],
-                    data.get("name", ""), data.get("gender", ""), data.get("country", ""),
+                    data.get("name", ""),
+                    data.get("first_name", ""), data.get("last_name", ""),
+                    data.get("gender", ""), data.get("country", ""),
                     data.get("birth_year", ""),
                     data.get("company", ""), data.get("job_role", ""),
                     data.get("engagement_score", ""), data.get("engagement_grade", ""),

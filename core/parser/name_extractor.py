@@ -79,6 +79,33 @@ def get_name_dataset():
                     _nd = None
     return _nd
 
+def split_name(full_name):
+    """Разбивает готовое имя на имя и фамилию.
+
+    Возвращает (first, last). Одно слово — только имя, фамилия пустая: это
+    честнее, чем записать единственный токен в обе колонки.
+
+    Средние части отбрасываются намеренно. У «Hai Ngoc Nguyen» фамилия
+    Nguyen — последняя, у «Satwik Yash Padhy» тоже последняя; вставлять Ngoc
+    и Yash в отдельную колонку значит выдумывать структуру, которой в исходной
+    строке нет. Первый токен и последний — это ровно то, что строка
+    действительно содержит.
+
+    Порядок «имя фамилия» здесь допущение, и оно верно для латиницы, из
+    которой этот разбор и делается. Для китайских и венгерских записей
+    порядок обратный, и различить их по строке нельзя — поэтому в выгрузке
+    рядом остаётся колонка с полным именем.
+    """
+    if not isinstance(full_name, str):
+        return "", ""
+    parts = [piece for piece in full_name.replace(",", " ").split() if piece]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], parts[-1]
+
+
 class NameExtractor:
     def __init__(self, enable_osint=False, proxy_provider=None):
         # Load wordsegment corpus into memory (only happens once per process)
@@ -484,12 +511,32 @@ class NameExtractor:
         return " ".join(part.title() for part in parts)
 
     def extract_name(self, email):
-        """
-        Extracts and formats a potential name from an email address using Phase 1 & 2 heuristics.
-        Returns the formatted name or None if extraction fails.
+        """Имя владельца адреса. Профиль важнее догадки, догадка важнее пустоты.
+
+        Порядок источников тут решает больше, чем сам разбор, и до починки он
+        был перевёрнут: профиль Gravatar спрашивался ТОЛЬКО когда из адреса
+        ничего не вышло. То есть работал на остатках, а на всех остальных
+        адресах владелец получал догадку, даже когда рядом лежал факт.
+
+        Замерено живьём на базе владельца: `theadamoliveras@gmail.com` —
+        разбор адреса даёт «Thea Damoliveras», а профиль отдаёт настоящее
+        «Adam Oliveras». Разделить строку правильно тут нельзя в принципе:
+        границу «thead|amoliveras» знает только сам человек, и он её указал —
+        в профиле.
+
+        Профиль спрашивается по сети, поэтому только при включённом
+        обогащении: тумблер в окне и означает «готов платить временем за
+        настоящие данные». Выключен — работает прежний разбор без единого
+        запроса.
         """
         if not isinstance(email, str) or not email or '@' not in email:
             return None
+
+        # Сначала факт. last_profile() при этом заполняется для всех — из
+        # него берутся ещё локация и соцсети, и второй раз ходить незачем.
+        confirmed = self._profile_name(email)
+        if confirmed:
+            return confirmed
 
         username = email.split('@')[0].strip()
         username_clean = re.sub(r'\d+', '', username)
@@ -536,12 +583,44 @@ class NameExtractor:
         """
         return getattr(self._osint_local, "profile", {}) or {}
 
-    def _fallback_osint(self, email):
+    def _profile_name(self, email):
+        """Имя из публичного профиля — или пусто. Заодно запоминает профиль.
+
+        Запрос ровно один на адрес: результат кладётся в потоковую ячейку, и
+        _fallback_osint им же и пользуется, если разбор адреса ничего не дал.
+
+        Имя, СОВПАДАЮЩЕЕ с локальной частью адреса, за имя не считается:
+        Gravatar отдаёт логин, когда человек имени не указывал вовсе
+        (`johnacreps@gmail.com` -> «johnacreps»). Разбор адреса из этого же
+        логина сделает по крайней мере «John Acreps».
+        """
         self._osint_local.profile = {}
-        if self.enable_osint and self.osint_operator:
+        self._osint_local.asked = True
+        if not (self.enable_osint and self.osint_operator):
+            return ""
+        try:
             profile = self.osint_operator.get_profile(email)
-            if profile:
-                self._osint_local.profile = profile
-                if profile.get("name"):
-                    return profile["name"]
-        return ""
+        except Exception:
+            return ""
+        if not profile:
+            return ""
+        self._osint_local.profile = profile
+        name = (profile.get("name") or "").strip()
+        if not name:
+            return ""
+        local_part = email.split("@")[0].strip().lower()
+        squashed = "".join(ch for ch in name.lower() if ch.isalnum())
+        if squashed == "".join(ch for ch in local_part if ch.isalnum()):
+            return ""      # это логин, а не имя
+        return name
+
+    def _fallback_osint(self, email):
+        """Запасной путь: разбор адреса ничего не дал.
+
+        Профиль здесь уже спрошен в начале extract_name — второй запрос
+        делать нельзя, это удвоило бы сетевую нагрузку на всю базу.
+        """
+        if not getattr(self._osint_local, "asked", False):
+            return self._profile_name(email)
+        profile = getattr(self._osint_local, "profile", {}) or {}
+        return (profile.get("name") or "").strip()
