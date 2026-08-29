@@ -37,6 +37,9 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+from core import input_guard
+from ui.result_store import normalize_filters
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
@@ -110,6 +113,42 @@ class ValidatorApi:
     def proxy_sources(self):
         return self._sources["proxies"]
 
+    # Вид источника -> что в нём ожидается. Нужно проверке ввода: положить
+    # список прокси в поле адресов проще простого, а всплывает ошибка только
+    # через минуту прогона тысячами непонятных отказов.
+    _EXPECTED_KIND = {
+        "emails": "email",
+        "proxies": "proxy",
+        "dorks": "dork",
+        "pproxy": "proxy",
+        "suppress": "email",
+    }
+
+    def _busy(self):
+        """Идёт ли сейчас прогон — валидатор или сбор адресов.
+
+        Одна точка на весь мост: пока она врёт, любая блокировка на странице
+        остаётся рисунком, который обходится одним запросом мимо неё.
+
+        Про признаки. У валидатора это `is_running`, у сбора — `is_alive()`:
+        ParserPipeline наследует threading.Thread, и своего `is_running` у
+        него нет. Спрашивать у него `is_running` — значит всегда получать
+        «не идёт» и не запирать ввод во время сбора вовсе. Тот же признак,
+        что и в parser_start, где решается, можно ли запускать второй раз.
+        """
+        if getattr(self.pipeline, "is_running", False):
+            return True
+        parser = getattr(self, "parser", None)
+        if parser is None:
+            return False
+        alive = getattr(parser, "is_alive", None)
+        if callable(alive):
+            return bool(alive())
+        return bool(getattr(parser, "is_running", False))
+
+    _BUSY_REFUSAL = ("Идёт проверка — менять исходные данные нельзя. "
+                     "Остановите прогон или дождитесь конца.")
+
     def _bucket(self, kind):
         """Ведро источников по имени. Незнакомое имя — не повод молча
         свалить список в прокси, как было раньше."""
@@ -161,23 +200,58 @@ class ValidatorApi:
         """Выбор файлов для базы или для прокси."""
         kind = payload.get("kind")
         target = self._bucket(kind)
+        if self._busy():
+            return dict(self.sources(), error=self._BUSY_REFUSAL)
+
         paths = self._pick_files(kind)
+        expected = self._EXPECTED_KIND.get(kind)
+        accepted, refused = [], []
         for path in paths:
-            target.append({"type": "file", "path": path})
-        if paths:
-            self._on_log(f"[INFO] Подключено файлов: {len(paths)}.", "info")
-        return self.sources()
+            # Проверяется КАЖДЫЙ файл, а не первый: владелец выбирает их
+            # пачкой, и прокси среди пяти баз иначе проедут незамеченными.
+            verdict = input_guard.check_file(path, expected) if expected else {"ok": True}
+            if verdict["ok"]:
+                accepted.append(path)
+                target.append({"type": "file", "path": path})
+            else:
+                refused.append(verdict["reason"])
+
+        if accepted:
+            self._on_log(f"[INFO] Подключено файлов: {len(accepted)}.", "info")
+        for reason in refused:
+            self._on_log(f"[DEAD] Файл отклонён: {reason}", "dead")
+
+        result = self.sources()
+        if refused:
+            result["error"] = refused[0]
+        return result
 
     def paste(self, payload):
         """Список, вставленный текстом вместо файла."""
         kind = payload.get("kind")
+        bucket = self._bucket(kind)
+        if self._busy():
+            return dict(self.sources(), error=self._BUSY_REFUSAL)
+
         text = str(payload.get("text") or "")
-        if text.strip():
-            self._bucket(kind).append({"type": "text", "content": text})
+        if not text.strip():
+            return dict(self.sources(), error="Пусто — нечего добавлять.")
+
+        expected = self._EXPECTED_KIND.get(kind)
+        if expected:
+            verdict = input_guard.check_text(text, expected)
+            if not verdict["ok"]:
+                self._on_log(f"[DEAD] Вставка отклонена: {verdict['reason']}", "dead")
+                return dict(self.sources(), error=verdict["reason"])
+
+        bucket.append({"type": "text", "content": text})
         return self.sources()
 
     def clear(self, payload):
-        self._bucket(payload.get("kind")).clear()
+        bucket = self._bucket(payload.get("kind"))
+        if self._busy():
+            return dict(self.sources(), error=self._BUSY_REFUSAL)
+        bucket.clear()
         return self.sources()
 
     def sources(self, payload=None):
@@ -212,11 +286,44 @@ class ValidatorApi:
         }
 
     def choose_suppression(self, payload=None):
+        """Список отписок. Проверяется строже прочих.
+
+        Цена ошибки здесь выше, чем у базы: по этому списку решают, кому НЕ
+        слать. Подсунутый вместо него список прокси не вычтет никого, и
+        письмо уйдёт человеку, который прямо попросил его не трогать, —
+        а это уже жалоба на спам, а не просто лишняя проверка.
+        """
         paths = self._pick_files("suppress")
-        self.suppress_path = paths[0] if paths else None
-        return {"path": os.path.basename(self.suppress_path) if self.suppress_path else ""}
+        if not paths:
+            self.suppress_path = None
+            return {"path": ""}
+
+        verdict = input_guard.check_file(paths[0], "email")
+        if not verdict["ok"]:
+            self._on_log(f"[DEAD] Список отписок отклонён: {verdict['reason']}", "dead")
+            return {"path": os.path.basename(self.suppress_path or ""),
+                    "error": verdict["reason"]}
+
+        self.suppress_path = paths[0]
+        return {"path": os.path.basename(self.suppress_path)}
 
     # --------------------------------------------------------- прогон --
+    @staticmethod
+    def _number(payload, key, default, low, high):
+        """Число из поля страницы, загнанное в допустимые границы.
+
+        Голый int() падает на «abc» и пропускает 999999 потоков дальше в
+        движок. Поле ввода на странице ограничено атрибутами min и max, но
+        запрос может прийти и мимо страницы.
+        """
+        try:
+            value = float(payload.get(key, default))
+        except (TypeError, ValueError):
+            return default
+        if value != value:            # NaN
+            return default
+        return int(max(low, min(high, value)))
+
     def start(self, payload):
         if self.pipeline.is_running:
             return {"ok": False, "error": "Проверка уже идёт"}
@@ -233,8 +340,8 @@ class ValidatorApi:
 
         self.pipeline.start(
             email_sources=list(self.email_sources),
-            threads=int(payload.get("threads") or 100),
-            timeout=int(payload.get("timeout") or 5),
+            threads=self._number(payload, "threads", 100, 1, 500),
+            timeout=self._number(payload, "timeout", 5, 1, 300),
             fix_typos=True, check_spam=True, deep_ping=True,
             enable_ai=bool(payload.get("ai", True)),
             proxies=list(self.proxy_sources),
@@ -289,18 +396,13 @@ class ValidatorApi:
 
     def page(self, payload):
         """Страница таблицы. Берётся из того же хранилища, что и раньше."""
-        groups = tuple(payload.get("groups") or ("valid",))
-        try:
-            min_score = max(0, min(100, int(payload.get("minScore") or 0)))
-        except (TypeError, ValueError):
-            min_score = 0
+        picked = self._filters(payload)
         number = max(1, int(payload.get("page") or 1))
 
-        total = self.store.matching_count(groups, min_score=min_score)
+        total = self.store.matching_count(filters=picked)
         pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
         number = min(number, pages)
-        rows = self.store.page(groups, page=number, size=PAGE_SIZE,
-                               min_score=min_score)
+        rows = self.store.page(filters=picked, page=number, size=PAGE_SIZE)
 
         out = []
         for row in rows:
@@ -319,6 +421,29 @@ class ValidatorApi:
             })
         return {"rows": out, "page": number, "pages": pages, "total": total}
 
+    @staticmethod
+    def _filters(payload):
+        """Разбор запроса страницы. Один разбор на все запросы к выборке."""
+        payload = payload if isinstance(payload, dict) else {}
+        return normalize_filters({
+            "groups": payload.get("groups") or ("valid",),
+            "minScore": payload.get("minScore"),
+            "country": payload.get("country"),
+            "gender": payload.get("gender"),
+            "provider": payload.get("provider"),
+            "search": payload.get("search"),
+        })
+
+    def facets(self, payload=None):
+        """Какие страны, полы и почтовики встретились — для списков фильтра.
+
+        Считается по запросу страницы, а не по всей базе: список должен
+        показывать то, что найдётся при текущем наборе фильтров.
+        """
+        picked = self._filters(payload)
+        values = self.store.facet_values(filters=picked)
+        return {"facets": values, "total": self.store.matching_count(filters=picked)}
+
     def export(self, payload):
         """Выгрузка в фоне: на многомиллионной базе она идёт минутами."""
         if self._export_busy:
@@ -332,23 +457,18 @@ class ValidatorApi:
             return {"ok": False, "cancelled": True}
         path = target if isinstance(target, str) else target[0]
 
-        groups = tuple(payload.get("groups") or ("valid",))
-        try:
-            min_score = max(0, min(100, int(payload.get("minScore") or 0)))
-        except (TypeError, ValueError):
-            min_score = 0
-        try:
-            chunk = max(0, int(payload.get("chunk") or 0))
-        except (TypeError, ValueError):
-            chunk = 0
+        picked = self._filters(payload)
+        # Ноль означает «одним файлом»; потолок — чтобы опечатка в поле не
+        # превратила выгрузку в миллион файлов по одной строке.
+        chunk = self._number(payload, "chunk", 0, 0, 100_000_000)
 
         self._export_busy = True
         threading.Thread(target=self._export_worker,
-                         args=(path, groups, min_score, chunk),
+                         args=(path, picked, chunk),
                          daemon=True).start()
         return {"ok": True}
 
-    def _export_worker(self, path, groups, min_score, chunk):
+    def _export_worker(self, path, picked, chunk):
         import csv
         from core import baseops
         from core.cleaner import normalize_for_dedup
@@ -378,7 +498,7 @@ class ValidatorApi:
             skipped = {"n": 0}
 
             def rows():
-                for row in self.store.iter_matching(groups, min_score=min_score):
+                for row in self.store.iter_matching(filters=picked):
                     if drop and normalize_for_dedup(row["email"]) in drop:
                         skipped["n"] += 1
                         continue
@@ -452,8 +572,8 @@ class ValidatorApi:
         engine = payload.get("engine") or self.PARSER_ENGINES[0]
         if engine not in self.PARSER_ENGINES:
             return {"ok": False, "error": "Неизвестный поисковик"}
-        threads = max(1, min(500, int(payload.get("threads") or 20)))
-        timeout = max(1.0, min(120.0, float(payload.get("timeout") or 15)))
+        threads = self._number(payload, "threads", 20, 1, 500)
+        timeout = self._number(payload, "timeout", 15, 1, 120)
 
         with self._lock:
             self._parser_rows = []
@@ -606,14 +726,10 @@ class ValidatorApi:
 
     def copy_rows(self, payload):
         """Адреса выборки текстом — страница положит их в буфер обмена."""
-        groups = tuple(payload.get("groups") or ("valid",))
-        try:
-            min_score = max(0, min(100, int(payload.get("minScore") or 0)))
-        except (TypeError, ValueError):
-            min_score = 0
+        picked = self._filters(payload)
         limit = 200_000        # больше в буфер обмена всё равно не кладут
         out = []
-        for row in self.store.iter_matching(groups, min_score=min_score):
+        for row in self.store.iter_matching(filters=picked):
             out.append(row["email"])
             if len(out) >= limit:
                 break

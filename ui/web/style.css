@@ -76,7 +76,23 @@ html, body {
 body { user-select: none; }
 input, textarea, .log, .grid { user-select: text; }
 
-svg { width: 20px; height: 20px; fill: currentColor; display: block; }
+/* Иконки — обводка одной толщины на сетке 24×24.
+   Заливка и была причиной «искажённого» вида: у самодельного глобуса контуры
+   накладывались друг на друга и слипались в кашу, а на мелком размере от
+   рисунка оставалось чёрное пятно. Обводка так не ломается.
+   flex: none — вторая половина беды: иконка внутри флекса сжималась соседом
+   по ширине, но не по высоте, и круг превращался в овал. */
+svg {
+  width: 20px; height: 20px;
+  flex: none;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
 
 /* Полосы прокрутки — тонкие и незаметные. В Tkinter они были толстыми и
    кислотно-синими: полоса прокрутки не должна спорить с содержимым. */
@@ -242,16 +258,32 @@ svg { width: 20px; height: 20px; fill: currentColor; display: block; }
 }
 .field__hint { color: var(--text-3); font-size: 11px; line-height: 1.4; }
 
+/* Пройденная часть дорожки красится тем же цветом, что и ручка: по одному
+   положению ручки трудно понять, где ты в диапазоне, а закрашенный отрезок
+   читается мгновенно. Долю задаёт скрипт переменной --fill — WebView2
+   умеет ::-moz-range-progress не больше, чем любой другой Chromium. */
 input[type="range"] {
   -webkit-appearance: none; appearance: none;
-  flex: 1; height: 4px; border-radius: var(--r-pill);
-  background: var(--surface-2); cursor: pointer;
+  flex: 1; height: 5px; border-radius: var(--r-pill);
+  cursor: pointer;
+  background:
+    linear-gradient(to right,
+      var(--accent) 0 var(--fill, 0%),
+      var(--surface-2) var(--fill, 0%) 100%);
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 16px; height: 16px; border-radius: 50%;
   background: var(--accent); border: 0; cursor: pointer;
+  /* Ободок цветом подложки: иначе ручка сливается с закрашенной дорожкой
+     ровно в тот момент, когда ползунок доведён до края. */
+  box-shadow: 0 0 0 3px var(--bg-elev);
+  transition: box-shadow .12s var(--ease);
 }
+input[type="range"]:hover::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--bg-elev), 0 0 0 6px rgba(76, 194, 255, .18);
+}
+input[type="range"]:disabled { cursor: not-allowed; opacity: .55; }
 
 .toggle { display: flex; align-items: flex-start; gap: var(--s-3); cursor: pointer; }
 .toggle input { position: absolute; opacity: 0; pointer-events: none; }
@@ -581,4 +613,155 @@ input[type="number"], textarea {
 }
 @media (max-width: 900px) {
   .tiles--four { grid-template-columns: minmax(0, 1fr); }
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+   Ничего не сдвигается с места
+   ══════════════════════════════════════════════════════════════════
+   Атрибут hidden убирает элемент из потока, и всё, что ниже, прыгает
+   вверх: появилась кнопка «Очистить» — уехали настройки, начался прогон —
+   уехало всё под кнопкой запуска. Класс is-gone прячет, НЕ освобождая
+   место: на экране пусто, а раскладка стоит. */
+.is-gone {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+/* Подпись под кнопкой запуска меняет длину («Не хватает: адреса и прокси» ->
+   «Всё готово — можно запускать») и на узкой панели переходит с одной строки
+   на две. Две строки резервируются всегда. */
+.start-hint { min-height: 2.6em; }
+
+/* Заметка над логом появляется только когда строки начали теряться. */
+#logNote, #pLogNote, #pFoundNote { min-height: 1.2em; }
+
+/* Кнопки паузы и стопа занимают своё место с самого начала. */
+.run-controls { min-height: 40px; }
+
+/* Числа не должны дёргать соседей при росте: в пропорциональном шрифте
+   единица уже семёрки, и счётчик «1111 -> 7777» ощутимо меняет ширину,
+   растаскивая плитку. Табличные цифры одинаковой ширины. */
+.tile__num, .mini b, output, #pageLabel, #pageCount, .progress__text,
+.facet__count, .grid .c-score, .grid .c-when {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Поиск и грани отбора
+   ══════════════════════════════════════════════════════════════════ */
+.facets { border-top: 1px dashed var(--border); }
+
+.search {
+  position: relative;
+  display: flex; align-items: center; gap: var(--s-2);
+  min-width: 240px; flex: 1 1 240px; max-width: 380px;
+  padding: 0 var(--s-3);
+  height: 32px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.search:focus-within { border-color: var(--accent); }
+.search svg { width: 15px; height: 15px; color: var(--text-3); }
+.search input {
+  flex: 1; min-width: 0;
+  background: none; border: 0; outline: none;
+  color: var(--text); font: inherit; font-size: 12.5px;
+}
+/* Родная крестик-кнопка поиска в WebView2 нарисована светлой и на тёмной
+   теме выглядит грязным пятном — своя аккуратнее. */
+.search input::-webkit-search-cancel-button { display: none; }
+.search__clear {
+  flex: none; width: 18px; height: 18px;
+  display: grid; place-items: center;
+  border: 0; border-radius: 50%;
+  background: var(--hover); color: var(--text-2);
+  font-size: 13px; line-height: 1; cursor: pointer;
+}
+.search__clear:hover { background: var(--border-str); color: var(--text); }
+
+.facet { position: relative; flex: none; }
+.facet > summary {
+  display: flex; align-items: center; gap: var(--s-2);
+  height: 32px; padding: 0 var(--s-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-size: 12.5px; color: var(--text-2);
+  cursor: pointer; user-select: none;
+  white-space: nowrap;
+  list-style: none;
+}
+.facet > summary::-webkit-details-marker { display: none; }
+.facet > summary::after {
+  content: "";
+  width: 6px; height: 6px; margin-left: 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+}
+.facet[open] > summary,
+.facet.is-on > summary { border-color: var(--accent); color: var(--text); }
+.facet__count { color: var(--accent); font-weight: 600; }
+
+.facet__list {
+  position: absolute; z-index: 30; top: calc(100% + 4px); left: 0;
+  min-width: 220px; max-height: 300px; overflow-y: auto;
+  padding: var(--s-2);
+  background: var(--surface);
+  border: 1px solid var(--border-str);
+  border-radius: var(--r);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.facet__item {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: 5px var(--s-2); border-radius: var(--r-sm);
+  font-size: 12.5px; color: var(--text-2); cursor: pointer;
+}
+.facet__item:hover { background: var(--hover); color: var(--text); }
+.facet__item input { accent-color: var(--accent); flex: none; }
+.facet__item b {
+  margin-left: auto; color: var(--text-3); font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.facet__item span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.facet__empty { padding: var(--s-3); color: var(--text-3); font-size: 12px; }
+
+/* ══════════════════════════════════════════════════════════════════
+   Запертый ввод во время прогона
+   ══════════════════════════════════════════════════════════════════
+   Приглушение — не украшение: без него заблокированное поле выглядит
+   обычным, и владелец решает, что программа зависла, а не что она занята. */
+[data-lock][disabled],
+[data-lock].is-locked {
+  opacity: .45;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+.side.is-locked .step__head { color: var(--text-3); }
+
+/* ══════════════════════════════════════════════════════════════════
+   Окно вставки: форматы и отказ
+   ══════════════════════════════════════════════════════════════════ */
+.modal__hint {
+  margin: 0 0 var(--s-2);
+  color: var(--text-3); font-size: 12px; line-height: 1.7;
+  white-space: pre-line;
+}
+.modal__error {
+  margin: var(--s-2) 0 0;
+  padding: var(--s-2) var(--s-3);
+  background: rgba(251, 113, 133, .12);
+  border-left: 2px solid var(--bad);
+  border-radius: var(--r-sm);
+  color: var(--bad); font-size: 12px; line-height: 1.6;
+  white-space: pre-line;
+}
+.modal textarea::placeholder {
+  color: var(--text-3); opacity: .75; line-height: 1.7;
 }

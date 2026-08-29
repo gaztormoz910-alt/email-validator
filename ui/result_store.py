@@ -103,10 +103,84 @@ def _score_of(payload):
     except (TypeError, ValueError):
         return 0
 
+def _provider_of(email):
+    """Домен адреса в нижнем регистре — он же почтовик для фильтра.
+
+    Берётся домен, а не красивое имя из обогащения: имя есть не у каждой
+    строки, а домен есть всегда, и владелец просил фильтр именно доменами —
+    «@gmail.com, @yahoo.com, @aol.com».
+    """
+    if not isinstance(email, str) or "@" not in email:
+        return ""
+    return email.rpartition("@")[2].strip().lower()
+
+
+def _facet_of(payload, key):
+    """Значение грани строкой. Пустое и мусорное — пустая строка.
+
+    Пустая строка, а не NULL: по ней можно и отфильтровать («без страны»), и
+    сгруппировать, не разводя два разных вида «ничего».
+    """
+    if not isinstance(payload, dict):
+        return ""
+    value = payload.get(key)
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return text
+
+
 # Сколько строк копится перед записью пачкой. Одиночный INSERT на каждый
 # результат упирается в диск и становится узким местом сам по себе, а пачкой
 # в пятьсот строк запись стоит примерно столько же, сколько одна.
 FLUSH_EVERY = 500
+
+
+# Грани, по которым владелец отбирает строки помимо вердикта. Ключ здесь —
+# имя колонки в таблице; оно же приезжает с страницы.
+FACETS = ("country", "gender", "provider")
+
+
+def normalize_filters(raw, groups=None, min_score=0):
+    """Приводит запрос страницы к одному виду.
+
+    Отдельная функция, потому что фильтр приходит из трёх мест (страница
+    таблицы, счётчик совпадений, выгрузка) и разъезжается, если каждое
+    разбирает его по-своему.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+
+    chosen = raw.get("groups") if raw.get("groups") is not None else groups
+    chosen = tuple(chosen or ("valid",))
+
+    try:
+        score = int(raw.get("minScore", raw.get("min_score", min_score)) or 0)
+    except (TypeError, ValueError):
+        score = 0
+    score = max(0, min(100, score))
+
+    values = {}
+    for facet in FACETS:
+        picked = raw.get(facet) or raw.get(facet + "s") or []
+        if isinstance(picked, str):
+            picked = [picked]
+        # Пустые значения не выкидываем: «без страны» — законный выбор.
+        values[facet] = [str(v).strip() for v in picked if str(v).strip() != "" or v == ""]
+
+    return {
+        "groups": chosen,
+        "min_score": score,
+        "country": values["country"],
+        "gender": values["gender"],
+        "provider": [v.lower() for v in values["provider"]],
+        "search": str(raw.get("search") or "").strip().lower(),
+    }
+
+
+def _filters_are_plain(filters):
+    """Ничего, кроме групп, не выбрано — можно идти самым дешёвым путём."""
+    return (not filters["min_score"] and not filters["search"]
+            and not any(filters[facet] for facet in FACETS))
 
 
 class ResultStore:
@@ -157,14 +231,18 @@ class ResultStore:
             self._conn.execute("PRAGMA synchronous=OFF")   # это кэш показа, не архив
             self._conn.execute(
                 """CREATE TABLE IF NOT EXISTS rows (
-                       pos    INTEGER PRIMARY KEY,
-                       email  TEXT,
-                       status TEXT,
-                       reason TEXT,
-                       mx     TEXT,
-                       data   TEXT,
-                       grp    TEXT,
-                       score  INTEGER
+                       pos      INTEGER PRIMARY KEY,
+                       email    TEXT,
+                       status   TEXT,
+                       reason   TEXT,
+                       mx       TEXT,
+                       data     TEXT,
+                       grp      TEXT,
+                       score    INTEGER,
+                       country  TEXT,
+                       gender   TEXT,
+                       provider TEXT,
+                       email_lc TEXT
                    )"""
             )
             # Группа и скор вынесены из JSON в свои колонки не для красоты.
@@ -176,6 +254,28 @@ class ResultStore:
             # С этим индексом тот же ответ даёт один COUNT.
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS rows_grp_score ON rows (grp, score)")
+
+            # Файл мог остаться от прежней версии — тогда колонок фасетов в
+            # нём нет. Добавляем молча: упасть здесь значит потерять показ
+            # результатов целиком ради колонки фильтра.
+            for column in ("country", "gender", "provider", "email_lc"):
+                try:
+                    self._conn.execute("ALTER TABLE rows ADD COLUMN %s TEXT" % column)
+                except sqlite3.OperationalError:
+                    pass          # уже есть
+
+            # Индексы парой (группа, грань), а не по одной грани. Группа есть
+            # в КАЖДОМ запросе — и в отборе, и в сборе значений для списков
+            # фильтра, — поэтому вести ей должна она. Замерено на двухстах
+            # тысячах строк: по одиночным индексам сбор значений занимал
+            # 3.5 с, потому что GROUP BY приходилось делать сортировкой уже
+            # после отбора по группе. С парными — десятые доли.
+            for name, column in (("rows_grp_country", "grp, country"),
+                                 ("rows_grp_gender", "grp, gender"),
+                                 ("rows_grp_provider", "grp, provider"),
+                                 ("rows_email_lc", "email_lc")):
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS %s ON rows (%s)" % (name, column))
             self._conn.commit()
             self._path = path
         except Exception:
@@ -262,8 +362,11 @@ class ResultStore:
                 blob = json.dumps(payload, ensure_ascii=False, default=str)
             except Exception:
                 blob = "{}"
-            self._pending.append((position, email, status, reason, mx, blob,
-                                  group, _score_of(payload)))
+            self._pending.append((
+                position, email, status, reason, mx, blob,
+                group, _score_of(payload),
+                _facet_of(payload, "country"), _facet_of(payload, "gender"),
+                _provider_of(email), str(email or "").lower()))
             if len(self._pending) >= FLUSH_EVERY:
                 self._flush_locked()
         return group
@@ -275,8 +378,9 @@ class ResultStore:
         try:
             self._conn.executemany(
                 "INSERT OR REPLACE INTO rows "
-                "(pos, email, status, reason, mx, data, grp, score) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", self._pending)
+                "(pos, email, status, reason, mx, data, grp, score, "
+                " country, gender, provider, email_lc) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", self._pending)
             self._conn.commit()
             self._pending.clear()
         except Exception:
@@ -285,7 +389,7 @@ class ResultStore:
             # незачем. Дальше новые строки копятся в памяти — она дороже, но
             # потерять показанные результаты хуже.
             for row in self._pending:
-                position, email, status, reason, mx, blob, _grp, _score = row
+                position, email, status, reason, mx, blob = row[:6]
                 self._memory_rows[position] = {
                     "email": email, "status": status, "reason": reason,
                     "mx": mx, "data": _loads(blob)}
@@ -396,81 +500,198 @@ class ResultStore:
     def _sql_groups(self, groups):
         return [name for name in groups if name in self._index]
 
-    def page(self, groups, page=1, size=100, min_score=0):
+    # --- отбор -----------------------------------------------------------
+
+    def _where(self, filters):
+        """Условие и параметры для SQL по разобранному фильтру."""
+        names = self._sql_groups(filters["groups"])
+        clauses = ["grp IN (%s)" % ",".join("?" * len(names))]
+        params = list(names)
+
+        if filters["min_score"] > 0:
+            clauses.append("score >= ?")
+            params.append(int(filters["min_score"]))
+
+        for facet in FACETS:
+            picked = filters[facet]
+            if not picked:
+                continue
+            clauses.append("%s IN (%s)" % (facet, ",".join("?" * len(picked))))
+            params.extend(picked)
+
+        if filters["search"]:
+            # Поиск идёт по отдельной колонке, уже приведённой к нижнему
+            # регистру, а не по LOWER(email): вызов функции в условии выключил
+            # бы индекс. Проценты и подчёркивания в запросе экранируются —
+            # иначе поиск «a_b» нашёл бы «axb».
+            needle = filters["search"]
+            needle = needle.replace('\\', '\\\\')
+            needle = needle.replace("%", '\\%').replace("_", '\\_')
+            # В SQLite обратный слэш ничего не экранирует сам по себе, поэтому
+            # символ экранирования объявляется явно и записывается ОДИН раз:
+            # ESCAPE '\\' задал бы escape-символом два слэша, и защита
+            # процентов перестала бы работать.
+            clauses.append("email_lc LIKE ? ESCAPE '\\'")
+            params.append("%" + needle + "%")
+
+        return " AND ".join(clauses), params
+
+    def _matches(self, row, filters):
+        """То же условие для запасного пути, когда база недоступна."""
+        payload = row.get("data") if isinstance(row.get("data"), dict) else {}
+
+        if filters["min_score"] > 0:
+            try:
+                score = int(payload.get("engagement_score", 0) or 0)
+            except (TypeError, ValueError):
+                return False
+            if score < filters["min_score"]:
+                return False
+
+        for facet in ("country", "gender"):
+            picked = filters[facet]
+            if picked and _facet_of(payload, facet) not in picked:
+                return False
+
+        if filters["provider"]:
+            if _provider_of(row.get("email")) not in filters["provider"]:
+                return False
+
+        if filters["search"]:
+            if filters["search"] not in str(row.get("email") or "").lower():
+                return False
+
+        return True
+
+    def page(self, groups=None, page=1, size=100, min_score=0, filters=None):
         """Строки одной страницы.
 
         Перебор обрывается, как только страница набрана: именно это и делает
         стоимость показа независимой от размера базы.
         """
+        picked = normalize_filters(filters, groups, min_score)
         page = max(1, int(page or 1))
         size = max(1, int(size or 1))
         start = (page - 1) * size
+
         with self._lock:
-            if min_score > 0 and self._sql_ready(groups):
+            if _filters_are_plain(picked):
+                chosen = list(itertools.islice(self._selected(picked["groups"]),
+                                               start, start + size))
+                return self._fetch(chosen)
+
+            if self._sql_ready(picked["groups"]):
                 self._flush_locked()
-                names = self._sql_groups(groups)
-                marks = ",".join("?" * len(names))
                 try:
+                    where, params = self._where(picked)
                     cursor = self._conn.execute(
-                        f"SELECT pos FROM rows WHERE grp IN ({marks}) AND score >= ? "
-                        f"ORDER BY pos LIMIT ? OFFSET ?",
-                        names + [int(min_score), size, start])
-                    chosen = [row[0] for row in cursor]
-                    return self._fetch(chosen)
+                        "SELECT pos FROM rows WHERE %s ORDER BY pos LIMIT ? OFFSET ?"
+                        % where, params + [size, start])
+                    return self._fetch([row[0] for row in cursor])
                 except Exception:
                     pass          # молча падаем на медленный, но верный путь
-            if min_score > 0:
-                # Запасной путь без БД: позиции отбираются по одной, потому что
-                # скор лежит внутри строки. Перебор обрывается по набору
-                # страницы, поэтому стоит он размера страницы, а не базы.
-                chosen = []
-                for position in self._selected(groups):
-                    if not self._passes_score(position, min_score):
-                        continue
+
+            # Запасной путь без БД: строки достаются по одной, потому что
+            # грани лежат внутри строки. Перебор обрывается по набору
+            # страницы, поэтому стоит он размера страницы, а не базы.
+            chosen = []
+            for position in self._selected(picked["groups"]):
+                rows = self._fetch([position])
+                if rows and self._matches(rows[0], picked):
                     chosen.append(position)
                     if len(chosen) >= start + size:
                         break
-                chosen = chosen[start:start + size]
-            else:
-                chosen = list(itertools.islice(self._selected(groups),
-                                               start, start + size))
-            return self._fetch(chosen)
+            return self._fetch(chosen[start:start + size])
 
-    def matching_count(self, groups, min_score=0):
+    def matching_count(self, groups=None, min_score=0, filters=None):
         """Сколько строк проходит фильтр.
 
-        Без порога по скору ответ берётся из счётчиков и не стоит ничего.
-        С порогом перебор неизбежен — зато он нужен только для номера
-        последней страницы, а не на каждом тике.
+        Без фильтров ответ берётся из счётчиков и не стоит ничего. С ними —
+        одним запросом по индексу, а не перебором в питоне.
         """
+        picked = normalize_filters(filters, groups, min_score)
         with self._lock:
-            if min_score <= 0:
-                return sum(self._counts[name] for name in groups if name in self._counts)
-            if self._sql_ready(groups):
+            if _filters_are_plain(picked):
+                return sum(self._counts[name] for name in picked["groups"]
+                           if name in self._counts)
+
+            if self._sql_ready(picked["groups"]):
                 self._flush_locked()
-                names = self._sql_groups(groups)
-                marks = ",".join("?" * len(names))
                 try:
+                    where, params = self._where(picked)
                     cursor = self._conn.execute(
-                        f"SELECT COUNT(*) FROM rows "
-                        f"WHERE grp IN ({marks}) AND score >= ?",
-                        names + [int(min_score)])
+                        "SELECT COUNT(*) FROM rows WHERE %s" % where, params)
                     row = cursor.fetchone()
                     if row is not None:
                         return int(row[0])
                 except Exception:
                     pass          # молча падаем на медленный, но верный путь
+
             total = 0
-            for position in self._selected(groups):
-                if self._passes_score(position, min_score):
+            for position in self._selected(picked["groups"]):
+                rows = self._fetch([position])
+                if rows and self._matches(rows[0], picked):
                     total += 1
             return total
+
+    def facet_values(self, groups=None, filters=None, limit=200):
+        """Какие страны, полы и почтовики реально встретились в выборке.
+
+        Списки берутся из базы, а не из справочника: показать пункт
+        «Германия», когда немцев в базе нет, — значит предложить владельцу
+        фильтр, который заведомо ничего не найдёт.
+
+        Каждая грань считается БЕЗ учёта себя самой. Иначе, выбрав Германию,
+        владелец увидел бы в списке стран одну Германию и не смог бы
+        передумать, не сбросив фильтр.
+        """
+        picked = normalize_filters(filters, groups, 0)
+        out = {facet: [] for facet in FACETS}
+
+        with self._lock:
+            if self._sql_ready(picked["groups"]):
+                self._flush_locked()
+                try:
+                    for facet in FACETS:
+                        narrowed = dict(picked)
+                        narrowed[facet] = []
+                        where, params = self._where(narrowed)
+                        cursor = self._conn.execute(
+                            "SELECT %s, COUNT(*) FROM rows WHERE %s "
+                            "GROUP BY %s ORDER BY COUNT(*) DESC, %s LIMIT ?"
+                            % (facet, where, facet, facet), params + [int(limit)])
+                        out[facet] = [{"value": value or "", "count": int(count)}
+                                      for value, count in cursor]
+                    return out
+                except Exception:
+                    pass          # молча падаем на медленный, но верный путь
+
+            tally = {facet: {} for facet in FACETS}
+            for position in self._selected(picked["groups"]):
+                rows = self._fetch([position])
+                if not rows:
+                    continue
+                row = rows[0]
+                payload = row.get("data") if isinstance(row.get("data"), dict) else {}
+                for facet in FACETS:
+                    narrowed = dict(picked)
+                    narrowed[facet] = []
+                    if not self._matches(row, narrowed):
+                        continue
+                    value = (_provider_of(row.get("email")) if facet == "provider"
+                             else _facet_of(payload, facet))
+                    tally[facet][value] = tally[facet].get(value, 0) + 1
+            for facet in FACETS:
+                ordered = sorted(tally[facet].items(), key=lambda kv: (-kv[1], kv[0]))
+                out[facet] = [{"value": value, "count": count}
+                              for value, count in ordered[:limit]]
+            return out
 
     # Сколько строк доставать за один запрос при потоковом чтении. Порция
     # нужна, чтобы экспорт гигантской базы не собирал её целиком в память.
     STREAM_BATCH = 1000
 
-    def iter_matching(self, groups, min_score=0):
+    def iter_matching(self, groups=None, min_score=0, filters=None):
         """Все подходящие строки — для экспорта, где нужна вся выборка.
 
         Генератор, а не список: на большой базе выборка в память не влезет, и
@@ -478,21 +699,16 @@ class ResultStore:
         локом, чтобы приходящие во время выгрузки результаты не сдвигали
         нумерацию на середине.
         """
+        picked = normalize_filters(filters, groups, min_score)
         with self._lock:
-            positions = list(self._selected(groups))
+            positions = list(self._selected(picked["groups"]))
         for start in range(0, len(positions), self.STREAM_BATCH):
             batch = positions[start:start + self.STREAM_BATCH]
             with self._lock:
                 rows = self._fetch(batch)
             for row in rows:
-                if min_score > 0:
-                    try:
-                        score = int(row["data"].get("engagement_score", 0) or 0)
-                    except (TypeError, ValueError):
-                        continue
-                    if score < min_score:
-                        continue
-                yield row
+                if _filters_are_plain(picked) or self._matches(row, picked):
+                    yield row
 
     def all_rows(self):
         """Вся база строк списком. Только для маленьких выборок и тестов."""
