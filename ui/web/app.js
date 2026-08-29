@@ -511,7 +511,9 @@ async function tick() {
   appendLog(s.log);
   setText($("#logNote"), s.dropped ? `строк лога пропущено: ${num(s.dropped)}` : "");
 
-  show($("#runControls"), s.state === "running" || s.state === "paused");
+  const active = s.state === "running" || s.state === "paused";
+  show($("#runControls"), active);
+  show($("#btnStart"), !active);
   $("#btnStart").disabled = s.running || $("#startHint").classList.contains("is-ready") === false;
   setText($("#btnPause"), s.state === "paused" ? "Продолжить" : "Пауза");
 
@@ -922,7 +924,9 @@ async function parserTick() {
 
   appendParserLog(s.log);
 
-  show($("#pRunControls"), s.state === "running" || s.state === "paused");
+  const pActive = s.state === "running" || s.state === "paused";
+  show($("#pRunControls"), pActive);
+  show($("#pBtnStart"), !pActive);
   setText($("#pBtnPause"), s.state === "paused" ? "Продолжить" : "Пауза");
   $("#pBtnStart").disabled = s.running ||
     $("#pStartHint").classList.contains("is-ready") === false;

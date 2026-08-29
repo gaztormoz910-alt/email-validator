@@ -66,8 +66,16 @@
 
 html, body {
   margin: 0;
-  height: 100%;
+  /* Ровно высота окна, ни пикселем больше. Прокрутка живёт ТОЛЬКО внутри
+     боковой панели и таблицы: стоит корню стать выше окна, и любой фокус
+     внутри начинает утаскивать за собой всю раскладку вместе с шапкой —
+     полосы при overflow:hidden не видно, а прокрутка происходит. */
+  height: 100vh;
+  max-height: 100vh;
   overflow: hidden;
+  /* Никакой прокрутки корня даже программной: scrollIntoView и фокус
+     упираются в этот запрет, а не двигают интерфейс. */
+  overscroll-behavior: none;
   background: var(--bg);
   color: var(--text);
   font: 14px/1.5 var(--font);
@@ -285,21 +293,40 @@ input[type="range"]:hover::-webkit-slider-thumb {
 }
 input[type="range"]:disabled { cursor: not-allowed; opacity: .55; }
 
+/* Переключатель нарисован НА САМОМ чекбоксе, а не на прозрачной подложке
+   рядом с ним.
+
+   Так было раньше и почему это ломало окно. Настоящий чекбокс прятали
+   прозрачностью, а дорожку с кружком рисовали соседним span. Прозрачный
+   элемент браузер считает невидимым: получив на него фокус по щелчку, он
+   честно «прокручивал к нему» — и уводил боковую панель на 342 пикселя
+   вниз, а когда прозрачный вход ещё и выпадал из потока панели, вместе с
+   ним уезжал весь интерфейс вместе с шапкой. Никакими position и
+   scroll-margin это не лечится: пока элемент невидим, прокрутка к нему
+   остаётся законной.
+
+   Теперь дорожка — это и есть чекбокс: appearance:none снимает системный
+   вид, а всё остальное рисуется своими средствами. Фокус попадает на
+   видимый элемент, прокручивать к нему нечего. Заодно исчез лишний узел
+   разметки. */
 .toggle { display: flex; align-items: flex-start; gap: var(--s-3); cursor: pointer; }
-.toggle input { position: absolute; opacity: 0; pointer-events: none; }
-.toggle__track {
-  flex: none; width: 36px; height: 20px; margin-top: 1px;
-  border-radius: var(--r-pill); background: var(--surface-2);
-  position: relative; transition: background .15s var(--ease);
+.toggle input {
+  appearance: none; -webkit-appearance: none;
+  flex: none; position: relative;
+  width: 36px; height: 20px; margin: 1px 0 0;
+  border: 0; border-radius: var(--r-pill);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: background .15s var(--ease);
 }
-.toggle__track::after {
+.toggle input::after {
   content: ""; position: absolute; top: 3px; left: 3px;
   width: 14px; height: 14px; border-radius: 50%;
-  background: var(--text-3); transition: transform .15s var(--ease), background .15s var(--ease);
+  background: var(--text-3);
+  transition: transform .15s var(--ease), background .15s var(--ease);
 }
-.toggle input:checked + .toggle__track { background: var(--accent); }
-.toggle input:checked + .toggle__track::after { transform: translateX(16px); background: var(--on-accent); }
-.toggle input:focus-visible + .toggle__track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.toggle input:checked { background: var(--accent); }
+.toggle input:checked::after { transform: translateX(16px); background: var(--on-accent); }
 .toggle__text { display: flex; flex-direction: column; font-size: 13px; }
 .toggle__text small { color: var(--text-3); font-size: 11px; line-height: 1.4; }
 
@@ -636,8 +663,6 @@ input[type="number"], textarea {
 /* Заметка над логом появляется только когда строки начали теряться. */
 #logNote, #pLogNote, #pFoundNote { min-height: 1.2em; }
 
-/* Кнопки паузы и стопа занимают своё место с самого начала. */
-.run-controls { min-height: 40px; }
 
 /* Числа не должны дёргать соседей при росте: в пропорциональном шрифте
    единица уже семёрки, и счётчик «1111 -> 7777» ощутимо меняет ширину,
@@ -765,3 +790,24 @@ input[type="number"], textarea {
 .modal textarea::placeholder {
   color: var(--text-3); opacity: .75; line-height: 1.7;
 }
+
+/* ══════════════════════════════════════════════════════════════════
+   Запуск: одна ячейка, два слоя
+   ══════════════════════════════════════════════════════════════════
+   Раньше место под «Пауза/Стоп» резервировалось пустотой ПОД кнопкой
+   запуска, и между третьим шагом и настройками зияла дыра в полторы
+   сотни пикселей — настройки оказывались где-то посреди панели. Теперь
+   кнопки занимают ту же ячейку, что и «Начать проверку», и просто
+   сменяют её. Ничего не пустует и ничего не сдвигается: высота ячейки
+   одна и та же в обоих состояниях. */
+.launch { display: grid; }
+.launch > * { grid-area: 1 / 1; }
+.run-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s-2);
+  /* Прежний резерв высоты больше не нужен — её задаёт кнопка запуска,
+     лежащая в той же ячейке. */
+  min-height: 0;
+}
+.run-controls .btn { height: 100%; }
