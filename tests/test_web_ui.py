@@ -1095,3 +1095,115 @@ def test_viewport_start_button_hides_while_the_run_controls_show():
     js = read("app.js")
     assert 'show($("#btnStart"), !active)' in js
     assert 'show($("#pBtnStart"), !pActive)' in js
+
+# ══════════════════════════════════════════════ Поле вставки и адаптация
+
+def test_fits_textarea_has_a_fixed_size_and_scrolls():
+    """Требование: размер поля закреплён, содержимое листается до конца.
+
+    Ручка растягивания в углу выглядела приглашением, но тянуть было
+    некуда: растянутое поле вылезало за края окна вместе с кнопками.
+    """
+    css = read("style.css")
+    body = styles(css, ".modal__box textarea")
+    assert body, "нет правила для поля вставки"
+    assert "resize: none" in body, body
+    assert "height:" in body, body
+    assert "overflow-y: auto" in body, body
+
+
+def test_fits_paste_window_never_leaves_the_screen():
+    """На низком окне кнопки «Отмена» и «Добавить» должны оставаться доступны."""
+    css = read("style.css")
+    box = styles(css, ".modal__box")
+    assert "max-height" in box, box
+    assert "overflow-y: auto" in box, box
+    assert "max-height" in styles(css, ".modal"), styles(css, ".modal")
+
+
+def test_fits_work_area_scrolls_instead_of_the_root():
+    """Прокрутка живёт в рабочей области, а не в корне страницы.
+
+    Разница не косметическая: прокрути корень — и шапка с переключателем
+    экранов уедет за верхний край. Именно это владелец и показывал.
+    """
+    css = read("style.css")
+    layout = styles(css, ".layout")
+    assert "overflow: auto" in layout, layout
+    # А корню прокрутка по-прежнему запрещена.
+    root = styles(css, "html") + styles(css, "body")
+    assert "overflow: hidden" in root, root
+
+
+def test_fits_work_area_keeps_a_usable_minimum():
+    """Ниже этого таблица и лог превращаются в щёлку."""
+    css = read("style.css")
+    body = styles(css, ".work")
+    assert "min-height" in body, body
+
+
+def test_fits_narrow_layout_unlocks_the_sidebar():
+    """В одну колонку панель разворачивается целиком, а листается вся область.
+
+    Тут нужны ОБА послабления сразу. min-height:0 из базового правила нужен
+    широкой раскладке, но разрешает панели схлопнуться; а grid вдобавок
+    обнуляет автоматический минимум всему, чей overflow не visible — из-за
+    чего панель складывалась в полоску в 33 пикселя даже с min-height:auto.
+    """
+    css = read("style.css")
+    narrow = re.search(r"@media \(max-width: 900px\)\s*\{(.*?)\n\}", css, re.S)
+    assert narrow, "нет правил для узкого окна"
+    block = narrow.group(1)
+    assert "grid-template-columns: minmax(0, 1fr)" in block, block
+    assert "min-height: auto" in block, block
+    assert "overflow: visible" in block, block
+    assert "height: auto" in block, block
+
+
+def test_fits_low_window_unlocks_the_sidebar_too():
+    """Ширины на две колонки хватает, а высоты уже нет — тот же приём."""
+    css = read("style.css")
+    low = re.search(r"@media \(max-height: 620px\)\s*\{(.*?)\n\}", css, re.S)
+    assert low, "нет правил для низкого окна"
+    block = low.group(1)
+    assert "min-height: auto" in block, block
+    assert "overflow: visible" in block, block
+    assert "align-content: start" in block, block
+
+
+def test_fits_breakpoints_for_one_selector_go_widest_first():
+    """Пороги, спорящие за ОДИН селектор, идут от широкого к узкому.
+
+    Чередование порогов само по себе безвредно: раскладка и плитки сбора
+    адресов живут в разных наборах правил и друг другу не мешают. Опасно
+    другое — когда один и тот же селектор настраивается дважды и более
+    общее правило стоит позже частного: тогда оно его перебивает, и на
+    узком экране применяется вариант для широкого.
+    """
+    css = read("style.css")
+    blocks = []
+    for found in re.finditer(r"@media \(max-width: (\d+)px\)\s*\{", css):
+        width = int(found.group(1))
+        depth, i = 1, found.end()
+        while i < len(css) and depth:
+            if css[i] == "{":
+                depth += 1
+            elif css[i] == "}":
+                depth -= 1
+            i += 1
+        body = css[found.end():i - 1]
+        selectors = set()
+        for head in re.findall(r"([^{}]+)\{", body):
+            selectors.update(part.strip() for part in head.split(","))
+        blocks.append((width, selectors))
+
+    assert blocks, "нет ни одного порога по ширине"
+    for a in range(len(blocks)):
+        for b in range(a + 1, len(blocks)):
+            shared = blocks[a][1] & blocks[b][1]
+            if not shared:
+                continue
+            assert blocks[a][0] >= blocks[b][0], (
+                "правило для %dpx стоит раньше более широкого %dpx и будет им "
+                "перебито; общие селекторы: %s"
+                % (blocks[a][0], blocks[b][0], sorted(shared)))
