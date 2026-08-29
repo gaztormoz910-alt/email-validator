@@ -1,0 +1,584 @@
+/* ============================================================
+   Email Validator Pro — оформление окна.
+
+   Стек взят у youtube-parser: нативное окно поверх WebView2, а
+   интерфейс — обычная страница. Это и решает то, чего Tkinter не
+   давал: настоящую прокрутку у любого блока, сетки, которые не
+   налезают друг на друга, и тонкие полосы прокрутки.
+
+   Четыре дефекта со скриншотов владельца лечатся здесь же:
+     1. панель слева обрезалась          -> .side__scroll, overflow-y:auto
+     2. кнопка «Сохранить» обрезалась    -> .pane__bar переносится на строки
+     3. заголовки таблицы слипались      -> table-layout:fixed + свои ширины
+     4. пустые вкладки были чёрной дырой -> .empty с объяснением
+
+   Палитра проверяется формулой: python tools/check_contrast.py --web
+   ============================================================ */
+
+:root {
+  /* Поверхности: четыре слоя, каждый следующий ближе к глазу. Холодный
+     сине-серый вместо нейтрального: у чисто серых слоёв нет направления,
+     и на дешёвой матрице соседние ступени сливаются в пятно. */
+  --bg:          #0A0E14;
+  --bg-elev:     #0E141C;
+  --surface:     #151D28;
+  --surface-2:   #1C2734;
+  --hover:       #24313F;
+
+  --border:      #1E2833;
+  --border-str:  #324152;
+
+  --text:        #F1F5F9;
+  --text-2:      #9FB0C3;
+  --text-3:      #8496A9;
+
+  /* Акцент действия — светлый, с тёмным текстом поверх: на тёмной теме
+     это читается лучше тёмной заливки со светлым текстом. */
+  --accent:      #4CC2FF;
+  --accent-2:    #7DD4FF;
+  --on-accent:   #06131C;
+
+  --ok:          #4ADE80;
+  --on-ok:       #04140A;
+  --bad:         #FB7185;
+  --warn:        #FBBF24;
+  --on-warn:     #1A1204;
+  --violet:      #A78BFA;
+
+  --r-sm: 8px;
+  --r:    12px;
+  --r-lg: 16px;
+  --r-pill: 999px;
+
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px;
+  --s-4: 16px; --s-5: 24px; --s-6: 32px;
+
+  --topbar-h: 60px;
+  --side-w: 340px;
+
+  --ease: cubic-bezier(.2, 0, .2, 1);
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+body { user-select: none; }
+input, textarea, .log, .grid { user-select: text; }
+
+svg { width: 20px; height: 20px; fill: currentColor; display: block; }
+
+/* Полосы прокрутки — тонкие и незаметные. В Tkinter они были толстыми и
+   кислотно-синими: полоса прокрутки не должна спорить с содержимым. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-str);
+  border-radius: var(--r-pill);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text-3); background-clip: padding-box; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
+
+/* ============================================================ Шапка */
+.topbar {
+  height: var(--topbar-h);
+  display: flex;
+  align-items: center;
+  gap: var(--s-5);
+  padding: 0 var(--s-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.brand { display: flex; align-items: center; gap: var(--s-3); min-width: var(--side-w); }
+.brand__mark {
+  display: grid; place-items: center;
+  width: 36px; height: 36px;
+  border-radius: var(--r-sm);
+  background: var(--accent); color: var(--on-accent);
+}
+.brand__text { display: flex; flex-direction: column; line-height: 1.2; }
+.brand__text b { font-size: 15px; letter-spacing: .2px; }
+.brand__text small { color: var(--text-3); font-size: 11px; }
+
+.modes { display: flex; gap: 2px; padding: 3px; background: var(--surface); border-radius: var(--r-sm); }
+.mode {
+  border: 0; cursor: pointer;
+  padding: 7px 16px;
+  border-radius: 6px;
+  background: transparent; color: var(--text-2);
+  font: 500 13px var(--font);
+  transition: background .12s var(--ease), color .12s var(--ease);
+}
+.mode:hover { background: var(--hover); color: var(--text); }
+.mode.is-active { background: var(--accent); color: var(--on-accent); }
+
+.run-state {
+  margin-left: auto;
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  color: var(--text-2); font-size: 12px;
+}
+.run-state .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+.run-state[data-state="running"] .dot { background: var(--accent); animation: pulse 1.4s infinite; }
+.run-state[data-state="running"] { color: var(--text); border-color: var(--border-str); }
+.run-state[data-state="done"] .dot { background: var(--ok); }
+.run-state[data-state="paused"] .dot { background: var(--warn); }
+@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+
+/* ============================================================ Каркас */
+.layout {
+  height: calc(100% - var(--topbar-h));
+  display: grid;
+  grid-template-columns: var(--side-w) minmax(0, 1fr);
+  gap: var(--s-5);
+  padding: var(--s-5);
+  /* minmax(0,1fr) обязателен: без него правая колонка растягивается по
+     содержимому таблицы и выталкивает панель за край окна. */
+}
+
+/* ── Левая колонка. Дефект №1 лечится здесь ────────────────── */
+.side {
+  min-height: 0;                 /* иначе grid не даст колонке сжаться */
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+.side__scroll {
+  height: 100%;
+  overflow-y: auto;              /* ← то, чего не было: панель прокручивается */
+  overscroll-behavior: contain;
+  padding: var(--s-5);
+  display: flex; flex-direction: column; gap: var(--s-5);
+}
+
+.step { display: flex; flex-direction: column; gap: var(--s-3); }
+.step__head {
+  margin: 0;
+  display: flex; align-items: center; gap: var(--s-2);
+  font-size: 14px; font-weight: 600;
+}
+.step__num {
+  display: grid; place-items: center;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: var(--surface-2); color: var(--accent);
+  font-size: 11px; font-weight: 700;
+}
+
+/* Зона выбора файла: одна крупная цель вместо поля, кнопки и двух
+   переключателей. Перетаскивание тоже работает. */
+.drop {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: var(--s-4);
+  border: 1px dashed var(--border-str);
+  border-radius: var(--r);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color .12s var(--ease), background .12s var(--ease);
+}
+.drop:hover, .drop.is-over { border-color: var(--accent); background: var(--hover); }
+.drop.is-set { border-style: solid; border-color: var(--ok); }
+.drop__icon { color: var(--text-3); flex: none; }
+.drop.is-set .drop__icon { color: var(--ok); }
+.drop__text { display: flex; flex-direction: column; min-width: 0; }
+.drop__text b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drop__text small { color: var(--text-3); font-size: 11px; }
+
+.src-actions { display: flex; gap: var(--s-2); }
+
+.start-hint { margin: 0; font-size: 12px; color: var(--text-3); }
+.start-hint.is-ready { color: var(--ok); }
+.run-controls { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-2); }
+
+/* ── Настройки: свёрнуты ───────────────────────────────────── */
+.settings {
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--surface);
+}
+.settings__head {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  cursor: pointer; color: var(--text-2);
+  font-size: 13px; font-weight: 500;
+  list-style: none;
+}
+.settings__head::-webkit-details-marker { display: none; }
+.settings__head:hover { color: var(--text); }
+.chev { width: 14px; height: 14px; transition: transform .15s var(--ease); }
+.settings[open] .chev { transform: rotate(90deg); }
+.settings__body {
+  padding: 0 var(--s-4) var(--s-4);
+  display: flex; flex-direction: column; gap: var(--s-4);
+  border-top: 1px solid var(--border);
+  padding-top: var(--s-4);
+}
+
+.field { display: flex; flex-direction: column; gap: var(--s-2); }
+.field__label { font-size: 13px; font-weight: 500; }
+.field__row { display: flex; align-items: center; gap: var(--s-3); }
+.field__row output {
+  min-width: 46px; text-align: center;
+  padding: 3px 8px;
+  background: var(--surface-2); border-radius: var(--r-sm);
+  font-variant-numeric: tabular-nums; font-weight: 600; color: var(--accent);
+}
+.field__hint { color: var(--text-3); font-size: 11px; line-height: 1.4; }
+
+input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  flex: 1; height: 4px; border-radius: var(--r-pill);
+  background: var(--surface-2); cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--accent); border: 0; cursor: pointer;
+}
+
+.toggle { display: flex; align-items: flex-start; gap: var(--s-3); cursor: pointer; }
+.toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.toggle__track {
+  flex: none; width: 36px; height: 20px; margin-top: 1px;
+  border-radius: var(--r-pill); background: var(--surface-2);
+  position: relative; transition: background .15s var(--ease);
+}
+.toggle__track::after {
+  content: ""; position: absolute; top: 3px; left: 3px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--text-3); transition: transform .15s var(--ease), background .15s var(--ease);
+}
+.toggle input:checked + .toggle__track { background: var(--accent); }
+.toggle input:checked + .toggle__track::after { transform: translateX(16px); background: var(--on-accent); }
+.toggle input:focus-visible + .toggle__track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.toggle__text { display: flex; flex-direction: column; font-size: 13px; }
+.toggle__text small { color: var(--text-3); font-size: 11px; line-height: 1.4; }
+
+.seg { display: flex; gap: 2px; padding: 3px; background: var(--surface-2); border-radius: var(--r-sm); }
+.seg__item {
+  flex: 1; border: 0; cursor: pointer;
+  padding: 6px 10px; border-radius: 6px;
+  background: transparent; color: var(--text-2);
+  font: 500 12px var(--font);
+}
+.seg__item:hover { color: var(--text); }
+.seg__item.is-active { background: var(--accent); color: var(--on-accent); }
+
+/* ============================================================ Кнопки */
+.btn {
+  border: 1px solid transparent; cursor: pointer;
+  padding: 9px 16px; border-radius: var(--r-sm);
+  font: 500 13px var(--font);
+  background: var(--surface-2); color: var(--text);
+  transition: background .12s var(--ease), border-color .12s var(--ease), opacity .12s;
+  white-space: nowrap;           /* дефект №2: подпись не режется */
+}
+.btn:hover:not(:disabled) { background: var(--hover); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+
+.btn--primary { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.btn--primary:hover:not(:disabled) { background: var(--accent-2); }
+.btn--ok { background: var(--ok); color: var(--on-ok); font-weight: 600; }
+.btn--ok:hover:not(:disabled) { filter: brightness(1.08); }
+.btn--ghost { background: transparent; border-color: var(--border-str); color: var(--text); }
+.btn--ghost:hover:not(:disabled) { background: var(--hover); }
+.btn--danger:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
+.btn--xl { width: 100%; padding: 15px; font-size: 15px; border-radius: var(--r); }
+.btn--sm { padding: 6px 12px; font-size: 12px; }
+
+/* ============================================================ Правая колонка */
+.work {
+  min-height: 0; min-width: 0;
+  display: flex; flex-direction: column; gap: var(--s-3);
+}
+
+.tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-3); }
+.tile {
+  padding: var(--s-4) var(--s-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-str);
+  border-radius: var(--r);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.tile header { display: flex; align-items: center; gap: var(--s-2); font-size: 13px; font-weight: 600; }
+.tile__ico { font-weight: 700; }
+.tile__num { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.tile small { color: var(--text-3); font-size: 11px; }
+.tile--ok  { border-left-color: var(--ok); }
+.tile--ok  .tile__ico, .tile--ok  .tile__num { color: var(--ok); }
+.tile--bad { border-left-color: var(--bad); }
+.tile--bad .tile__ico, .tile--bad .tile__num { color: var(--bad); }
+.tile--unk { border-left-color: var(--text-3); }
+.tile--unk .tile__ico, .tile--unk .tile__num { color: var(--text-2); }
+
+.tiles--mini { gap: var(--s-2); }
+.mini {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-2);
+  padding: var(--s-2) var(--s-4);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-sm);
+  font-size: 12px; color: var(--text-2);
+}
+.mini b { font-size: 15px; color: var(--text); font-variant-numeric: tabular-nums; }
+
+.progress { display: flex; flex-direction: column; gap: var(--s-2); }
+.progress__text { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-2); }
+.progress__text span:last-child { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
+.progress__track { height: 6px; border-radius: var(--r-pill); background: var(--surface-2); overflow: hidden; }
+.progress__bar {
+  height: 100%; width: 0;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  transition: width .25s var(--ease), background .25s var(--ease);
+}
+.progress.is-done .progress__bar { background: var(--ok); }
+
+/* ============================================================ Панель со вкладками */
+.panel {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+
+.tabs { display: flex; gap: 2px; padding: var(--s-3) var(--s-3) 0; border-bottom: 1px solid var(--border); }
+.tab {
+  border: 0; cursor: pointer;
+  padding: 10px 18px;
+  background: transparent; color: var(--text-2);
+  font: 500 13px var(--font);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tab:hover { color: var(--text); }
+.tab.is-active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.tabpane { display: none; flex: 1; min-height: 0; flex-direction: column; }
+.tabpane.is-active { display: flex; }
+
+/* Дефект №2: панель инструментов переносится, а не обрезается */
+.pane__bar {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--border);
+}
+.pane__bar--wrap { flex-wrap: wrap; row-gap: var(--s-2); }
+.spacer { flex: 1 1 auto; min-width: 0; }
+.pane__actions { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+.muted { color: var(--text-3); font-size: 12px; }
+
+.chips { display: flex; gap: var(--s-2); flex-wrap: wrap; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px 5px 8px;
+  border: 1px solid var(--border-str); border-radius: var(--r-pill);
+  cursor: pointer; font-size: 12px; color: var(--text-2);
+  transition: background .12s var(--ease), border-color .12s var(--ease);
+}
+.chip input { accent-color: var(--accent); margin: 0; }
+.chip:hover { background: var(--hover); color: var(--text); }
+.chip:has(input:checked) { color: var(--text); }
+.chip--ok:has(input:checked)   { border-color: var(--ok);   background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.chip--bad:has(input:checked)  { border-color: var(--bad);  background: color-mix(in srgb, var(--bad) 14%, transparent); }
+.chip--warn:has(input:checked) { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.chip--unk:has(input:checked)  { border-color: var(--border-str); background: var(--hover); }
+
+.minscore, .chunk {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  font-size: 12px; color: var(--text-2);
+}
+input[type="number"], textarea {
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border-str); border-radius: var(--r-sm);
+  padding: 6px 8px; font: 13px var(--font);
+}
+.minscore input, .chunk input { width: 64px; text-align: center; }
+
+/* ── Ход проверки ── */
+.log {
+  flex: 1; min-height: 0; margin: 0;
+  overflow: auto;
+  padding: var(--s-4);
+  background: var(--bg);
+  font: 12px/1.65 var(--mono);
+  white-space: pre;
+}
+.log .l-info  { color: var(--text-2); }
+.log .l-valid { color: var(--ok); }
+.log .l-dead  { color: var(--bad); }
+.log .l-trap  { color: var(--warn); }
+
+/* ── Таблица. Дефект №3 лечится table-layout: fixed ── */
+.tablewrap { flex: 1; min-height: 0; overflow: auto; position: relative; }
+.grid {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;          /* ← колонки больше не налезают друг на друга */
+  font-size: 12.5px;
+}
+.grid th, .grid td {
+  padding: 9px var(--s-3);
+  text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+.grid thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--bg-elev);
+  color: var(--text-2);
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .4px;
+  border-bottom: 1px solid var(--border-str);
+}
+.grid tbody tr:hover { background: var(--surface); }
+/* Ширины подобраны под реальное содержимое: адрес и ответ сервера длинные,
+   пол и качество — в два-три знака. Сумма ровно 100%, иначе table-layout
+   раздаёт остаток последней колонке и она распухает. */
+.grid .c-email   { width: 22%; }
+.grid .c-verdict { width: 10%; }
+.grid .c-score   { width: 7%; text-align: center; }
+.grid .c-prov    { width: 9%; }
+.grid .c-reason  { width: 16%; }
+.grid .c-name    { width: 13%; }
+.grid .c-gender  { width: 5%; text-align: center; }
+.grid .c-country { width: 8%; }
+.grid .c-when    { width: 10%; white-space: nowrap; }
+
+.v { display: inline-flex; align-items: center; gap: 5px; font-weight: 500; }
+.v::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.v--valid { color: var(--ok); }
+.v--invalid { color: var(--bad); }
+.v--spam { color: var(--warn); }
+.v--unknown { color: var(--text-2); }
+
+.score { font-variant-numeric: tabular-nums; font-weight: 600; }
+.score--hi { color: var(--ok); }
+.score--mid { color: var(--warn); }
+.score--low { color: var(--bad); }
+
+.pager {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: var(--s-2) var(--s-4);
+  border-top: 1px solid var(--border);
+  font-size: 12px; color: var(--text-2);
+}
+
+/* ── Пустые состояния. Дефект №4 ── */
+.empty {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--s-2); padding: var(--s-6);
+  text-align: center; color: var(--text-3);
+}
+.empty svg { width: 44px; height: 44px; opacity: .35; margin-bottom: var(--s-2); }
+.empty b { color: var(--text-2); font-size: 14px; }
+.empty span { font-size: 12px; max-width: 420px; line-height: 1.6; }
+.tabpane[data-pane="proxy"] .empty { position: static; flex: 1; }
+
+/* ── Прокси ── */
+.proxy { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s-4); display: flex; flex-direction: column; gap: var(--s-3); }
+.pblock { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: var(--s-4); }
+.pblock h4 { margin: 0 0 2px; font-size: 13px; }
+.pblock .phint { color: var(--text-3); font-size: 11px; margin-bottom: var(--s-3); display: block; line-height: 1.5; }
+.prow { display: flex; justify-content: space-between; gap: var(--s-3); padding: 4px 0; font-size: 12px; }
+.prow span { color: var(--text-2); }
+.prow b { font-variant-numeric: tabular-nums; }
+.pmetrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-3); }
+.pmetric { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: var(--s-3) var(--s-4); }
+.pmetric span { display: block; color: var(--text-2); font-size: 11px; }
+.pmetric b { display: block; font-size: 20px; font-weight: 700; margin: 2px 0; }
+.pmetric small { color: var(--text-3); font-size: 10px; line-height: 1.4; display: block; }
+
+/* ============================================================ Окно вставки */
+.modal { border: 0; padding: 0; background: transparent; }
+.modal::backdrop { background: rgba(4, 8, 12, .72); }
+.modal__box {
+  width: min(620px, 92vw);
+  background: var(--bg-elev);
+  border: 1px solid var(--border-str);
+  border-radius: var(--r-lg);
+  padding: var(--s-5);
+  display: flex; flex-direction: column; gap: var(--s-3);
+  color: var(--text);
+}
+.modal__box h3 { margin: 0; font-size: 15px; }
+.modal__box textarea { width: 100%; resize: vertical; font: 12px/1.5 var(--mono); }
+.modal__box menu { display: flex; justify-content: flex-end; gap: var(--s-2); margin: 0; padding: 0; }
+
+/* ============================================================ Уведомление */
+.toast {
+  position: fixed; bottom: var(--s-5); left: 50%; transform: translateX(-50%);
+  padding: 11px 20px;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border-str); border-radius: var(--r-pill);
+  font-size: 13px; box-shadow: 0 8px 32px rgba(0, 0, 0, .45);
+  z-index: 90;
+}
+.toast--ok  { border-color: var(--ok); }
+.toast--bad { border-color: var(--bad); }
+
+/* ============================================================ Узкое окно */
+@media (max-width: 1180px) {
+  .layout { grid-template-columns: 296px minmax(0, 1fr); gap: var(--s-3); padding: var(--s-3); }
+  .tile__num { font-size: 26px; }
+  .brand { min-width: 0; }
+  .brand__text small { display: none; }
+}
+@media (max-width: 900px) {
+  .layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .side { max-height: 42vh; }
+  .tiles--mini { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ── Второй экран: сбор адресов ────────────────────────────────
+   Своих красок он не заводит. Всё те же плитки, панель и таблица:
+   переключение режима не должно ощущаться переходом в другую
+   программу. Здесь только то, чего у проверки нет. */
+
+.tiles--four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+.step__note {
+  font-size: 11px; font-weight: 500; color: var(--text-3);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-pill); padding: 2px 8px; margin-left: var(--s-2);
+}
+
+.select {
+  width: 100%;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 9px var(--s-3); font: inherit; font-size: 13px;
+  cursor: pointer;
+}
+.select:hover { border-color: var(--border-str); }
+.select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* У находок всего две колонки, и адрес важнее запроса. */
+.grid--found .c-email { width: 42%; }
+.grid--found .c-dork  { width: 58%; }
+
+@media (max-width: 1100px) {
+  .tiles--four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) {
+  .tiles--four { grid-template-columns: minmax(0, 1fr); }
+}

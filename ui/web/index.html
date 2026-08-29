@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Email Validator Pro</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-token="__TOKEN__">
+
+<!-- ============================================================
+     Шапка: что за программа и в каком она сейчас состоянии.
+     Состояние вынесено сюда намеренно — это первое, что ищут
+     глазами, возвращаясь к окну через полчаса.
+     ============================================================ -->
+<header class="topbar">
+  <div class="brand">
+    <span class="brand__mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3z"/></svg>
+    </span>
+    <span class="brand__text">
+      <b>Email Validator</b>
+      <small>проверка адресов перед рассылкой</small>
+    </span>
+  </div>
+
+  <nav class="modes" role="tablist" aria-label="Режим работы">
+    <button class="mode is-active" data-mode="validator" role="tab" aria-selected="true">Проверка базы</button>
+    <button class="mode" data-mode="parser" role="tab" aria-selected="false">Сбор адресов</button>
+  </nav>
+
+  <div class="run-state" id="runState" data-state="idle">
+    <span class="dot" aria-hidden="true"></span>
+    <span id="runStateText">Готов к работе</span>
+  </div>
+</header>
+
+<main class="layout" id="viewValidator">
+
+  <!-- ==========================================================
+       Левая колонка: три шага в том порядке, в каком их делают.
+       Своя полоса прокрутки — контент длиннее окна на маленьких
+       экранах, и обрезать его нельзя.
+       ========================================================== -->
+  <aside class="side" id="side">
+    <div class="side__scroll">
+
+      <section class="step" data-step="1">
+        <h2 class="step__head"><span class="step__num">1</span> Адреса для проверки</h2>
+
+        <div class="drop" id="dropEmails" tabindex="0" role="button"
+             aria-label="Выбрать файл со списком адресов">
+          <svg class="drop__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm0 7V3.5L19.5 9H14z"/></svg>
+          <div class="drop__text">
+            <b id="emailsTitle">Выберите файл</b>
+            <small id="emailsHint">txt или csv · можно перетащить сюда</small>
+          </div>
+        </div>
+
+        <div class="src-actions">
+          <button class="btn btn--ghost" id="pasteEmails">Вставить текстом</button>
+          <button class="btn btn--ghost btn--danger" id="clearEmails" hidden>Очистить</button>
+        </div>
+      </section>
+
+      <section class="step" data-step="2">
+        <h2 class="step__head"><span class="step__num">2</span> Прокси</h2>
+
+        <div class="drop" id="dropProxies" tabindex="0" role="button"
+             aria-label="Выбрать файл со списком прокси">
+          <svg class="drop__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2c1.7 0 3.2 2.4 3.8 6H8.2C8.8 6.4 10.3 4 12 4zM4.3 11h3.4c-.1 1.3-.1 2.7 0 4H4.3a8 8 0 0 1 0-4zm0 6h3.9c.6 3.6 2.1 6 3.8 6-3.4 0-6.4-2.4-7.7-6zm5.6 0h4.2c-.6 3.6-2.1 6-2.1 6s-1.5-2.4-2.1-6zm6.2 0h3.9c-1.3 3.6-4.3 6-7.7 6 1.7 0 3.2-2.4 3.8-6zm.2-2c.1-1.3.1-2.7 0-4h3.4a8 8 0 0 1 0 4h-3.4zM12 4c3.4 0 6.4 2.4 7.7 6h-3.9C15.2 6.4 13.7 4 12 4z"/></svg>
+          <div class="drop__text">
+            <b id="proxiesTitle">Выберите файл</b>
+            <small id="proxiesHint">socks5, socks4 или http</small>
+          </div>
+        </div>
+
+        <div class="src-actions">
+          <button class="btn btn--ghost" id="pasteProxies">Вставить текстом</button>
+          <button class="btn btn--ghost btn--danger" id="clearProxies" hidden>Очистить</button>
+        </div>
+      </section>
+
+      <section class="step" data-step="3">
+        <h2 class="step__head"><span class="step__num">3</span> Запуск</h2>
+
+        <button class="btn btn--primary btn--xl" id="btnStart">Начать проверку</button>
+        <p class="start-hint" id="startHint">Не хватает: адреса и прокси</p>
+
+        <div class="run-controls" hidden id="runControls">
+          <button class="btn btn--ghost" id="btnPause">Пауза</button>
+          <button class="btn btn--ghost btn--danger" id="btnStop">Стоп</button>
+        </div>
+      </section>
+
+      <!-- Экспертное — свёрнуто. Раскрывается по щелчку, состояние
+           запоминается на время сеанса. -->
+      <details class="settings" id="settings">
+        <summary class="settings__head">
+          <svg viewBox="0 0 24 24" class="chev" aria-hidden="true"><path d="M8 5l8 7-8 7z"/></svg>
+          Настройки
+        </summary>
+
+        <div class="settings__body">
+          <label class="field">
+            <span class="field__label">Одновременных проверок</span>
+            <span class="field__row">
+              <input type="range" id="threads" min="1" max="300" value="300">
+              <output id="threadsOut">300</output>
+            </span>
+            <small class="field__hint">больше — быстрее, но выше нагрузка на сеть</small>
+          </label>
+
+          <label class="field">
+            <span class="field__label">Ожидание ответа, сек</span>
+            <span class="field__row">
+              <input type="range" id="timeout" min="1" max="120" value="5">
+              <output id="timeoutOut">5</output>
+            </span>
+            <small class="field__hint">на одно соединение; на адрес — до ×6 (попытки через разные прокси)</small>
+          </label>
+
+          <label class="toggle">
+            <input type="checkbox" id="optAi" checked>
+            <span class="toggle__track"></span>
+            <span class="toggle__text">
+              Отсеивать адреса-роботы
+              <small>распознаёт бессмысленные имена вроде xk3n9fj2q@</small>
+            </span>
+          </label>
+
+          <label class="toggle">
+            <input type="checkbox" id="optOsint" checked>
+            <span class="toggle__track"></span>
+            <span class="toggle__text">
+              Искать имя, пол и страну
+              <small>медленнее, но заполняет колонки для сегментации</small>
+            </span>
+          </label>
+
+          <label class="toggle">
+            <input type="checkbox" id="optCache" checked>
+            <span class="toggle__track"></span>
+            <span class="toggle__text">
+              Не перепроверять известное
+              <small>выключите, если базе больше месяца или сменили прокси</small>
+            </span>
+          </label>
+
+          <div class="field">
+            <span class="field__label">Колонка «Страна»</span>
+            <div class="seg" role="group">
+              <button class="seg__item is-active" data-country="coverage">Заполненность</button>
+              <button class="seg__item" data-country="accuracy">Точность</button>
+            </div>
+            <small class="field__hint" id="countryHint">заполнено почти всегда, ~треть стран — догадка</small>
+          </div>
+        </div>
+      </details>
+
+    </div>
+  </aside>
+
+  <!-- ==========================================================
+       Правая колонка
+       ========================================================== -->
+  <section class="work">
+
+    <div class="tiles">
+      <article class="tile tile--ok">
+        <header><span class="tile__ico">✓</span> Можно слать</header>
+        <b class="tile__num" id="statValid">0</b>
+        <small>доказано, что ящик существует</small>
+      </article>
+
+      <article class="tile tile--bad">
+        <header><span class="tile__ico">✕</span> Слать нельзя</header>
+        <b class="tile__num" id="statInvalid">0</b>
+        <small>доказано, что ящика нет</small>
+      </article>
+
+      <article class="tile tile--unk">
+        <header><span class="tile__ico">?</span> Не доказано</header>
+        <b class="tile__num" id="statUnknown">0</b>
+        <small>ответа не получили — лучше не слать</small>
+      </article>
+    </div>
+
+    <div class="tiles tiles--mini">
+      <article class="mini"><span>Всего проверено</span><b id="statTotal">0</b></article>
+      <article class="mini"><span>Ловушки и роль-адреса</span><b id="statSpam">0</b></article>
+      <article class="mini"><span>Имена найдены</span><b id="statNames">0</b></article>
+    </div>
+
+    <div class="progress" id="progressWrap">
+      <div class="progress__text">
+        <span id="progressLabel">Проверка ещё не запускалась</span>
+        <span id="progressPct">0%</span>
+      </div>
+      <div class="progress__track"><div class="progress__bar" id="progressBar"></div></div>
+    </div>
+
+    <div class="panel">
+      <nav class="tabs" role="tablist">
+        <button class="tab is-active" data-tab="log" role="tab">Ход проверки</button>
+        <button class="tab" data-tab="results" role="tab">Результаты</button>
+        <button class="tab" data-tab="proxy" role="tab">Прокси</button>
+      </nav>
+
+      <!-- ── Ход проверки ── -->
+      <div class="tabpane is-active" data-pane="log">
+        <div class="pane__bar">
+          <span class="muted" id="logNote"></span>
+          <button class="btn btn--ghost btn--sm" id="copyLog">Копировать</button>
+        </div>
+        <pre class="log" id="log"></pre>
+      </div>
+
+      <!-- ── Результаты ── -->
+      <div class="tabpane" data-pane="results">
+        <div class="pane__bar pane__bar--wrap">
+          <div class="chips" id="filters">
+            <label class="chip chip--ok"><input type="checkbox" value="valid" checked><span>Можно слать</span></label>
+            <label class="chip chip--bad"><input type="checkbox" value="invalid"><span>Слать нельзя</span></label>
+            <label class="chip chip--warn"><input type="checkbox" value="spam"><span>Ловушки и роль</span></label>
+            <label class="chip chip--unk"><input type="checkbox" value="unknown"><span>Не доказано</span></label>
+          </div>
+
+          <label class="minscore">Качество от
+            <input type="number" id="minScore" min="0" max="100" value="0">
+          </label>
+
+          <div class="spacer"></div>
+
+          <div class="pane__actions">
+            <button class="btn btn--ghost btn--sm" id="btnCopy">Копировать</button>
+            <button class="btn btn--ghost btn--sm" id="btnSuppress">Отписки</button>
+            <label class="chunk">файлы по
+              <input type="number" id="chunk" min="0" value="0">
+            </label>
+            <button class="btn btn--ok btn--sm" id="btnExport">Сохранить</button>
+          </div>
+        </div>
+
+        <div class="tablewrap" id="tablewrap">
+          <table class="grid" id="grid">
+            <thead>
+              <tr>
+                <th class="c-email">Адрес</th>
+                <th class="c-verdict">Вердикт</th>
+                <th class="c-score" title="Оценка качества адреса, 0-100">Скор</th>
+                <th class="c-prov">Почтовик</th>
+                <th class="c-reason">Что ответил сервер</th>
+                <th class="c-name">Имя</th>
+                <th class="c-gender">Пол</th>
+                <th class="c-country">Страна</th>
+                <th class="c-when" title="Когда адрес проверен">Когда</th>
+              </tr>
+            </thead>
+            <tbody id="gridBody"></tbody>
+          </table>
+
+          <div class="empty" id="gridEmpty">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6H4v12h16V6zm0-2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h16zM6 9h12v2H6V9zm0 4h8v2H6v-2z"/></svg>
+            <b>Здесь появятся проверенные адреса</b>
+            <span>Загрузите базу и прокси, затем нажмите «Начать проверку»</span>
+          </div>
+        </div>
+
+        <div class="pager">
+          <button class="btn btn--ghost btn--sm" id="pagePrev" aria-label="Предыдущая страница">‹</button>
+          <span id="pageLabel">Стр. 1 / 1</span>
+          <button class="btn btn--ghost btn--sm" id="pageNext" aria-label="Следующая страница">›</button>
+          <span class="muted" id="pageCount"></span>
+        </div>
+      </div>
+
+      <!-- ── Прокси ── -->
+      <div class="tabpane" data-pane="proxy">
+        <div class="proxy" id="proxyBody">
+          <div class="empty">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16z"/></svg>
+            <b>Профиль прокси появится после запуска</b>
+            <span>Валидатор определит выходной IP каждого прокси, схлопнет дубли
+                  и спросит у почтовиков, пустят ли они этот адрес</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ============================================================
+     Второй экран: сбор адресов. Раньше эта кнопка в шапке просто
+     советовала перезапустить программу с флагом --classic — то есть
+     половина продукта жила в другом окне.
+     Слева те же три шага, справа те же плитки и вкладки: у человека
+     не должно быть ощущения, что он попал в другую программу.
+     ============================================================ -->
+<main class="layout" id="viewParser" hidden>
+
+  <aside class="side">
+    <div class="side__scroll">
+
+      <section class="step" data-step="1">
+        <h2 class="step__head"><span class="step__num">1</span> Поисковые запросы</h2>
+
+        <div class="drop" id="dropDorks" tabindex="0" role="button"
+             aria-label="Выбрать файл с поисковыми запросами">
+          <svg class="drop__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.8l-.3-.3a6.5 6.5 0 1 0-.7.7l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"/></svg>
+          <div class="drop__text">
+            <b id="dorksTitle">Выберите файл</b>
+            <small id="dorksHint">по запросу в строке · можно перетащить сюда</small>
+          </div>
+        </div>
+
+        <div class="src-actions">
+          <button class="btn btn--ghost" id="pasteDorks">Вставить текстом</button>
+          <button class="btn btn--ghost btn--danger" id="clearDorks" hidden>Очистить</button>
+        </div>
+      </section>
+
+      <section class="step" data-step="2">
+        <h2 class="step__head"><span class="step__num">2</span> Прокси
+          <span class="step__note">необязательно</span></h2>
+
+        <div class="drop" id="dropPproxy" tabindex="0" role="button"
+             aria-label="Выбрать файл со списком прокси для сбора">
+          <svg class="drop__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2c1.7 0 3.2 2.4 3.8 6H8.2C8.8 6.4 10.3 4 12 4zM4.3 11h3.4c-.1 1.3-.1 2.7 0 4H4.3a8 8 0 0 1 0-4zm0 6h3.9c.6 3.6 2.1 6 3.8 6-3.4 0-6.4-2.4-7.7-6zm5.6 0h4.2c-.6 3.6-2.1 6-2.1 6s-1.5-2.4-2.1-6zm6.2 0h3.9c-1.3 3.6-4.3 6-7.7 6 1.7 0 3.2-2.4 3.8-6zm.2-2c.1-1.3.1-2.7 0-4h3.4a8 8 0 0 1 0 4h-3.4z"/></svg>
+          <div class="drop__text">
+            <b id="pproxyTitle">Выберите файл</b>
+            <small id="pproxyHint">нужны движкам с пометкой Proxies</small>
+          </div>
+        </div>
+
+        <div class="src-actions">
+          <button class="btn btn--ghost" id="pastePproxy">Вставить текстом</button>
+          <button class="btn btn--ghost btn--danger" id="clearPproxy" hidden>Очистить</button>
+        </div>
+      </section>
+
+      <section class="step" data-step="3">
+        <h2 class="step__head"><span class="step__num">3</span> Запуск</h2>
+
+        <label class="field">
+          <span class="field__label">Где искать</span>
+          <select class="select" id="pEngine"></select>
+          <small class="field__hint" id="pEngineHint">DuckDuckGo Lite ходит напрямую, прокси ему не нужны</small>
+        </label>
+
+        <button class="btn btn--primary btn--xl" id="pBtnStart">Начать сбор</button>
+        <p class="start-hint" id="pStartHint">Не хватает: дорки</p>
+
+        <div class="run-controls" hidden id="pRunControls">
+          <button class="btn btn--ghost" id="pBtnPause">Пауза</button>
+          <button class="btn btn--ghost btn--danger" id="pBtnStop">Стоп</button>
+        </div>
+      </section>
+
+      <details class="settings" id="pSettings">
+        <summary class="settings__head">
+          <svg viewBox="0 0 24 24" class="chev" aria-hidden="true"><path d="M8 5l8 7-8 7z"/></svg>
+          Настройки
+        </summary>
+
+        <div class="settings__body">
+          <label class="field">
+            <span class="field__label">Одновременных запросов</span>
+            <span class="field__row">
+              <input type="range" id="pThreads" min="1" max="200" value="20">
+              <output id="pThreadsOut">20</output>
+            </span>
+            <small class="field__hint">поисковики банят за напор быстрее, чем почтовики</small>
+          </label>
+
+          <label class="field">
+            <span class="field__label">Ожидание ответа, сек</span>
+            <span class="field__row">
+              <input type="range" id="pTimeout" min="1" max="120" value="15">
+              <output id="pTimeoutOut">15</output>
+            </span>
+            <small class="field__hint">через Tor ответы приходят медленнее, чем напрямую</small>
+          </label>
+        </div>
+      </details>
+
+    </div>
+  </aside>
+
+  <section class="work">
+
+    <div class="tiles tiles--mini tiles--four">
+      <article class="mini"><span>Запросов пройдено</span><b id="pStatDorks">0</b></article>
+      <article class="mini"><span>Страниц выдачи</span><b id="pStatPages">0</b></article>
+      <article class="mini"><span>Просмотрено фрагментов</span><b id="pStatSnippets">0</b></article>
+      <article class="mini"><span>Адресов найдено</span><b id="pStatFound">0</b></article>
+    </div>
+
+    <div class="progress">
+      <div class="progress__text">
+        <span id="pProgressLabel">Сбор ещё не запускался</span>
+        <span id="pProgressPct">0%</span>
+      </div>
+      <div class="progress__track"><div class="progress__bar" id="pProgressBar"></div></div>
+    </div>
+
+    <div class="panel">
+      <nav class="tabs" role="tablist">
+        <button class="tab is-active" data-ptab="log" role="tab">Ход сбора</button>
+        <button class="tab" data-ptab="found" role="tab">Найденные адреса</button>
+      </nav>
+
+      <div class="tabpane is-active" data-ppane="log">
+        <div class="pane__bar">
+          <span class="muted" id="pLogNote"></span>
+          <button class="btn btn--ghost btn--sm" id="pCopyLog">Копировать</button>
+        </div>
+        <pre class="log" id="pLog"></pre>
+      </div>
+
+      <div class="tabpane" data-ppane="found">
+        <div class="pane__bar pane__bar--wrap">
+          <div class="pane__actions">
+            <button class="btn btn--ghost btn--sm" id="pCopyRows">Копировать адреса</button>
+            <button class="btn btn--primary btn--sm" id="pExport">Сохранить</button>
+          </div>
+          <span class="muted" id="pFoundNote"></span>
+        </div>
+
+        <div class="grid-wrap">
+          <table class="grid grid--found">
+            <thead>
+              <tr>
+                <th class="c-email">Адрес</th>
+                <th class="c-dork">Каким запросом найден</th>
+              </tr>
+            </thead>
+            <tbody id="pGridBody"></tbody>
+          </table>
+          <div class="empty" id="pGridEmpty">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.8l-.3-.3a6.5 6.5 0 1 0-.7.7l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"/></svg>
+            <b>Адреса появятся здесь по ходу сбора</b>
+            <span>Каждый найденный адрес показывается один раз, даже если
+                  он попался сразу нескольким запросам</span>
+          </div>
+        </div>
+
+        <div class="pager">
+          <button class="btn btn--ghost btn--sm" id="pPrev">‹</button>
+          <span class="muted" id="pPageInfo">Стр. 1 / 1</span>
+          <button class="btn btn--ghost btn--sm" id="pNext">›</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+
+<!-- Окно вставки текста: вместо файла можно вставить список руками -->
+<dialog class="modal" id="pasteModal">
+  <form method="dialog" class="modal__box">
+    <h3 id="pasteTitle">Вставьте список</h3>
+    <textarea id="pasteArea" rows="12" spellcheck="false"
+              placeholder="Одна запись в строке"></textarea>
+    <menu>
+      <button class="btn btn--ghost" value="cancel">Отмена</button>
+      <button class="btn btn--primary" id="pasteOk" value="ok">Добавить</button>
+    </menu>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

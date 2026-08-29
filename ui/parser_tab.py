@@ -182,11 +182,13 @@ class ParserTabMixin:
         if hasattr(self, 'parser_pipeline') and self.parser_pipeline and self.parser_pipeline.is_alive():
             if self.parser_pipeline._pause_event.is_set():
                 self.parser_pipeline.resume()
-                self.pause_btn.configure(text="⏸", fg_color=ACCENT_WARNING)
+                self.pause_btn.configure(text="Пауза", fg_color="transparent",
+                                         text_color=TEXT_MAIN)
                 self.safe_parser_log("[Система] Парсинг возобновлен (RESUMED).", "info")
             else:
                 self.parser_pipeline.pause()
-                self.pause_btn.configure(text="▶", fg_color=ACCENT_SUCCESS)
+                self.pause_btn.configure(text="Продолжить", fg_color=ACCENT_SUCCESS,
+                                         text_color=TEXT_ON_SUCCESS)
                 self.safe_parser_log("[Система] Парсинг приостановлен (PAUSE).", "info")
 
     def stop_parsing(self):

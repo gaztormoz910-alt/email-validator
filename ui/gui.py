@@ -102,6 +102,10 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
 
         self._build_sidebar()
         self._build_main_workspace()
+        # Подсказка под кнопкой запуска должна быть верной сразу, а не после
+        # первого действия: при старте не хватает обоих файлов, и об этом
+        # надо сказать до того, как человек нажмёт на молчащую кнопку.
+        self._refresh_start_hint()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         # Fix for Cyrillic keyboard layout shortcuts using hardware keycodes (Windows)
@@ -164,17 +168,17 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
             self.parser_workspace.pack_forget()
             self.validator_workspace.pack(fill="both", expand=True)
             self.main_title_lbl.configure(text="EMAIL VALIDATOR PRO")
-            self.sub_title_lbl.configure(text="v4.0 - Продвинутая фильтрация")
+            self.sub_title_lbl.configure(text="проверка адресов перед рассылкой")
         else:
             self.validator_sidebar_frame.pack_forget()
             self.parser_sidebar_frame.pack(fill="both", expand=True)
             self.validator_workspace.pack_forget()
             self.parser_workspace.pack(fill="both", expand=True)
-            self.main_title_lbl.configure(text="OSINT EMAIL PARSER")
+            self.main_title_lbl.configure(text="СБОР АДРЕСОВ")
             
             # Update subtitle based on search engine
             engine = self.engine_var.get()
-            self.sub_title_lbl.configure(text=f"{engine} Dork Engine")
+            self.sub_title_lbl.configure(text=f"сбор адресов · {engine}")
 
     def _on_engine_change(self, value):
         tor_engines = ["AOL (Tor)", "Yahoo (Tor)"]
@@ -213,14 +217,15 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
             self.parser_proxy_frame.pack(fill="x", before=self.engine_frame)
             
         if self.app_mode == "Парсер":
-            self.sub_title_lbl.configure(text=f"{value} Dork Engine")
+            self.sub_title_lbl.configure(text=f"сбор адресов · {value}")
 
     def clear_emails(self):
         self.email_sources.clear()
         self.loaded_lbl.configure(text="Загружено: 0")
         self.db_selector.set_text("")
         self.db_selector.textbox.delete("1.0", "end")
-        self.safe_log("[INFO] База Email адресов очищена.", "trap")
+        self.safe_log("[INFO] Список адресов очищен.", "trap")
+        self._refresh_start_hint()
         
     def clear_proxies(self):
         self.proxy_sources.clear()
@@ -228,7 +233,8 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         self.proxy_selector.set_text("")
         self.proxy_selector.textbox.delete("1.0", "end")
         self.safe_log("[INFO] SOCKS5 прокси очищены.", "trap")
-        
+        self._refresh_start_hint()
+
     def _on_country_mode_change(self, value):
         """Переключает пороги предсказания страны по имени.
 
@@ -275,6 +281,28 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
             return True
         except (RuntimeError, tk.TclError):
             return False
+
+    def _refresh_start_hint(self):
+        """Обновляет строку под кнопкой запуска под текущее состояние.
+
+        Одна строка отвечает на единственный вопрос, который возникает у
+        кнопки: почему она не работает. Молчащая кнопка читается как
+        сломанная, а «не хватает прокси» читается как задача.
+        """
+        hint = getattr(self, "start_hint", None)
+        if hint is None:
+            return
+        missing = []
+        if not self.email_sources:
+            missing.append("адреса")
+        if not self.proxy_sources:
+            missing.append("прокси")
+        if missing:
+            hint.configure(text="Не хватает: " + " и ".join(missing),
+                           text_color=TEXT_DIM)
+        else:
+            hint.configure(text="Всё готово — можно запускать",
+                           text_color=ACCENT_SUCCESS)
 
     def _attach_sources(self, paths, sources, selector, label, template,
                         log, mode="lines"):
@@ -437,6 +465,7 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
                              self.loaded_lbl, "Загружено строк: {count}",
                              self.safe_log, mode="emails")
         self._scan_base_composition()
+        self._refresh_start_hint()
 
     # Сколько адресов нюхать для отчёта о составе базы. Это доли, а не
     # абсолютные числа: на двухстах тысячах адресов доля Gmail отличается от
@@ -483,6 +512,7 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         self._count_lines_async(self.email_sources, self.loaded_lbl,
                                 "Загружено строк: {count}")
         self._scan_base_composition()
+        self._refresh_start_hint()
 
     def load_proxies(self):
         # Предпросмотр показывает ровно то, что пойдёт в работу. Раньше здесь
@@ -493,11 +523,13 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         self._attach_sources(filepaths, self.proxy_sources, self.proxy_selector,
                              self.loaded_proxies_lbl, "Прокси (оценка): {count}",
                              self.safe_log)
+        self._refresh_start_hint()
 
     def on_proxies_pasted(self, text):
         self.proxy_sources.append({"type": "text", "content": text})
         self._count_lines_async(self.proxy_sources, self.loaded_proxies_lbl,
                                 "Прокси (оценка): {count}")
+        self._refresh_start_hint()
 
     def _set_sidebar_state(self, state):
         if hasattr(self, 'engine_selector'):
@@ -517,11 +549,13 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
     def _set_playback_state(self, state):
         if state == "running":
             self.start_btn.configure(state="disabled")
-            self.pause_btn.configure(state="normal", text="⏸", fg_color=ACCENT_WARNING)
+            self.pause_btn.configure(state="normal", text="Пауза",
+                                     fg_color="transparent")
             self.stop_btn.configure(state="normal")
         elif state == "stopped":
             self.start_btn.configure(state="normal")
-            self.pause_btn.configure(state="disabled", text="⏸", fg_color=ACCENT_WARNING)
+            self.pause_btn.configure(state="disabled", text="Пауза",
+                                     fg_color="transparent")
             self.stop_btn.configure(state="disabled")
 
     def start_process(self):
@@ -633,10 +667,12 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
     def pause_validation(self):
         is_paused = self.pipeline.pause()
         if is_paused:
-            self.pause_btn.configure(text="▶", fg_color=ACCENT_SUCCESS)
+            self.pause_btn.configure(text="Продолжить", fg_color=ACCENT_SUCCESS,
+                                     text_color=TEXT_ON_SUCCESS)
             self.safe_log("[INFO] Процесс приостановлен (PAUSE).", "info")
         else:
-            self.pause_btn.configure(text="⏸", fg_color=ACCENT_WARNING)
+            self.pause_btn.configure(text="Пауза", fg_color="transparent",
+                                     text_color=TEXT_MAIN)
             self.safe_log("[INFO] Процесс возобновлен (RESUMED).", "info")
 
     def stop_validation(self):
