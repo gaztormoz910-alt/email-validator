@@ -12,7 +12,8 @@ PySocks>=1.7.1            # import socks — SOCKS4/5 и HTTP CONNECT для SMT
 dnspython>=2.6.0          # import dns — MX, PTR, DNSBL, DoH
 
 # --- Интерфейс ---
-customtkinter>=5.2.0
+pywebview>=5.0            # окно на веб-стеке (WebView2) — то, что открывается по умолчанию
+customtkinter>=5.2.0      # прежнее окно, запускается флагом --classic
 psutil>=5.9.0             # определение числа потоков по железу
 
 # --- Обогащение данными ---
