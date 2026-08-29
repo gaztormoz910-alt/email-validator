@@ -82,7 +82,18 @@ class PanelsMixin:
         self.threads_slider.pack(fill="x", padx=20, pady=(0, 20))
         
         self.timeout_slider = ProxyHunterSlider(self.validator_sidebar_frame, "Таймаут (сек)", 1, 300, 5)
-        self.timeout_slider.pack(fill="x", padx=20, pady=(0, 25))
+        self.timeout_slider.pack(fill="x", padx=20, pady=(0, 4))
+
+        # Подпись обязательна. Ползунок задаёт таймаут ОДНОГО соединения, а на
+        # адрес приходится несколько попыток через разные прокси, и общий
+        # потолок считается как таймаут×6. Без этой строки владелец ставил 10
+        # секунд, видел в причине «проверялся дольше 60с» и считал это сбоем.
+        self.timeout_hint = ctk.CTkLabel(
+            self.validator_sidebar_frame,
+            text="на одно соединение; на адрес — до ×6 (попытки через разные прокси)",
+            text_color=TEXT_DIM, font=ctk.CTkFont(size=10), justify="left",
+            wraplength=340)
+        self.timeout_hint.pack(padx=20, anchor="w", pady=(0, 25))
 
         self.chk_ai = ctk.CTkSwitch(self.validator_sidebar_frame, text="Использовать AI фильтр (ML)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color=TEXT_ON_ACCENT, button_hover_color=TEXT_MAIN)
         self.chk_ai.select()
@@ -208,8 +219,11 @@ class PanelsMixin:
         self._create_stat_card(self.dashboard_frame, 0, 0, "Всего собрано", "0", ACCENT_PRIMARY, "🌐", "stat_0")
         self._create_stat_card(self.dashboard_frame, 0, 1, "Валидные", "0", ACCENT_SUCCESS, "⚡", "stat_1")
         self._create_stat_card(self.dashboard_frame, 0, 2, "Невалидные", "0", ACCENT_ERROR, "🗑", "stat_2")
-        self._create_stat_card(self.dashboard_frame, 1, 0, "Спам / Ловушки", "0", ACCENT_WARNING, "⚠️", "stat_3")
-        self._create_stat_card(self.dashboard_frame, 1, 1, "Неизвестно", "0", TEXT_MUTED, "❓", "stat_4")
+        # Подписи описывают РЕШЕНИЕ, а не внутреннее имя статуса. «Спам /
+        # Ловушки» раньше включал ещё и Risky, то есть показывал полсотни
+        # там, где ловушек было шесть.
+        self._create_stat_card(self.dashboard_frame, 1, 0, "Слать нельзя", "0", ACCENT_WARNING, "⚠️", "stat_3")
+        self._create_stat_card(self.dashboard_frame, 1, 1, "Не доказано", "0", TEXT_MUTED, "❓", "stat_4")
         self._create_stat_card(self.dashboard_frame, 1, 2, "Имена найдены", "0", ACCENT_PURPLE, "👤", "stat_names")
 
         # Прогресс-бар (Validator)
@@ -301,10 +315,10 @@ class PanelsMixin:
         self.chk_invalid = ctk.CTkCheckBox(self.filter_frame, text="Invalid", variable=self.chk_invalid_var, command=self._on_filter_change, fg_color=ACCENT_ERROR, hover_color=ACCENT_ERROR_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
         self.chk_invalid.pack(side="left", padx=(0, 10), pady=8)
 
-        self.chk_spam = ctk.CTkCheckBox(self.filter_frame, text="Spam/Trap", variable=self.chk_spam_var, command=self._on_filter_change, fg_color=ACCENT_WARNING, hover_color=ACCENT_WARNING_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
+        self.chk_spam = ctk.CTkCheckBox(self.filter_frame, text="Слать нельзя", variable=self.chk_spam_var, command=self._on_filter_change, fg_color=ACCENT_WARNING, hover_color=ACCENT_WARNING_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
         self.chk_spam.pack(side="left", padx=(0, 10), pady=8)
 
-        self.chk_unknown = ctk.CTkCheckBox(self.filter_frame, text="Unknown", variable=self.chk_unknown_var, command=self._on_filter_change, fg_color=TEXT_MUTED, hover_color=BORDER_STRONG, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
+        self.chk_unknown = ctk.CTkCheckBox(self.filter_frame, text="Не доказано", variable=self.chk_unknown_var, command=self._on_filter_change, fg_color=TEXT_MUTED, hover_color=BORDER_STRONG, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
         self.chk_unknown.pack(side="left", padx=(0, 12), pady=8)
 
         # Порог Engagement Score (п.37): отсекает слабые адреса при показе и экспорте

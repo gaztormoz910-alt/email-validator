@@ -16,7 +16,7 @@ from core.filters import SpamFilter
 from core.github_parser import BlacklistDownloader
 from core.network import NetworkValidator, PROXY_MAX_CONSECUTIVE_FAILS
 from core.ai_engine import EmailAI
-from core.parser.name_extractor import NameExtractor
+from core.parser.name_extractor import NameExtractor, split_name
 from core.parser.ml_predictor import MLPredictor
 from core.disposable import is_disposable
 from core.gravatar import GravatarChecker
@@ -57,6 +57,14 @@ def _is_transient_failure(raw_status: str, reason: str) -> bool:
     if any(m in low for m in _PERMANENT_UNKNOWN_MARKERS):
         return False
     return any(m in low for m in _TRANSIENT_MARKERS)
+
+
+# Что берётся из кэша, кроме самого вердикта: только добытое ПО СЕТИ и
+# только если в файле базы этого поля не было. Всё остальное — имя, пол,
+# страна, скор, провайдер — вычислимо локально и пересчитывается на текущих
+# настройках, иначе кэш молча отменял бы переключатели в окне.
+_CACHE_KEEPS = ("birth_year", "company", "job_role", "social_accounts",
+                "company_source", "job_role_source")
 
 
 def _utc_now():
@@ -354,6 +362,11 @@ class ValidationPipeline:
         birth_year = data.get("birth_year", "") or extract_birth_year(email) or ""
 
         data["name"] = name
+        # Отдельные имя и фамилия: сегментация под рассылку («Здравствуйте,
+        # {имя}») и под сверку с внешними базами, где колонки раздельные.
+        first_name, last_name = split_name(name)
+        data["first_name"] = first_name
+        data["last_name"] = last_name
         data["gender"] = gender
         data["country"] = country
         data["birth_year"] = birth_year
@@ -853,21 +866,44 @@ class ValidationPipeline:
             if deep_ping and self.cache:
                 cached = self.cache.get(email)
                 if cached:
-                    # Данные из файла базы важнее кэша — их не перезаписываем.
-                    # А вот вычисленное прошлым прогоном (скор, провайдер по
-                    # MX-записи) точнее того, что проставлено выше вслепую.
-                    # Пустая строка в data — это «в файле колонки не было»,
-                    # а не «значение пустое»: такие поля кэш заполняет.
-                    computed = ("engagement_score", "engagement_grade", "provider_type",
-                                "provider_name", "domain_type", "has_gravatar")
+                    # Из кэша берётся ТОЛЬКО вердикт SMTP и то, что добыто по
+                    # сети: он для этого и заведён. Обогащение — имя, пол,
+                    # страна, скор — пересчитывается заново, на текущих
+                    # настройках.
+                    #
+                    # Раньше кэш возвращал и обогащение тоже, и это молча
+                    # отменяло настройки окна. Владелец переключал «Страну по
+                    # имени» между заполненностью и точностью и видел ОДИН И
+                    # ТОТ ЖЕ результат: на свежих адресах режимы дают 11 из 12
+                    # против 5 из 12, но 72 адреса из 78 приходили из кэша со
+                    # страной, посчитанной в прошлый раз. То же самое было с
+                    # тумблером обогащения: включай не включай — у
+                    # закэшированных адресов имя оставалось старым.
+                    #
+                    # Пересчёт бесплатен: имя, пол и страна считаются локально.
+                    # По сети ходит только Gravatar, и только когда обогащение
+                    # включено — то есть ровно тогда, когда владелец об этом
+                    # попросил.
                     for key, value in (cached.get("data") or {}).items():
-                        if key in computed or not data.get(key):
+                        if key in _CACHE_KEEPS and not data.get(key):
                             data[key] = value
                     # Показываем ДАТУ ИСХОДНОЙ проверки, а не сегодняшнюю:
                     # иначе кэш выглядел бы как свежая проверка.
-                    data["validated_at"] = _fmt_stamp(cached["checked_at"]) or data["validated_at"]
+                    cached_stamp = _fmt_stamp(cached["checked_at"]) or data["validated_at"]
                     data["from_cache"] = True
                     status_display = "Role-based" if is_role else cached["status"]
+
+                    cached_res = {
+                        "status": cached["status"],
+                        "reason": cached.get("reason", ""),
+                        "mx_record": cached.get("mx", "N/A"),
+                        "mx_records": [cached.get("mx")] if cached.get("mx") else [],
+                        "has_starttls": None,
+                    }
+                    self._enrich_and_score(email, data, cached_res, status_display,
+                                           status_display, is_role, enable_ai)
+                    data["validated_at"] = cached_stamp
+
                     with self._cache_lock:
                         self._cache_hits += 1
                     self.callbacks['on_result'](
