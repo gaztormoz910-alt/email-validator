@@ -37,7 +37,7 @@ class PanelsMixin:
         header_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         header_frame.pack(fill="x", pady=(20, 10), padx=20)
         
-        self.logo_label = ctk.CTkLabel(header_frame, text="⚙ Конфигурация", font=ctk.CTkFont(size=16, weight="bold"), text_color=TEXT_MAIN)
+        self.logo_label = ctk.CTkLabel(header_frame, text="Проверка адресов", font=ctk.CTkFont(size=FONT_TITLE, weight="bold"), text_color=TEXT_MAIN)
         self.logo_label.pack(anchor="center", pady=(0, 10))
 
         self.mode_switcher = ctk.CTkSegmentedButton(
@@ -62,77 +62,160 @@ class PanelsMixin:
         self.validator_sidebar_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         self.validator_sidebar_frame.pack(fill="both", expand=True)
 
-        self.db_selector = ProxyHunterInputSelector(self.validator_sidebar_frame, "База Email адресов:", "Выбрать", command=self.load_file, on_paste=self.on_emails_pasted, on_clear=self.clear_emails)
-        self.db_selector.pack(fill="x", padx=20, pady=(0, 5))
-        
-        self.loaded_lbl = ctk.CTkLabel(self.validator_sidebar_frame, text="Загружено: 0", text_color=TEXT_MUTED, font=ctk.CTkFont(size=11))
-        self.loaded_lbl.pack(padx=20, anchor="w", pady=(0, 15))
-        
-        self.proxy_selector = ProxyHunterInputSelector(self.validator_sidebar_frame, "SOCKS5 Прокси:", "Выбрать", command=self.load_proxies, on_paste=self.on_proxies_pasted, on_clear=self.clear_proxies)
-        self.proxy_selector.pack(fill="x", padx=20, pady=(0, 5))
-        
-        self.loaded_proxies_lbl = ctk.CTkLabel(self.validator_sidebar_frame, text="Прокси: 0", text_color=TEXT_MUTED, font=ctk.CTkFont(size=11))
-        self.loaded_proxies_lbl.pack(padx=20, anchor="w", pady=(0, 25))
-
         self.max_hw_threads, self.hw_rank, self.hw_color = self.get_hardware_limits()
 
-        # Максимальное значение ползунка ограничено 300 — максимальное безопасное число для домашней сети
-        safe_max_threads = min(self.max_hw_threads, 300)
-        self.threads_slider = ProxyHunterSlider(self.validator_sidebar_frame, "Потоки", 1, safe_max_threads, safe_max_threads)
-        self.threads_slider.pack(fill="x", padx=20, pady=(0, 20))
-        
-        self.timeout_slider = ProxyHunterSlider(self.validator_sidebar_frame, "Таймаут (сек)", 1, 300, 5)
-        self.timeout_slider.pack(fill="x", padx=20, pady=(0, 4))
+        # ---------- ШАГ 1: адреса ----------
+        self._step_header(self.validator_sidebar_frame, "1", "Адреса для проверки")
 
-        # Подпись обязательна. Ползунок задаёт таймаут ОДНОГО соединения, а на
-        # адрес приходится несколько попыток через разные прокси, и общий
-        # потолок считается как таймаут×6. Без этой строки владелец ставил 10
-        # секунд, видел в причине «проверялся дольше 60с» и считал это сбоем.
-        self.timeout_hint = ctk.CTkLabel(
+        self.db_selector = ProxyHunterInputSelector(
+            self.validator_sidebar_frame, "Файл со списком email", "Выбрать",
+            command=self.load_file, on_paste=self.on_emails_pasted,
+            on_clear=self.clear_emails)
+        self.db_selector.pack(fill="x", padx=SPACE_LG, pady=(0, SPACE_XS))
+
+        self.loaded_lbl = ctk.CTkLabel(
+            self.validator_sidebar_frame, text="Файл не выбран",
+            text_color=TEXT_DIM, font=ctk.CTkFont(size=FONT_TINY))
+        self.loaded_lbl.pack(padx=SPACE_LG, anchor="w", pady=(0, SPACE_LG))
+
+        # ---------- ШАГ 2: прокси ----------
+        self._step_header(self.validator_sidebar_frame, "2", "Прокси для проверки")
+
+        self.proxy_selector = ProxyHunterInputSelector(
+            self.validator_sidebar_frame, "Файл со списком прокси", "Выбрать",
+            command=self.load_proxies, on_paste=self.on_proxies_pasted,
+            on_clear=self.clear_proxies)
+        self.proxy_selector.pack(fill="x", padx=SPACE_LG, pady=(0, SPACE_XS))
+
+        self.loaded_proxies_lbl = ctk.CTkLabel(
+            self.validator_sidebar_frame, text="Файл не выбран",
+            text_color=TEXT_DIM, font=ctk.CTkFont(size=FONT_TINY))
+        self.loaded_proxies_lbl.pack(padx=SPACE_LG, anchor="w", pady=(0, SPACE_LG))
+
+        # ---------- ШАГ 3: запуск ----------
+        self._step_header(self.validator_sidebar_frame, "3", "Запуск")
+
+        # Кнопки прогона живут здесь, а не в шапке окна: рядом с тем, что они
+        # запускают, и сразу под двумя шагами, которые надо сделать до них.
+        self.controls_frame = ctk.CTkFrame(self.validator_sidebar_frame,
+                                           fg_color="transparent")
+        self.controls_frame.pack(fill="x", padx=SPACE_LG, pady=(0, SPACE_SM))
+
+        self.start_btn = ctk.CTkButton(
+            self.controls_frame, text="Начать проверку", height=CONTROL_H_LG,
+            corner_radius=RADIUS, font=ctk.CTkFont(size=FONT_TITLE, weight="bold"),
+            fg_color=ACCENT_PRIMARY, hover_color=ACCENT_PRIMARY_HOVER,
+            text_color=TEXT_ON_ACCENT, command=self.start_process)
+        self.start_btn.pack(fill="x")
+
+        # Пауза и стоп — вторичные: до запуска они не нужны и потому выключены,
+        # а выглядят спокойно, чтобы не соперничать с главной кнопкой.
+        self.secondary_controls = ctk.CTkFrame(self.controls_frame,
+                                               fg_color="transparent")
+        self.secondary_controls.pack(fill="x", pady=(SPACE_SM, 0))
+
+        self.pause_btn = ctk.CTkButton(
+            self.secondary_controls, text="Пауза", height=CONTROL_H,
+            corner_radius=RADIUS, font=ctk.CTkFont(size=FONT_BODY),
+            fg_color="transparent", border_width=1, border_color=BORDER_STRONG,
+            hover_color=BG_CARD_HOVER, text_color=TEXT_MAIN,
+            command=self.pause_process, state="disabled")
+        self.pause_btn.pack(side="left", fill="x", expand=True, padx=(0, SPACE_XS))
+
+        self.stop_btn = ctk.CTkButton(
+            self.secondary_controls, text="Стоп", height=CONTROL_H,
+            corner_radius=RADIUS, font=ctk.CTkFont(size=FONT_BODY),
+            fg_color="transparent", border_width=1, border_color=BORDER_STRONG,
+            hover_color=ACCENT_ERROR, text_color=TEXT_MAIN,
+            command=self.stop_process, state="disabled")
+        self.stop_btn.pack(side="left", fill="x", expand=True, padx=(SPACE_XS, 0))
+
+        self.start_hint = ctk.CTkLabel(
             self.validator_sidebar_frame,
-            text="на одно соединение; на адрес — до ×6 (попытки через разные прокси)",
-            text_color=TEXT_DIM, font=ctk.CTkFont(size=10), justify="left",
-            wraplength=340)
-        self.timeout_hint.pack(padx=20, anchor="w", pady=(0, 25))
+            text="Сначала выберите оба файла",
+            text_color=TEXT_DIM, font=ctk.CTkFont(size=FONT_TINY))
+        self.start_hint.pack(padx=SPACE_LG, anchor="w", pady=(0, SPACE_LG))
 
-        self.chk_ai = ctk.CTkSwitch(self.validator_sidebar_frame, text="Использовать AI фильтр (ML)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color=TEXT_ON_ACCENT, button_hover_color=TEXT_MAIN)
+        # ---------- Настройки: свёрнуты ----------
+        # Всё, что ниже, нужно один раз и не каждому. Пока оно висело раскрытым,
+        # шесть решений требовались от человека, которому нужно было ноль.
+        self.settings_toggle = ctk.CTkButton(
+            self.validator_sidebar_frame, text="⌄  Настройки",
+            height=CONTROL_H, corner_radius=RADIUS, anchor="w",
+            font=ctk.CTkFont(size=FONT_BODY),
+            fg_color=BG_CARD_1, hover_color=BG_CARD_HOVER,
+            text_color=TEXT_MUTED, command=self._toggle_settings)
+        self.settings_toggle.pack(fill="x", padx=SPACE_LG, pady=(0, SPACE_SM))
+
+        self.settings_open = False
+        self.settings_body = ctk.CTkFrame(self.validator_sidebar_frame,
+                                          fg_color="transparent")
+
+        safe_max_threads = min(self.max_hw_threads, 300)
+        self.threads_slider = ProxyHunterSlider(
+            self.settings_body, "Одновременных проверок", 1,
+            safe_max_threads, safe_max_threads)
+        self.threads_slider.pack(fill="x", padx=SPACE_LG, pady=(0, SPACE_XS))
+        self._settings_hint(self.settings_body,
+                            "больше — быстрее, но выше нагрузка на сеть")
+
+        self.timeout_slider = ProxyHunterSlider(
+            self.settings_body, "Ожидание ответа, сек", 1, 300, 5)
+        self.timeout_slider.pack(fill="x", padx=SPACE_LG, pady=(0, SPACE_XS))
+        self.timeout_hint = self._settings_hint(
+            self.settings_body,
+            "на одно соединение; на адрес — до ×6 (попытки через разные прокси)")
+
+        self.chk_ai = ctk.CTkSwitch(
+            self.settings_body, text="Отсеивать адреса-роботы",
+            text_color=TEXT_MAIN, font=ctk.CTkFont(size=FONT_BODY),
+            progress_color=ACCENT_PRIMARY, button_color=TEXT_MAIN,
+            button_hover_color=TEXT_MAIN)
         self.chk_ai.select()
-        self.chk_ai.pack(padx=20, anchor="w", pady=(0, 20))
-        
-        self.chk_osint_val = ctk.CTkSwitch(self.validator_sidebar_frame, text="Обогащение данных (OSINT)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color=TEXT_ON_ACCENT, button_hover_color=TEXT_MAIN)
+        self.chk_ai.pack(padx=SPACE_LG, anchor="w", pady=(SPACE_SM, 0))
+        self._settings_hint(self.settings_body,
+                            "распознаёт бессмысленные имена вроде xk3n9fj2q@")
+
+        self.chk_osint_val = ctk.CTkSwitch(
+            self.settings_body, text="Искать имя, пол и страну",
+            text_color=TEXT_MAIN, font=ctk.CTkFont(size=FONT_BODY),
+            progress_color=ACCENT_PRIMARY, button_color=TEXT_MAIN,
+            button_hover_color=TEXT_MAIN)
         self.chk_osint_val.select()
-        self.chk_osint_val.pack(padx=20, anchor="w", pady=(0, 20))
+        self.chk_osint_val.pack(padx=SPACE_LG, anchor="w", pady=(SPACE_SM, 0))
+        self._settings_hint(self.settings_body,
+                            "медленнее, но заполняет колонки для сегментации")
 
-        # Кэш вердиктов прошлых прогонов. Выключай, если базу нужно проверить
-        # заново целиком (например, спустя месяцы или после смены прокси).
-        self.chk_cache = ctk.CTkSwitch(self.validator_sidebar_frame, text="Кэш вердиктов (не перепроверять)", text_color=TEXT_MAIN, progress_color=ACCENT_PRIMARY, button_color=TEXT_ON_ACCENT, button_hover_color=TEXT_MAIN)
+        self.chk_cache = ctk.CTkSwitch(
+            self.settings_body, text="Не перепроверять известное",
+            text_color=TEXT_MAIN, font=ctk.CTkFont(size=FONT_BODY),
+            progress_color=ACCENT_PRIMARY, button_color=TEXT_MAIN,
+            button_hover_color=TEXT_MAIN)
         self.chk_cache.select()
-        self.chk_cache.pack(padx=20, anchor="w", pady=(0, 20))
+        self.chk_cache.pack(padx=SPACE_LG, anchor="w", pady=(SPACE_SM, 0))
+        self._settings_hint(self.settings_body,
+                            "выключите, если базе больше месяца или сменили прокси")
 
-        # Режим колонки «Страна». Раньше выбор между заполненностью и точностью
-        # был правкой двух чисел в исходнике, хотя это решение про ДЕНЬГИ: гнать
-        # гео-таргет по колонке, где треть значений выдумана, — не то же самое,
-        # что по неполной, но верной. Замеры обоих режимов лежат в
-        # core/parser/ml_predictor.py рядом с порогами.
-        ctk.CTkLabel(self.validator_sidebar_frame, text="Колонка «Страна» по имени:",
-                     text_color=TEXT_MAIN, font=ctk.CTkFont(size=12)).pack(
-            padx=20, anchor="w", pady=(0, 4))
+        ctk.CTkLabel(self.settings_body, text="Колонка «Страна»",
+                     text_color=TEXT_MAIN, font=ctk.CTkFont(size=FONT_BODY)).pack(
+            padx=SPACE_LG, anchor="w", pady=(SPACE_LG, SPACE_XS))
 
         self.country_mode_var = ctk.StringVar(value="Заполненность")
         self.country_mode_seg = ctk.CTkSegmentedButton(
-            self.validator_sidebar_frame, values=["Заполненность", "Точность"],
+            self.settings_body, values=["Заполненность", "Точность"],
             variable=self.country_mode_var, command=self._on_country_mode_change,
             fg_color=BG_CARD_2, selected_color=ACCENT_PRIMARY,
             selected_hover_color=ACCENT_PRIMARY_HOVER, unselected_color=BG_CARD_2,
             unselected_hover_color=BORDER, text_color=TEXT_MAIN,
-            font=ctk.CTkFont(size=11))
-        self.country_mode_seg.pack(fill="x", padx=20, pady=(0, 4))
+            font=ctk.CTkFont(size=FONT_TINY))
+        self.country_mode_seg.pack(fill="x", padx=SPACE_LG, pady=(0, SPACE_XS))
 
         self.country_mode_hint = ctk.CTkLabel(
-            self.validator_sidebar_frame,
+            self.settings_body,
             text="заполнено почти всегда, ~треть стран — догадка",
-            text_color=TEXT_DIM, font=ctk.CTkFont(size=10), justify="left")
-        self.country_mode_hint.pack(padx=20, anchor="w", pady=(0, 20))
+            text_color=TEXT_DIM, font=ctk.CTkFont(size=FONT_TINY), justify="left",
+            wraplength=320)
+        self.country_mode_hint.pack(padx=SPACE_LG, anchor="w", pady=(0, SPACE_LG))
 
         # --- PARSER SIDEBAR CONTENT ---
         self.parser_sidebar_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -192,20 +275,12 @@ class PanelsMixin:
         
         self.main_title_lbl = ctk.CTkLabel(self.title_text_frame, text="EMAIL VALIDATOR PRO", font=ctk.CTkFont(size=22, weight="bold"), text_color=TEXT_MAIN)
         self.main_title_lbl.pack(anchor="w", pady=0)
-        self.sub_title_lbl = ctk.CTkLabel(self.title_text_frame, text="v4.0 - Продвинутая фильтрация", font=ctk.CTkFont(size=11), text_color=TEXT_MUTED)
+        self.sub_title_lbl = ctk.CTkLabel(self.title_text_frame, text="проверка адресов перед рассылкой", font=ctk.CTkFont(size=11), text_color=TEXT_MUTED)
         self.sub_title_lbl.pack(anchor="w", pady=0)
         
-        self.controls_frame = ctk.CTkFrame(self.header_main, fg_color="transparent")
-        self.controls_frame.pack(side="right")
-        
-        self.start_btn = ctk.CTkButton(self.controls_frame, text="▶", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_PRIMARY, hover_color=ACCENT_PRIMARY_HOVER, text_color=TEXT_ON_ACCENT, command=self.start_process)
-        self.start_btn.pack(side="left", padx=(0, 8))
-        
-        self.pause_btn = ctk.CTkButton(self.controls_frame, text="⏸", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_WARNING, hover_color=ACCENT_WARNING_HOVER, text_color=TEXT_ON_WARNING, command=self.pause_process, state="disabled")
-        self.pause_btn.pack(side="left", padx=(0, 8))
-        
-        self.stop_btn = ctk.CTkButton(self.controls_frame, text="⏹", width=40, height=40, corner_radius=10, font=ctk.CTkFont(size=18), fg_color=ACCENT_ERROR, hover_color=ACCENT_ERROR_HOVER, text_color=TEXT_ON_ACCENT, command=self.stop_process, state="disabled")
-        self.stop_btn.pack(side="left")
+        # Кнопки прогона живут в боковой панели, под шагом 3. Здесь их
+        # больше нет: в шапке они были оторваны от того, что запускают,
+        # а вторая тройка ещё и перезаписывала ссылки на первую.
 
         # --- VALIDATOR WORKSPACE ---
         self.validator_workspace = ctk.CTkFrame(self.main_frame, fg_color="transparent")
@@ -215,16 +290,35 @@ class PanelsMixin:
         self.dashboard_frame = ctk.CTkFrame(self.validator_workspace, fg_color="transparent")
         self.dashboard_frame.pack(fill="x", pady=(0, 20))
         self.dashboard_frame.grid_columnconfigure((0, 1, 2), weight=1, uniform="card")
+        self.dashboard_frame.grid_rowconfigure(0, weight=1)
 
-        self._create_stat_card(self.dashboard_frame, 0, 0, "Всего собрано", "0", ACCENT_PRIMARY, "🌐", "stat_0")
-        self._create_stat_card(self.dashboard_frame, 0, 1, "Валидные", "0", ACCENT_SUCCESS, "⚡", "stat_1")
-        self._create_stat_card(self.dashboard_frame, 0, 2, "Невалидные", "0", ACCENT_ERROR, "🗑", "stat_2")
-        # Подписи описывают РЕШЕНИЕ, а не внутреннее имя статуса. «Спам /
-        # Ловушки» раньше включал ещё и Risky, то есть показывал полсотни
-        # там, где ловушек было шесть.
-        self._create_stat_card(self.dashboard_frame, 1, 0, "Слать нельзя", "0", ACCENT_WARNING, "⚠️", "stat_3")
-        self._create_stat_card(self.dashboard_frame, 1, 1, "Не доказано", "0", TEXT_MUTED, "❓", "stat_4")
-        self._create_stat_card(self.dashboard_frame, 1, 2, "Имена найдены", "0", ACCENT_PURPLE, "👤", "stat_names")
+        # Крупно — ровно то, по чему принимают решение о рассылке. Подписи
+        # называют ДЕЙСТВИЕ, а не внутреннее имя статуса: «Валидные» и
+        # «Не доказано» ничего не говорят человеку, который решает, кому
+        # отправлять письмо.
+        self._create_stat_card(self.dashboard_frame, 0, 0, "Можно слать", "0",
+                               ACCENT_SUCCESS, "✓", "stat_1",
+                               hint="доказано, что ящик существует")
+        self._create_stat_card(self.dashboard_frame, 0, 1, "Слать нельзя", "0",
+                               ACCENT_ERROR, "✕", "stat_2",
+                               hint="доказано, что ящика нет")
+        self._create_stat_card(self.dashboard_frame, 0, 2, "Не доказано", "0",
+                               TEXT_MUTED, "?", "stat_4",
+                               hint="ответа не получили — лучше не слать")
+
+        # Мельче — справочное. По этим числам решений не принимают, и
+        # занимать ими столько же места значит мешать читать главные три.
+        self.dashboard_minor = ctk.CTkFrame(self.validator_workspace,
+                                            fg_color="transparent")
+        self.dashboard_minor.pack(fill="x", pady=(SPACE_SM, 0))
+        self.dashboard_minor.grid_columnconfigure((0, 1, 2), weight=1, uniform="mini")
+
+        self._create_mini_stat(self.dashboard_minor, 0, "Всего проверено",
+                               "stat_0", TEXT_MAIN)
+        self._create_mini_stat(self.dashboard_minor, 1, "Ловушки и роль-адреса",
+                               "stat_3", ACCENT_WARNING)
+        self._create_mini_stat(self.dashboard_minor, 2, "Имена найдены",
+                               "stat_names", ACCENT_PURPLE)
 
         # Прогресс-бар (Validator)
         self.progress_frame = ctk.CTkFrame(self.validator_workspace, fg_color="transparent")
@@ -309,13 +403,13 @@ class PanelsMixin:
         self.chk_spam_var = ctk.BooleanVar(value=False)
         self.chk_unknown_var = ctk.BooleanVar(value=False)
 
-        self.chk_valid = ctk.CTkCheckBox(self.filter_frame, text="Valid", variable=self.chk_valid_var, command=self._on_filter_change, fg_color=ACCENT_SUCCESS, hover_color=ACCENT_SUCCESS_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
+        self.chk_valid = ctk.CTkCheckBox(self.filter_frame, text="Можно слать", variable=self.chk_valid_var, command=self._on_filter_change, fg_color=ACCENT_SUCCESS, hover_color=ACCENT_SUCCESS_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
         self.chk_valid.pack(side="left", padx=(12, 10), pady=8)
 
-        self.chk_invalid = ctk.CTkCheckBox(self.filter_frame, text="Invalid", variable=self.chk_invalid_var, command=self._on_filter_change, fg_color=ACCENT_ERROR, hover_color=ACCENT_ERROR_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
+        self.chk_invalid = ctk.CTkCheckBox(self.filter_frame, text="Слать нельзя", variable=self.chk_invalid_var, command=self._on_filter_change, fg_color=ACCENT_ERROR, hover_color=ACCENT_ERROR_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
         self.chk_invalid.pack(side="left", padx=(0, 10), pady=8)
 
-        self.chk_spam = ctk.CTkCheckBox(self.filter_frame, text="Слать нельзя", variable=self.chk_spam_var, command=self._on_filter_change, fg_color=ACCENT_WARNING, hover_color=ACCENT_WARNING_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
+        self.chk_spam = ctk.CTkCheckBox(self.filter_frame, text="Ловушки и роль", variable=self.chk_spam_var, command=self._on_filter_change, fg_color=ACCENT_WARNING, hover_color=ACCENT_WARNING_HOVER, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
         self.chk_spam.pack(side="left", padx=(0, 10), pady=8)
 
         self.chk_unknown = ctk.CTkCheckBox(self.filter_frame, text="Не доказано", variable=self.chk_unknown_var, command=self._on_filter_change, fg_color=TEXT_MUTED, hover_color=BORDER_STRONG, border_color=BORDER_STRONG, text_color=TEXT_MAIN, font=ctk.CTkFont(size=12), checkbox_width=16, checkbox_height=16)
@@ -325,7 +419,7 @@ class PanelsMixin:
         self.score_filter_frame = ctk.CTkFrame(self.table_export_frame, fg_color=BG_CARD_1, corner_radius=8)
         self.score_filter_frame.pack(side="left", padx=(8, 0))
 
-        ctk.CTkLabel(self.score_filter_frame, text="Score ≥", text_color=TEXT_MAIN,
+        ctk.CTkLabel(self.score_filter_frame, text="Качество от", text_color=TEXT_MAIN,
                      font=ctk.CTkFont(size=12)).pack(side="left", padx=(12, 6), pady=8)
 
         self.min_score_var = ctk.StringVar(value="0")
@@ -352,14 +446,14 @@ class PanelsMixin:
         self.suppress_btn.pack(side="left", padx=(0, 8))
 
         # Нарезка выгрузки под лимиты ESP. 0 — одним файлом.
-        ctk.CTkLabel(self.actions_frame, text="по", text_color=TEXT_MUTED,
+        ctk.CTkLabel(self.actions_frame, text="файлы по", text_color=TEXT_MUTED,
                      font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 4))
         self.chunk_entry = ctk.CTkEntry(self.actions_frame, width=64, height=32,
                                         corner_radius=8, justify="center",
                                         placeholder_text="0")
         self.chunk_entry.pack(side="left", padx=(0, 8))
 
-        self.export_btn = ctk.CTkButton(self.actions_frame, text="Сохранить", command=self.export_results, width=110, height=32, corner_radius=8, fg_color=ACCENT_SUCCESS, hover_color=ACCENT_SUCCESS_HOVER, text_color=TEXT_ON_ACCENT)
+        self.export_btn = ctk.CTkButton(self.actions_frame, text="Сохранить отмеченные", command=self.export_results, width=110, height=32, corner_radius=8, fg_color=ACCENT_SUCCESS, hover_color=ACCENT_SUCCESS_HOVER, text_color=TEXT_ON_ACCENT)
         self.export_btn.pack(side="left")
 
         style = ttk.Style()
@@ -389,16 +483,16 @@ class PanelsMixin:
         columns = ("email", "status", "score", "provider", "domain_type", "reason", "mx",
                    "name", "gender", "country", "birth_year", "source", "validated")
         self.tree = ttk.Treeview(self.table_frame, columns=columns, show="headings")
-        self.tree.heading("email", text="Email", anchor="w")
-        self.tree.heading("status", text="Status", anchor="center")
-        self.tree.heading("score", text="Score", anchor="center")
-        self.tree.heading("provider", text="Provider", anchor="w")
+        self.tree.heading("email", text="Адрес", anchor="w")
+        self.tree.heading("status", text="Вердикт", anchor="center")
+        self.tree.heading("score", text="Качество", anchor="center")
+        self.tree.heading("provider", text="Почтовик", anchor="w")
         self.tree.heading("domain_type", text="Тип домена", anchor="w")
-        self.tree.heading("reason", text="Reason", anchor="w")
-        self.tree.heading("mx", text="MX-Record", anchor="w")
-        self.tree.heading("name", text="Name", anchor="w")
-        self.tree.heading("gender", text="Gender", anchor="w")
-        self.tree.heading("country", text="Country", anchor="w")
+        self.tree.heading("reason", text="Что ответил сервер", anchor="w")
+        self.tree.heading("mx", text="Почтовый сервер", anchor="w")
+        self.tree.heading("name", text="Имя", anchor="w")
+        self.tree.heading("gender", text="Пол", anchor="w")
+        self.tree.heading("country", text="Страна", anchor="w")
         self.tree.heading("birth_year", text="Год рожд.", anchor="center")
         # Откуда взяты имя, пол и страна: «файл» — из исходника, всё остальное
         # предсказано. Раньше догадка ML показывалась как факт.
@@ -656,26 +750,107 @@ class PanelsMixin:
                          font=ctk.CTkFont(size=12, weight="bold")).pack(side="right")
         ctk.CTkFrame(block, height=8, fg_color="transparent").pack()
 
-    def _create_stat_card(self, parent, row, col, title, value, val_color, icon, attr_name):
-        pad_x = (0, 10) if col < 2 else (0, 0)
-        pad_y = (0, 10) if row == 0 else (0, 0)
-        
-        card = ctk.CTkFrame(parent, fg_color=BG_CARD_1, border_color=BORDER, border_width=1, corner_radius=10)
+    def _step_header(self, parent, number, title):
+        """Заголовок шага: номер в кружке и название.
+
+        Номер здесь не украшение. Он отвечает на вопрос «что делать первым»,
+        который раньше приходилось угадывать по порядку элементов сверху вниз —
+        а порядок сверху вниз читается как список равноправных настроек, а не
+        как последовательность.
+        """
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=SPACE_LG, pady=(0, SPACE_SM))
+
+        badge = ctk.CTkFrame(row, fg_color=BG_CARD_2, corner_radius=12,
+                             width=24, height=24)
+        badge.pack(side="left", padx=(0, SPACE_SM))
+        badge.pack_propagate(False)
+        ctk.CTkLabel(badge, text=number, text_color=ACCENT_PRIMARY,
+                     font=ctk.CTkFont(size=FONT_TINY, weight="bold")).place(
+            relx=0.5, rely=0.5, anchor="center")
+
+        ctk.CTkLabel(row, text=title, text_color=TEXT_MAIN,
+                     font=ctk.CTkFont(size=FONT_TITLE, weight="bold")).pack(side="left")
+        return row
+
+    def _settings_hint(self, parent, text):
+        """Пояснение под настройкой. Читаемое, а не декоративное.
+
+        Прежний оттенок подсказок давал контраст 2.7:1 при норме 4.5:1 —
+        то есть единственное место, где новичку объясняют смысл переключателя,
+        было нечитаемым. Цвет поднят, проверяется tools/check_contrast.py.
+        """
+        hint = ctk.CTkLabel(parent, text=text, text_color=TEXT_DIM,
+                            font=ctk.CTkFont(size=FONT_TINY), justify="left",
+                            wraplength=320)
+        hint.pack(padx=SPACE_LG, anchor="w", pady=(0, SPACE_SM))
+        return hint
+
+    def _toggle_settings(self):
+        """Раскрывает и сворачивает блок настроек."""
+        self.settings_open = not self.settings_open
+        if self.settings_open:
+            self.settings_body.pack(fill="x", after=self.settings_toggle)
+            self.settings_toggle.configure(text="⌃  Настройки")
+        else:
+            self.settings_body.pack_forget()
+            self.settings_toggle.configure(text="⌄  Настройки")
+
+    def _create_stat_card(self, parent, row, col, title, value, val_color, icon,
+                          attr_name, hint=""):
+        """Крупная плитка: число, подпись действием и строка пояснения.
+
+        Пояснение обязательно. «Не доказано: 6» — число без смысла; «ответа не
+        получили, лучше не слать» подсказывает, ЧТО с этими адресами делать, а
+        именно за этим на плитки и смотрят.
+        """
+        pad_x = (0, SPACE_SM) if col < 2 else (0, 0)
+        # Вкладка сбора адресов кладёт плитки в два ряда — между рядами нужен
+        # тот же отступ, что и между колонками, иначе они слипаются.
+        pad_y = (SPACE_SM, 0) if row > 0 else (0, 0)
+
+        card = ctk.CTkFrame(parent, fg_color=BG_CARD_1, border_color=BORDER,
+                            border_width=1, corner_radius=RADIUS)
         card.grid(row=row, column=col, sticky="nsew", padx=pad_x, pady=pad_y)
-        
+
         inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=15, pady=15)
-        
+        inner.pack(fill="both", expand=True, padx=SPACE_LG, pady=SPACE_MD)
+
         title_frame = ctk.CTkFrame(inner, fg_color="transparent")
         title_frame.pack(fill="x", anchor="w")
-        
-        lbl_icon = ctk.CTkLabel(title_frame, text=icon, font=ctk.CTkFont(size=14), text_color=TEXT_MUTED)
-        lbl_icon.pack(side="left", padx=(0, 8))
-        
-        lbl_title = ctk.CTkLabel(title_frame, text=title, text_color=TEXT_MUTED, font=ctk.CTkFont(size=13))
+
+        lbl_icon = ctk.CTkLabel(title_frame, text=icon, text_color=val_color,
+                                font=ctk.CTkFont(size=FONT_BODY, weight="bold"))
+        lbl_icon.pack(side="left", padx=(0, SPACE_SM))
+
+        lbl_title = ctk.CTkLabel(title_frame, text=title, text_color=TEXT_MAIN,
+                                 font=ctk.CTkFont(size=FONT_BODY, weight="bold"))
         lbl_title.pack(side="left")
-        
-        lbl_val = ctk.CTkLabel(inner, text=value, text_color=val_color, font=ctk.CTkFont(size=36, weight="bold"))
-        lbl_val.pack(anchor="w", pady=(10, 0))
-        
+
+        lbl_val = ctk.CTkLabel(inner, text=value, text_color=val_color,
+                               font=ctk.CTkFont(size=FONT_HERO, weight="bold"))
+        lbl_val.pack(anchor="w", pady=(SPACE_XS, 0))
+
+        if hint:
+            ctk.CTkLabel(inner, text=hint, text_color=TEXT_DIM, justify="left",
+                         font=ctk.CTkFont(size=FONT_TINY), wraplength=210).pack(
+                anchor="w", pady=(SPACE_XS, 0))
+
+        setattr(self, attr_name, lbl_val)
+
+    def _create_mini_stat(self, parent, col, title, attr_name, val_color):
+        """Справочная плитка: то же число, но мельче и в одну строку."""
+        card = ctk.CTkFrame(parent, fg_color=BG_CARD_1, border_color=BORDER,
+                            border_width=1, corner_radius=RADIUS)
+        card.grid(row=0, column=col, sticky="nsew",
+                  padx=((0, SPACE_SM) if col < 2 else (0, 0)))
+
+        line = ctk.CTkFrame(card, fg_color="transparent")
+        line.pack(fill="x", padx=SPACE_MD, pady=SPACE_SM)
+
+        ctk.CTkLabel(line, text=title, text_color=TEXT_MUTED,
+                     font=ctk.CTkFont(size=FONT_TINY)).pack(side="left")
+        lbl_val = ctk.CTkLabel(line, text="0", text_color=val_color,
+                               font=ctk.CTkFont(size=FONT_TITLE, weight="bold"))
+        lbl_val.pack(side="right")
         setattr(self, attr_name, lbl_val)

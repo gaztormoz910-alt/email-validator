@@ -38,6 +38,7 @@ IMPORT_TO_PACKAGE = {
     "gender_guesser": "gender-guesser",
     "duckduckgo_search": "duckduckgo-search",
     "whois": "python-whois",
+    "webview": "pywebview",
 }
 
 # Собственные пакеты проекта и точки входа
