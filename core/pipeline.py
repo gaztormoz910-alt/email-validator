@@ -67,6 +67,25 @@ _CACHE_KEEPS = ("birth_year", "company", "job_role", "social_accounts",
                 "company_source", "job_role_source")
 
 
+def _enrich_signature(enable_osint, enable_ai):
+    """Отпечаток настроек, от которых зависит обогащение.
+
+    Нужен, чтобы кэш не отменял переключатели в окне и при этом оставался
+    кэшем. Совпал отпечаток — обогащение из прошлого прогона годится как
+    есть, и ни одного сетевого запроса не делается. Не совпал — считаем
+    заново, потому что владелец сменил настройку и ждёт другого результата.
+
+    Режим страны сюда входит наравне с тумблерами: именно на нём владелец и
+    заметил, что кэш молча всё отменяет.
+    """
+    try:
+        from core.parser.ml_predictor import get_country_mode
+        country_mode = get_country_mode()
+    except Exception:
+        country_mode = "?"
+    return f"osint={bool(enable_osint)};ai={bool(enable_ai)};country={country_mode}"
+
+
 def _utc_now():
     """Текущее время как aware-datetime в UTC."""
     return datetime.datetime.now(datetime.timezone.utc)
@@ -461,6 +480,11 @@ class ValidationPipeline:
         # компании нет, и колонка обязана остаться пустой, а не сообщать,
         # что человек работает в Gmail.
         data.update(enrich_org_role(email, dom_type))
+
+        # Отпечаток настроек, при которых это обогащение посчитано. По нему
+        # следующий прогон решает, годится ли оно как есть.
+        data["enrich_sig"] = _enrich_signature(
+            getattr(self.name_extractor, "enable_osint", False), enable_ai)
 
         # В кэш уходит SMTP-статус, а не отображаемый: ролевой ящик
         # показывается как Role-based, но доказан-то он как Valid.
@@ -884,24 +908,45 @@ class ValidationPipeline:
                     # По сети ходит только Gravatar, и только когда обогащение
                     # включено — то есть ровно тогда, когда владелец об этом
                     # попросил.
-                    for key, value in (cached.get("data") or {}).items():
-                        if key in _CACHE_KEEPS and not data.get(key):
-                            data[key] = value
+                    cached_data = cached.get("data") or {}
                     # Показываем ДАТУ ИСХОДНОЙ проверки, а не сегодняшнюю:
                     # иначе кэш выглядел бы как свежая проверка.
                     cached_stamp = _fmt_stamp(cached["checked_at"]) or data["validated_at"]
                     data["from_cache"] = True
                     status_display = "Role-based" if is_role else cached["status"]
 
-                    cached_res = {
-                        "status": cached["status"],
-                        "reason": cached.get("reason", ""),
-                        "mx_record": cached.get("mx", "N/A"),
-                        "mx_records": [cached.get("mx")] if cached.get("mx") else [],
-                        "has_starttls": None,
-                    }
-                    self._enrich_and_score(email, data, cached_res, status_display,
-                                           status_display, is_role, enable_ai)
+                    want = _enrich_signature(enable_osint, enable_ai)
+                    if cached_data.get("enrich_sig") == want:
+                        # Настройки те же — обогащение из прошлого прогона
+                        # годится как есть. Ни одного запроса в сеть.
+                        # Данные из ФАЙЛА базы важнее кэша: их не трогаем.
+                        computed = ("engagement_score", "engagement_grade",
+                                    "provider_type", "provider_name",
+                                    "domain_type", "has_gravatar")
+                        for key, value in cached_data.items():
+                            if key in computed or not data.get(key):
+                                data[key] = value
+                    else:
+                        # Владелец сменил настройку обогащения. Считаем заново
+                        # — за это и платим сетью, но только здесь.
+                        for key, value in cached_data.items():
+                            if key in _CACHE_KEEPS and not data.get(key):
+                                data[key] = value
+                        cached_res = {
+                            "status": cached["status"],
+                            "reason": cached.get("reason", ""),
+                            "mx_record": cached.get("mx", "N/A"),
+                            "mx_records": [cached.get("mx")] if cached.get("mx") else [],
+                            "has_starttls": None,
+                        }
+                        # В скоринг идёт ДОКАЗАННЫЙ статус, а не отображаемый.
+                        # Ролевой ящик показывается как Role-based, но доказан
+                        # он как Valid, и по «Role-based» SMTP-баллы не
+                        # начисляются вовсе — скор обнулялся.
+                        self._enrich_and_score(email, data, cached_res,
+                                               status_display, cached["status"],
+                                               is_role, enable_ai)
+                        data["enrich_sig"] = want
                     data["validated_at"] = cached_stamp
 
                     with self._cache_lock:
