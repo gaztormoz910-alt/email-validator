@@ -141,6 +141,16 @@ class ValidatorApi:
         parser = getattr(self, "parser", None)
         if parser is None:
             return False
+
+        # Остановку у сбора уже запросили — считаем свободным, не дожидаясь
+        # смерти потока. Он может ещё долго закрывать Tor и отпускать
+        # соединения, и всё это время окно оставалось бы запертым, хотя
+        # команда отдана. Источники конвейер забрал копией при запуске,
+        # так что менять их в этот момент безопасно.
+        stopping = getattr(parser, "_stop_event", None)
+        if stopping is not None and stopping.is_set():
+            return False
+
         alive = getattr(parser, "is_alive", None)
         if callable(alive):
             return bool(alive())

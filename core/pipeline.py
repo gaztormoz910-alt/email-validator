@@ -153,6 +153,15 @@ class ValidationPipeline:
         self.callbacks = callbacks 
         self.is_running = False
         self.is_paused = False
+        # Отдельный флаг «остановку запросили», а не одна лишь is_running.
+        #
+        # is_running взводится в run_pipeline, то есть УЖЕ ВНУТРИ рабочего
+        # потока и после подготовки — а подготовка идёт долго: перебор прокси
+        # в триста потоков, прогрев модели, загрузка списков. Нажатый в это
+        # время «Стоп» сбрасывал is_running, поток доходил до run_pipeline и
+        # спокойно взводил его обратно. Прогон продолжался вопреки команде, а
+        # окно оставалось запертым до конца проверки.
+        self._stop_requested = False
         
         self.cleaner = EmailCleaner()
         self.filter = None
@@ -726,6 +735,13 @@ class ValidationPipeline:
 
     def run_pipeline(self, email_sources, threads=50, fix_typos=True, check_spam=True, deep_ping=True, enable_ai=False, enable_osint=False,
                      resume=False):
+        # Пока шла подготовка, могли нажать «Стоп». Тогда работу не начинаем
+        # вовсе: взвести is_running здесь значило бы отменить команду.
+        if self._stop_requested:
+            self.is_running = False
+            self.callbacks['on_complete']()
+            return
+
         self.is_running = True
         self.is_paused = False
         
@@ -1343,16 +1359,38 @@ class ValidationPipeline:
 
     def start(self, email_sources, threads, timeout, fix_typos, check_spam, deep_ping, enable_ai, proxies=None, enable_osint=False, use_cache=True,
               resume=False):
+        # Новый прогон отменяет прошлую команду остановки.
+        self._stop_requested = False
+
         def worker():
-            self.setup(timeout=timeout, enable_ai=enable_ai, proxies=proxies, threads=threads,
-                       use_cache=use_cache)
-            self.run_pipeline(email_sources, threads, fix_typos, check_spam, deep_ping, enable_ai, enable_osint=enable_osint, resume=resume)
-            
+            try:
+                self.setup(timeout=timeout, enable_ai=enable_ai, proxies=proxies, threads=threads,
+                           use_cache=use_cache)
+                self.run_pipeline(email_sources, threads, fix_typos, check_spam, deep_ping,
+                                  enable_ai, enable_osint=enable_osint, resume=resume)
+            except Exception as exc:
+                # Упавший поток раньше уносил с собой признак «идёт прогон»:
+                # is_running оставался взведённым навсегда, и окно запиралось
+                # намертво — помогал только перезапуск программы. Теперь
+                # падение видно в логе, а окно освобождается.
+                self.callbacks['on_log'](
+                    "[DEAD] Проверка прервана ошибкой: %s: %s"
+                    % (type(exc).__name__, exc), "dead")
+            finally:
+                if self.is_running:
+                    self.is_running = False
+                    self.callbacks['on_complete']()
+
         t = threading.Thread(target=worker, daemon=True)
         t.start()
+        return t
         
     def stop(self):
+        self._stop_requested = True
         self.is_running = False
+        # Остановка снимает и паузу: иначе остановленный на паузе прогон
+        # остаётся «на паузе» навсегда, и следующий запуск стартует замершим.
+        self.is_paused = False
         
     def pause(self):
         self.is_paused = not self.is_paused
