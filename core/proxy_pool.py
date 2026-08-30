@@ -31,6 +31,17 @@ from core.mail_constants import PROXY_MAX_CONSECUTIVE_FAILS
 
 UNKNOWN_LATENCY_MS = 10 ** 9
 
+# За сколько секунд жалоба сервера теряет половину веса.
+#
+# 421 значит «сейчас слишком часто», а не «слишком часто навсегда». Две
+# минуты выбраны по тому, как ведут себя крупные почтовики: окно их счётчика
+# сравнимо с этим, и через пару минут спокойной работы прежние жалобы уже
+# ничего не говорят о текущем состоянии.
+MX_ERROR_HALF_LIFE_SEC = 120.0
+
+# Ниже этого значения затухший счётчик считается нулём.
+MX_ERROR_FLOOR = 0.5
+
 
 class ProxyPoolMixin:
     """Выбор прокси, учёт нагрузки, здоровье и бан. Состояние — в NetworkValidator."""
@@ -101,10 +112,39 @@ class ProxyPoolMixin:
         if proxy:
             exit_ip = (self._proxy_profiles.get(proxy) or {}).get("exit_ip") or str(proxy)
         mx_key = f"{mx_host.lower()}|{exit_ip}"
+
+        # Сервер, который давно не жалуется, получает свой поток обратно.
+        # Раньше сужение было односторонним: потолок падал до одного
+        # соединения и таким оставался до конца прогона.
+        if (mx_key in self._mx_narrowed
+                and self._decayed_mx_errors(mx_host) < 3):
+            with self._mx_error_lock:
+                self._mx_narrowed.pop(mx_key, None)
+            with self._mx_sem_lock:
+                self._mx_semaphores[mx_key] = threading.Semaphore(
+                    self._max_concurrent_per_mx)
+                return self._mx_semaphores[mx_key]
+
         with self._mx_sem_lock:
             if mx_key not in self._mx_semaphores:
                 self._mx_semaphores[mx_key] = threading.Semaphore(self._max_concurrent_per_mx)
             return self._mx_semaphores[mx_key]
+
+    def _decayed_mx_errors(self, mx_host):
+        """Сколько жалоб этого сервера ещё «в силе» с учётом давности."""
+        if not isinstance(mx_host, str) or not mx_host:
+            return 0.0
+        key = mx_host.lower()
+        with self._mx_error_lock:
+            count = self._mx_error_counts.get(key, 0)
+            last = self._mx_error_seen.get(key)
+        if not count:
+            return 0.0
+        if not last:
+            return float(count)
+        elapsed = max(0.0, time.time() - last)
+        decayed = count * (0.5 ** (elapsed / MX_ERROR_HALF_LIFE_SEC))
+        return decayed if decayed >= MX_ERROR_FLOOR else 0.0
 
     def _record_mx_error(self, mx_host: str, proxy=None):
         """Записывает 421 и при накоплении сужает поток к ЭТОЙ паре сервер+IP.
@@ -121,6 +161,7 @@ class ProxyPoolMixin:
         with self._mx_error_lock:
             self._mx_error_counts[mx_key] = self._mx_error_counts.get(mx_key, 0) + 1
             errors = self._mx_error_counts[mx_key]
+            self._mx_error_seen[mx_key] = time.time()
 
         limit = 2 if errors == 3 else (1 if errors == 6 else None)
         if limit is None:
@@ -129,8 +170,12 @@ class ProxyPoolMixin:
         exit_ip = ""
         if proxy:
             exit_ip = (self._proxy_profiles.get(proxy) or {}).get("exit_ip") or str(proxy)
+        pair = f"{mx_key}|{exit_ip}"
         with self._mx_sem_lock:
-            self._mx_semaphores[f"{mx_key}|{exit_ip}"] = threading.Semaphore(limit)
+            self._mx_semaphores[pair] = threading.Semaphore(limit)
+        # Помечаем пару как суженную, чтобы потом было что вернуть обратно.
+        with self._mx_error_lock:
+            self._mx_narrowed[pair] = limit
 
     def set_ptr_proxies(self, ptr_proxies):
         """Задаёт подмножество прокси, у которых есть обратный DNS (FCrDNS).
@@ -408,8 +453,9 @@ class ProxyPoolMixin:
         base = random.uniform(0.1, 0.4)
         if not isinstance(mx_host, str) or not mx_host:
             return base
-        with self._mx_error_lock:
-            errors = self._mx_error_counts.get(mx_host.lower(), 0)
+        # Счёт берётся С УЧЁТОМ ДАВНОСТИ: сервер, замолчавший десять минут
+        # назад, не должен тормозить нас так же, как жалующийся сейчас.
+        errors = self._decayed_mx_errors(mx_host)
         if not errors:
             return base
         return min(base * (2 ** min(errors, 5)), 8.0)

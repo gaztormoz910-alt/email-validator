@@ -176,7 +176,9 @@ def group_by_exit_ip(profiles):
     а не число строк в файле прокси.
     """
     groups = {}
-    for proxy, info in (profiles or {}).items():
+    if not isinstance(profiles, dict):
+        return groups
+    for proxy, info in profiles.items():
         if not isinstance(info, dict):
             continue
         exit_ip = info.get("exit_ip")
@@ -235,6 +237,8 @@ def pick_one_per_exit_ip(profiles, prefer=None):
 
     chooser = prefer or default_prefer
     chosen, spare = [], {}
+    if not isinstance(profiles, dict):
+        return chosen, spare
     for exit_ip, items in group_by_exit_ip(profiles).items():
         ranked = sorted(items, key=lambda p: chooser(p, profiles.get(p) or {}))
         chosen.append(ranked[0])
@@ -243,7 +247,7 @@ def pick_one_per_exit_ip(profiles, prefer=None):
 
     # Прокси без известного выходного IP не схлопываем: мы про них ничего не
     # знаем, и выбросить их означало бы сузить пул на догадке.
-    for proxy, info in (profiles or {}).items():
+    for proxy, info in profiles.items():
         if isinstance(info, dict) and not info.get("exit_ip"):
             chosen.append(proxy)
 
@@ -258,6 +262,8 @@ def pick_one_per_exit_ip(profiles, prefer=None):
 # видеть глазами, какие письма он сейчас проверить МОЖЕТ, а какие нет.
 def _fit_yahoo(info):
     """Yahoo/AOL пускают только IP с обратным DNS (FCrDNS)."""
+    if not isinstance(info, dict):
+        return False
     if info.get("yahoo_ok") is not None:
         return bool(info["yahoo_ok"])       # спросили напрямую — это факт
     if info.get("has_ptr") is True:
@@ -269,6 +275,8 @@ def _fit_yahoo(info):
 
 def _fit_clean_ip(info, direct_key):
     """Outlook/iCloud/GMX смотрят на репутацию адреса."""
+    if not isinstance(info, dict):
+        return False
     direct = info.get(direct_key)
     if direct is not None:
         return bool(direct)
@@ -342,7 +350,11 @@ def _country_breakdown(values):
     """{страна: сколько РАЗНЫХ выходных адресов}. Считаем адреса, не строки."""
     seen_ip = set()
     counts = {}
+    if values is None or not hasattr(values, "__iter__"):
+        return counts
     for info in values:
+        if not isinstance(info, dict):
+            continue
         exit_ip = info.get("exit_ip")
         if not exit_ip or exit_ip in seen_ip:
             continue

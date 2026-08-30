@@ -1,12 +1,22 @@
 import os
 import re
 
+from core.email_syntax import harvest_pattern
+
 from core.encoding import open_text
 
 CLEAN_PREFIX_RE = re.compile(r'^\d+[-.)\\]:й]*\s+')
 
 # Regex для определения email в любой позиции
-_EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
+# Образец берётся из проверки синтаксиса, а не пишется здесь заново.
+#
+# Свой, более узкий образец резал адрес молча и в самом опасном виде — не
+# терял его, а ПОДМЕНЯЛ другим, существующим: `o'brien@gmail.com` приезжал в
+# базу как `brien@gmail.com`, `john.doe@` как `doe@`, а домен на кириллице
+# `ivan@xn--80a1acny.xn--p1ai` обрубался до `ivan@xn--80a1acny.xn`. Владелец
+# писал письмо чужому человеку и не имел ни одного признака, что это не тот,
+# кого он собирал.
+_EMAIL_RE = harvest_pattern(wide=True)
 
 # Словарь гендеров для автоопределения колонок
 _GENDER_VALUES = {

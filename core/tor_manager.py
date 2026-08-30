@@ -192,7 +192,12 @@ class TorManager:
             url = f"https://dist.torproject.org/torbrowser/{version}/tor-expert-bundle-windows-x86_64-{version}.tar.gz"
             self._log(f"[Система] Начинаю автоматическую загрузку Tor v{version} (около 15 МБ)...", "info")
         except Exception as e:
-            self._log(f"[Система] Не удалось получить последнюю версию, используем резервную 15.0.16.", "info")
+            # Причина названа вслух: «используем резервную» без объяснения не
+            # даёт отличить отсутствие сети от изменившегося формата ответа,
+            # а лечатся эти два случая по-разному.
+            self._log("[Система] Не удалось узнать последнюю версию Tor "
+                      "(%s: %s), берём резервную 15.0.16." % (type(e).__name__, e),
+                      "info")
             url = "https://dist.torproject.org/torbrowser/15.0.16/tor-expert-bundle-windows-x86_64-15.0.16.tar.gz"
         
         import tarfile
