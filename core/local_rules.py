@@ -74,10 +74,25 @@ _register(
 _register(
     ("yahoo.com", "ymail.com", "rocketmail.com", "yahoo.co.uk", "yahoo.fr",
      "yahoo.de", "yahoo.es", "yahoo.it", "yahoo.ca", "yahoo.com.au",
-     "yahoo.co.in", "yahoo.com.br", "yahoo.gr", "yahoo.ro", "yahoo.se"),
+     "yahoo.co.in", "yahoo.com.br", "yahoo.gr", "yahoo.ro", "yahoo.se",
+     # Региональные домены были пропущены: правило есть, а к адресу на
+     # yahoo.com.mx оно не применялось.
+     "yahoo.com.ar", "yahoo.com.hk", "yahoo.com.mx", "yahoo.com.ph",
+     "yahoo.com.sg", "yahoo.dk", "yahoo.hu", "yahoo.no"),
     Rule("Yahoo", r"^[a-z][a-z0-9_.]*$", min_len=4, max_len=32,
          starts=r"^[a-z]",
          note="имя Yahoo начинается с буквы, длина 4-32"))
+
+# AOL — та же инфраструктура, что у Yahoo (оба принадлежат Verizon Media), и
+# правила имени у них совпадают. Домены AOL здесь были пропущены целиком:
+# критерий существовал, но к ним не применялся, и adres@aol.com проверялся на
+# одно правило меньше остальных.
+_register(
+    ("aol.com", "aim.com", "verizon.net", "love.com", "games.com",
+     "ygm.com", "wow.com", "aol.co.uk", "aol.de", "aol.fr"),
+    Rule("AOL", r"^[a-z][a-z0-9_.]*$", min_len=3, max_len=32,
+         starts=r"^[a-z]",
+         note="имя AOL начинается с буквы, длина 3-32"))
 
 _register(
     ("icloud.com", "me.com", "mac.com"),
@@ -98,7 +113,7 @@ _register(
 _register(
     ("outlook.com", "hotmail.com", "live.com", "msn.com", "hotmail.co.uk",
      "hotmail.fr", "hotmail.de", "hotmail.es", "hotmail.it", "live.co.uk",
-     "live.fr", "outlook.co.uk"),
+     "live.fr", "outlook.co.uk", "passport.com"),
     Rule("Outlook", r"^[a-z0-9][a-z0-9._\-]*$", min_len=1, max_len=64,
          note="имя Outlook — латиница, цифры, точка, дефис и подчёркивание"))
 
