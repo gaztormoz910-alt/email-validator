@@ -32,7 +32,8 @@ from core.mail_constants import (                                 # noqa: E402,F
 # Синтаксис адреса и IDN живут в core/email_syntax.py: это единственный
 # вердикт, который ставится без обращения к сети, и разбирать его вместе с
 # сетевым клиентом значило прятать самое тихое место проверки в самом шумном.
-from core.email_syntax import (                                   # noqa: E402,F401
+from core.email_syntax import (
+    has_quoted_local,                                   # noqa: E402,F401
     to_ascii_domain, has_non_ascii_local, validate_email_syntax,
     MAX_EMAIL_BYTES, MAX_LOCAL_BYTES, MAX_DOMAIN_BYTES,
 )
@@ -906,6 +907,17 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
 
         # Шаг 0: Проверка синтаксиса (п.1.3). IDN проходит — см. validate_email_syntax.
         if not validate_email_syntax(email):
+            # Локальная часть в кавычках законна по RFC 5321 §4.1.2, но
+            # проверить её мы не можем: кавычки надо сохранить в RCPT, а
+            # внутри них законны пробел и собственная «@». Это «не
+            # проверено», а не «неправильный адрес»: приговор живому ящику
+            # без единого запроса к серверу — та самая ошибка, которая
+            # неисправима, потому что владелец такой адрес просто удалит.
+            if has_quoted_local(email):
+                return {"status": "unknown",
+                        "reason": ("Локальная часть в кавычках (RFC 5321 §4.1.2) — "
+                                   "RCPT с ней отправить нельзя, адрес не проверен"),
+                        "mx_record": "N/A"}
             return {"status": "invalid", "reason": "Bad Syntax (RFC 5322)", "mx_record": "N/A"}
 
         # Не-ASCII локальная часть законна (RFC 6531), но `RCPT TO` с ней не
