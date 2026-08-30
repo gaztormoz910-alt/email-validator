@@ -1,6 +1,8 @@
 # core/filters.py
 import os
 
+from core.encoding import open_text
+
 # Файлы в data/, которые НЕ являются чёрными списками.
 #
 # SpamFilter загружает все .txt из папки подряд, и это удобно ровно до того
@@ -66,7 +68,11 @@ class SpamFilter:
     def _read_domains(filepath):
         domains = set()
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            # Файл списка владелец правит в блокноте, и одна строка
+            # комментария по-русски в cp1251 роняла разбор целиком:
+            # UnicodeDecodeError ловился ниже, и ВЕСЬ список молча
+            # отбрасывался — вместе с доменами, которые в нём были.
+            with open_text(filepath) as f:
                 for line in f:
                     domain = line.strip().lower()
                     if domain and not domain.startswith("#"):

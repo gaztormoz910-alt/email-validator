@@ -41,6 +41,8 @@ from urllib.parse import urlparse, parse_qs
 
 from core import input_guard
 from ui.result_store import normalize_filters
+from core.encoding import open_text
+from core.baseops import export_encoding
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -288,7 +290,10 @@ class ValidatorApi:
         try:
             if os.path.getsize(path) > self.INLINE_LIMIT:
                 return None
-            with io.open(path, "r", encoding="utf-8", errors="replace") as handle:
+            # Тот же определитель кодировки, что и у движка: иначе файл
+            # из Excel показывался бы в поле замещающими символами, и
+            # владелец видел бы порчу там, где её нет.
+            with open_text(path) as handle:
                 return handle.read()
         except OSError:
             return None
@@ -409,12 +414,15 @@ class ValidatorApi:
         # Владелец принимал это за неудалённые дубликаты.
         if self._busy() or self._starting:
             return {"ok": False, "error": "Проверка уже идёт"}
-        self._starting = True
+        # Проверка источников идёт ДО взведения флага. Раньше флаг ставился
+        # раньше, и выход «сначала выберите адреса и прокси» оставлял его
+        # взведённым навсегда: следующий щелчок получал «проверка уже идёт»,
+        # хотя не шло ничего, и кнопка не оживала до перезапуска программы.
         if not self.email_sources or not self.proxy_sources:
             return {"ok": False, "error": "Сначала выберите адреса и прокси"}
+        self._starting = True
 
         from core.parser.ml_predictor import set_country_mode
-        from core.streamer import StreamLoader
         set_country_mode(payload.get("country") or "coverage")
 
         self.store.clear()
@@ -422,7 +430,31 @@ class ValidatorApi:
         self._state = "running"
         self._proxy_summary = None
 
-        thread = self.pipeline.start(
+        try:
+            thread = self._launch_pipeline(payload)
+        except Exception as exc:
+            # Без этого исключение внутри подготовки запирало запуск до
+            # перезапуска: флаг остался бы взведённым, а сторож ниже —
+            # неустановленным.
+            self._starting = False
+            self._state = "done"
+            return {"ok": False, "error": "Запуск не удался: %s" % exc}
+
+        # Сторож снимает запрет, как только поток кончился: без него упавшая
+        # подготовка запирала бы запуск до перезапуска программы.
+        def release():
+            if thread is not None:
+                thread.join()
+            self._starting = False
+
+        threading.Thread(target=release, daemon=True).start()
+        return {"ok": True}
+
+    def _launch_pipeline(self, payload):
+        """Собственно запуск. Вынесен, чтобы сброс флага был в одном месте."""
+        from core.streamer import StreamLoader
+
+        return self.pipeline.start(
             email_sources=list(self.email_sources),
             threads=self._number(payload, "threads", 100, 1, 500),
             timeout=self._number(payload, "timeout", 5, 1, 300),
@@ -444,16 +476,6 @@ class ValidatorApi:
             enable_osint=bool(payload.get("osint", True)),
             use_cache=bool(payload.get("cache", True)),
             resume=False)
-
-        # Сторож снимает запрет, как только поток кончился: без него упавшая
-        # подготовка запирала бы запуск до перезапуска программы.
-        def release():
-            if thread is not None:
-                thread.join()
-            self._starting = False
-
-        threading.Thread(target=release, daemon=True).start()
-        return {"ok": True}
 
     def pause(self, payload=None):
         self.pipeline.pause()
@@ -728,7 +750,7 @@ class ValidatorApi:
                 proxies = []
                 if proxy_sources:
                     from core.network import dedupe_proxies_stream
-                    from core.stream_loader import StreamLoader
+                    from core.streamer import StreamLoader
                     proxies = list(dedupe_proxies_stream(
                         StreamLoader(proxy_sources).stream_lines()))
 
@@ -839,7 +861,8 @@ class ValidatorApi:
 
         def write():
             try:
-                with open(path, "w", encoding="utf-8", newline="") as handle:
+                with open(path, "w", encoding=export_encoding(path),
+                          newline="") as handle:
                     if path.lower().endswith(".csv"):
                         import csv
                         writer = csv.writer(handle)
@@ -899,7 +922,8 @@ class ValidatorApi:
                                        key=lambda kv: -len(kv[1])):
                 name = "%s-%s.csv" % (key, segment_filename(value))
                 path = os.path.join(folder, name)
-                with io.open(path, "w", encoding="utf-8", newline="") as handle:
+                with io.open(path, "w", encoding=export_encoding(path),
+                             newline="") as handle:
                     writer = csv.writer(handle)
                     writer.writerow(["Email", "Status", "Name", "Gender",
                                      "Country", "Score", "ValidatedAt"])

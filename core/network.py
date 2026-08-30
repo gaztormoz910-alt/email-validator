@@ -240,6 +240,14 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
 
         # Адаптивный Rate Limiting: счётчик 421-ошибок по MX (п.5 — adaptive)
         self._mx_error_counts = BoundedCache()
+        # Когда этот сервер жаловался в последний раз. Без времени счётчик
+        # только рос: одна тугая минута в начале прогона держала паузу в
+        # восемь секунд и потолок в одно соединение до самого конца, даже
+        # когда сервер давно отвечал нормально. На сотнях тысяч адресов это
+        # разница в часы.
+        self._mx_error_seen = BoundedCache()
+        # Пары «сервер|наш IP», которым поток уже сужен, и до скольких.
+        self._mx_narrowed = BoundedCache()
         self._mx_error_lock = threading.Lock()
 
         # Proxy Health Scoring (п.8): score каждого прокси

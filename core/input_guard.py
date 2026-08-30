@@ -25,6 +25,8 @@ import io
 import os
 import re
 
+from core.encoding import open_text
+
 # Сколько строк файла достаточно для опознания. Читать целиком нельзя: база на
 # десять миллионов адресов встанет колом ровно на проверке, ради которой всё
 # и затевалось. Тип списка виден по первым же строкам — если первые двести
@@ -106,6 +108,8 @@ def fix_layout(text):
 
 def _is_host(value):
     """Похоже ли на хост: IP-адрес или доменное имя на латинице."""
+    if not isinstance(value, str):
+        return False
     return bool(_IP_RE.match(value) or _HOST_RE.match(value))
 
 
@@ -125,6 +129,8 @@ def _tld_exists(domain):
     выдуманный — вердикт всё равно поставит SMTP. Не-ASCII проверяются по
     списку: именно там проходит граница с раскладкой.
     """
+    if not isinstance(domain, str):
+        return False
     if "." not in domain:
         return False
     tld = domain.rsplit(".", 1)[1].strip().lower()
@@ -267,6 +273,14 @@ def classify(lines, limit=SAMPLE_LINES):
     layout_fixes = []
     seen = 0
 
+    # Строка — тоже итерируемое, но по СИМВОЛАМ: разбор одного адреса по
+    # буквам дал бы «в файле 14 непонятных строк» вместо ответа. Отдельная
+    # строка — это выборка из одной строки.
+    if isinstance(lines, (str, bytes)):
+        lines = [lines]
+    elif lines is None or not hasattr(lines, "__iter__"):
+        lines = []
+
     for raw in lines:
         line = str(raw or "").strip()
         if not line or line.startswith("#"):
@@ -311,6 +325,12 @@ def check(lines, expected, limit=SAMPLE_LINES):
     summary = classify(lines, limit=limit)
     counts = summary["counts"]
     checked = summary["checked"]
+
+    # Неизвестное имя поля — это ошибка вызывающего кода, а не владельца.
+    # Падение здесь запирало бы загрузку файла целиком, поэтому страж
+    # молча пропускает: его дело — предупреждать, а не мешать работать.
+    if not isinstance(expected, str) or expected not in KIND_TITLE:
+        return {"ok": True, "reason": "", "summary": summary}
 
     if not checked:
         return {"ok": False, "reason": "Список пуст — проверять нечего.",
@@ -365,7 +385,10 @@ def check_file(path, expected, limit=SAMPLE_LINES):
     полное чтение ради опознания типа стоило бы дороже самой проверки.
     """
     try:
-        with io.open(path, "r", encoding="utf-8", errors="replace") as handle:
+        # Кодировка определяется по выборке байт. Читая cp1251 как UTF-8,
+        # мы получали в каждой кириллической строке символы замены — и
+        # страж честно объявлял базу «набранной не в той раскладке».
+        with open_text(path) as handle:
             sample = []
             for line in handle:
                 sample.append(line)
@@ -373,9 +396,16 @@ def check_file(path, expected, limit=SAMPLE_LINES):
                 # значимых строк в выборке может оказаться меньше лимита.
                 if len(sample) >= limit * 3:
                     break
-    except OSError as error:
+    except (OSError, TypeError, ValueError) as error:
+        # TypeError и ValueError сюда попадают из-за пути, которым файл не
+        # открыть вовсе (None, число, строка с нулевым байтом). Для владельца
+        # это тот же случай «файл не прочитан», и звучать должно так же.
+        try:
+            shown = os.path.basename(path)
+        except Exception:
+            shown = repr(path)
         return {"ok": False,
-                "reason": "Не удалось прочитать %s: %s" % (os.path.basename(path), error),
+                "reason": "Не удалось прочитать %s: %s" % (shown, error),
                 "summary": classify([])}
 
     result = check(sample, expected, limit=limit)

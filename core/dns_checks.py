@@ -416,8 +416,10 @@ class DnsChecksMixin:
                     break
         except DNSUnavailable:
             dns_failed = True
+        except self._ANSWERED_NOTHING:
+            pass                      # это ОТВЕТ: записи у домена нет
         except Exception:
-            pass
+            dns_failed = True         # всё прочее — мы не спросили
 
         # Проверяем DMARC (TXT-запись на _dmarc.domain)
         try:
@@ -429,8 +431,10 @@ class DnsChecksMixin:
                     break
         except DNSUnavailable:
             dns_failed = True
-        except Exception:
+        except self._ANSWERED_NOTHING:
             pass
+        except Exception:
+            dns_failed = True
 
         # Проверяем DKIM (п.2 DNS-здоровье +1 балл) — пробуем популярные селекторы
         # Селекторы DKIM. Универсального способа их узнать нет — имя выбирает
@@ -453,15 +457,26 @@ class DnsChecksMixin:
                 # DNS недоступен — перебирать остальные 20+ селекторов бессмысленно
                 dns_failed = True
                 break
+            except self._ANSWERED_NOTHING:
+                continue              # этого селектора нет, пробуем следующий
             except Exception:
+                # Сбой, а не ответ. Перебор продолжаем — вдруг следующий
+                # селектор ответит, — но помним, что нуль в конце может
+                # оказаться нашим, а не доменным.
+                dns_failed = True
                 continue
 
         score = int(has_spf) + int(has_dmarc) + int(has_dkim)
         result = {'has_spf': has_spf, 'has_dmarc': has_dmarc, 'has_dkim': has_dkim, 'score': score}
 
-        # DNS не ответил и ничего не нашли — это «не проверили», а не «записей нет».
-        # Кэшировать такой нуль нельзя: домен навсегда остался бы без бонуса.
-        if dns_failed and score == 0:
+        # DNS не ответил — кэшировать результат нельзя вообще, а не только
+        # при нулевом счёте.
+        #
+        # Раньше условие требовало score == 0, и частичный ответ запоминался
+        # как полный: SPF нашёлся, DMARC отвалился по таймауту — и домен до
+        # конца прогона числился «SPF есть, DMARC нет». Это ровно то, за что
+        # адрес штрафовать нельзя: «не проверено» — не то же, что «нет».
+        if dns_failed:
             return result
 
         with self._dns_health_lock:

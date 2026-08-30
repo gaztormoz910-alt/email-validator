@@ -36,6 +36,21 @@ import core.parser.translit as TRL
 import core.smtp_codes as SC
 import core.streamer as ST
 import core.org_role as OR
+# Третья волна модулей. Обстрел показал, ради чего это делается: шесть
+# модулей, стоявших вне сита, дали 100 падений на мусоре — из них
+# detect_encoding(True) открывал файловый дескриптор 1, то есть стандартный
+# вывод программы, и закрывал его вместе с блоком with.
+import core.encoding as EN
+import core.input_guard as IG
+import core.settings as SE
+import core.email_syntax as ES
+import core.local_rules as LR
+import core.bounded as BD
+import core.proxy_profile as PP
+import core.parser.ml_predictor as ML
+import core.parser.name_extractor as NE
+import core.runstate as RS
+import core.proxy_transport as PT
 from core.network import NetworkValidator, PROXY_MAX_CONSECUTIVE_FAILS as MAXF
 from core.scoring import calculate_engagement_score as score
 from core.cleaner import EmailCleaner, normalize_for_dedup
@@ -51,6 +66,17 @@ GARBAGE = [
 CONTRACT_ERRORS = (TypeError, ValueError, AttributeError, KeyError, IndexError,
                    UnboundLocalError, ZeroDivisionError, RecursionError)
 
+# Кого обстреливать нельзя.
+#
+# Функция, которая ХОДИТ В СЕТЬ, на мусорном хосте не падает, а ждёт таймаут:
+# двадцать шесть значений мусора превратили бы прогон тестов в минуты пауз.
+# Открыватель файла отдельно: open_text("нет такого файла") ОБЯЗАН бросить
+# FileNotFoundError — это его контракт, ровно как у встроенного open. Молча
+# вернуть пустоту здесь означало бы «файл прочитан, в нём ничего нет».
+NO_FIRE = ("resolve", "probe", "fetch", "download", "connect", "profile",
+           "refresh", "ping", "whois", "rdap", "start", "run", "open_text",
+           "load_index", "serve", "request", "check_dnsbl", "check_ptr")
+
 
 class TestNoCrashOnGarbage(unittest.TestCase):
     """Публичная функция не должна падать на мусорном входе.
@@ -63,10 +89,13 @@ class TestNoCrashOnGarbage(unittest.TestCase):
     def _targets(self):
         v = NetworkValidator(timeout=2)
         targets = []
-        for mod in (N, C, H, P, S, D, BO, CA, FL, GP, NIX, TRL, SC, ST, OR):
+        for mod in (N, C, H, P, S, D, BO, CA, FL, GP, NIX, TRL, SC, ST, OR,
+                    EN, IG, SE, ES, LR, BD, PP, ML, NE, RS, PT):
             for name, fn in vars(mod).items():
                 if (inspect.isfunction(fn) and not name.startswith("__")
                         and getattr(fn, "__module__", "") == mod.__name__):
+                    if any(marker in name.lower() for marker in NO_FIRE):
+                        continue
                     targets.append((mod.__name__ + "." + name, fn))
         for name in ["_parse_smtp_response", "_is_server_outdated",
                      "has_proxies_configured", "get_live_proxy_count",
