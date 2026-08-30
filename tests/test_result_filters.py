@@ -326,3 +326,173 @@ def test_normalize_survives_junk():
     assert picked["min_score"] == 0
     assert picked["country"] == []
     assert picked["search"] == ""
+
+
+# ────────────────────────────────────────────────────────── порядок строк
+
+def test_order_rows_come_best_first(filled):
+    """Строки идут по убыванию качества: сотня сверху, ноль внизу.
+
+    Владелец решает по этому списку, кому слать, и первым делом смотрит на
+    верх таблицы. Порядок поступления там не значит ничего.
+    """
+    rows = filled.page(filters={"groups": ["valid", "invalid"]}, size=1000)
+    scores = [row["data"]["engagement_score"] for row in rows]
+    assert scores == sorted(scores, reverse=True), scores[:20]
+    assert scores[0] > scores[-1], "в выборке все оценки одинаковы — проверять нечего"
+
+
+def test_order_holds_without_any_filters(filled):
+    """Самый дешёвый путь тоже обязан сортировать.
+
+    Именно он используется, когда владелец просто открыл вкладку и ничего не
+    выбирал, — то есть в большинстве случаев.
+    """
+    rows = filled.page(("valid",), size=1000)
+    scores = [row["data"]["engagement_score"] for row in rows]
+    assert scores == sorted(scores, reverse=True), scores[:20]
+
+
+def test_order_is_stable_for_equal_scores(filled):
+    """Одинаковые оценки не должны прыгать между перерисовками.
+
+    Иначе строка уезжает из-под курсора на каждом тике опроса.
+    """
+    first = [row["email"] for row in filled.page(("valid",), size=1000)]
+    second = [row["email"] for row in filled.page(("valid",), size=1000)]
+    assert first == second
+
+
+def test_order_sorts_the_whole_selection_not_just_the_page(filled):
+    """Первая страница обязана содержать лучших ВООБЩЕ, а не лучших из первых ста.
+
+    Сортировка страницы после выборки выглядит правильно ровно до тех пор,
+    пока база не станет больше страницы.
+    """
+    top = filled.page(filters={"groups": ["valid", "invalid"]}, page=1, size=5)
+    best_on_page = min(row["data"]["engagement_score"] for row in top)
+
+    everything = filled.page(filters={"groups": ["valid", "invalid"]}, size=10_000)
+    best_overall = sorted((row["data"]["engagement_score"] for row in everything),
+                          reverse=True)[:5]
+    assert best_on_page == min(best_overall), (best_on_page, best_overall)
+
+
+def test_paging_order_pages_do_not_overlap_and_cover_everything(filled):
+    """Сортировка не должна ломать постраничник."""
+    picked = {"groups": ["valid", "invalid"]}
+    total = filled.matching_count(filters=picked)
+
+    seen, page = [], 1
+    while True:
+        rows = filled.page(filters=picked, page=page, size=7)
+        if not rows:
+            break
+        seen.extend(row["email"] for row in rows)
+        page += 1
+
+    assert len(seen) == total
+    assert len(set(seen)) == total, "страницы пересеклись"
+
+
+def test_paging_order_stays_sorted_across_pages(filled):
+    """Последняя строка страницы не хуже первой строки следующей."""
+    picked = {"groups": ["valid", "invalid"]}
+    previous = None
+    page = 1
+    while True:
+        rows = filled.page(filters=picked, page=page, size=7)
+        if not rows:
+            break
+        scores = [row["data"]["engagement_score"] for row in rows]
+        assert scores == sorted(scores, reverse=True), (page, scores)
+        if previous is not None:
+            assert previous >= scores[0], (page, previous, scores[0])
+        previous = scores[-1]
+        page += 1
+
+
+def test_paging_order_works_with_filters_and_search(filled):
+    """Порядок держится и вместе с отбором по граням."""
+    picked = {"groups": ["valid", "invalid"], "provider": ["gmail.com"],
+              "search": "user"}
+    rows = filled.page(filters=picked, size=1000)
+    assert rows
+    scores = [row["data"]["engagement_score"] for row in rows]
+    assert scores == sorted(scores, reverse=True), scores
+
+
+# ─────────────────────────────────────────────── повтор одного ящика
+
+def test_repeats_are_kept_by_default():
+    """Хранилище общего назначения не глотает строки молча.
+
+    Положил шесть — получи шесть. Тихое схлопывание превращает потерю
+    данных в «особенность», которую замечаешь через месяц.
+    """
+    store = ResultStore()
+    try:
+        for _ in range(6):
+            store.append("j@example.com", "Valid", "250 OK", "mx",
+                         {"engagement_score": 50})
+        assert store.counts()["valid"] == 6
+        assert len(store.page(("valid",), size=10)) == 6
+    finally:
+        store.close()
+
+
+def test_repeats_are_dropped_when_asked():
+    """Окно просит об этом сознательно: строка там — предложение слать письмо.
+
+    Один ящик двумя строками означает двойную отправку и жалобу на спам.
+    """
+    store = ResultStore(drop_repeats=True)
+    try:
+        for _ in range(6):
+            store.append("j@example.com", "Valid", "250 OK", "mx",
+                         {"engagement_score": 50})
+        assert store.counts()["valid"] == 1
+        rows = store.page(("valid",), size=10)
+        assert [row["email"] for row in rows] == ["j@example.com"]
+    finally:
+        store.close()
+
+
+def test_repeats_are_matched_case_insensitively():
+    """Один и тот же ящик, записанный по-разному, — это один ящик."""
+    store = ResultStore(drop_repeats=True)
+    try:
+        store.append("Ivan@Gmail.com", "Valid", "250 OK", "mx", {})
+        store.append("ivan@gmail.com", "Valid", "250 OK", "mx", {})
+        store.append("  IVAN@GMAIL.COM  ", "Valid", "250 OK", "mx", {})
+        assert store.counts()["valid"] == 1
+    finally:
+        store.close()
+
+
+def test_repeats_do_not_hide_different_addresses():
+    """Положительный контроль: отбрасывается ТОЛЬКО повтор."""
+    store = ResultStore(drop_repeats=True)
+    try:
+        for i in range(6):
+            store.append("user%d@gmail.com" % i, "Valid", "250 OK", "mx", {})
+        assert store.counts()["valid"] == 6
+    finally:
+        store.close()
+
+
+def test_repeats_survive_a_flush_to_disk():
+    """Повтор ловится и после того, как пачка ушла на диск.
+
+    Ключи несохранённой пачки живут в памяти, а сохранённых — в базе;
+    проверять надо оба места, иначе дубль проскочит ровно на границе.
+    """
+    store = ResultStore(drop_repeats=True)
+    try:
+        store.append("j@example.com", "Valid", "250 OK", "mx", {})
+        store.matching_count(("valid",))          # заставляет дописать пачку
+        store._flush_locked()
+        store.append("j@example.com", "Valid", "250 OK", "mx", {})
+        assert store.counts()["valid"] == 1
+    finally:
+        store.close()
