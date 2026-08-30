@@ -13,7 +13,7 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
 from ui.colors import *
-from core.baseops import export_encoding
+from core.baseops import csv_row, export_encoding
 
 
 
@@ -93,7 +93,7 @@ class ParserTabMixin:
                         writer = csv.writer(f)
                         writer.writerow(["Email", "Dork Source"])
                         for r in self.parser_results_data:
-                            writer.writerow([r["email"], r["dork"]])
+                            writer.writerow(csv_row([r["email"], r["dork"]]))
                 else:
                     # Txt mode: just distinct emails to save the user from deduplicating
                     distinct_emails = list(set([r["email"] for r in self.parser_results_data]))
@@ -158,7 +158,12 @@ class ParserTabMixin:
             один прокси, записанный дважды, занимал два места в ротации.
             Протоколы берутся все: чекер умеет socks4, socks5 и HTTP CONNECT.
             """
+            # Импорт был потерян: имя использовалось, а взяться ему в этом
+            # модуле было неоткуда. Сбор с прокси падал NameError внутри
+            # потока — то есть молча, ровно как в новом окне, где на том же
+            # месте стояло неверное имя модуля.
             from core.network import dedupe_proxies_stream
+            from core.streamer import StreamLoader
             actual_proxies = list(dedupe_proxies_stream(
                 StreamLoader(proxy_sources).stream_lines()))
 

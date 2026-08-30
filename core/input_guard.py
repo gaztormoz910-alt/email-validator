@@ -137,6 +137,12 @@ def _tld_exists(domain):
     if len(tld) < 2:
         return False
     if tld.isascii():
+        # Зона в punycode состоит не из одних букв: .рф на проводе выглядит
+        # как xn--p1ai. Проверка на isalpha() отвергала такой адрес, и база,
+        # уже переведённая в punycode — а именно её отдаёт любой экспорт, —
+        # объявлялась «не списком адресов» целиком.
+        if tld.startswith("xn--"):
+            return len(tld) > 4 and all(c.isalnum() or c == "-" for c in tld)
         return tld.isalpha()
     return tld in IDN_TLD
 

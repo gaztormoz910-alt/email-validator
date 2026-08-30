@@ -10,6 +10,7 @@ import ast
 import importlib.util
 import io
 import os
+import re
 import sys
 import tempfile
 import time
@@ -642,3 +643,250 @@ def test_harvest_web_still_drops_the_usual_false_positives():
 
     found = EmailExtractor().extract("profile.png@2x example@example.com sentry@1.0.0")
     assert not any(e.endswith(".png") or e.startswith("example@") for e in found)
+
+
+# ═══════════════════════════════ G14: страж не отвергает punycode-зону
+
+def test_punycode_zone_is_recognised_as_an_address():
+    """База, уже переведённая в punycode, объявлялась «не списком адресов».
+
+    Проверка зоны требовала одних букв, а `.рф` на проводе выглядит как
+    `xn--p1ai`. Именно в таком виде адрес отдаёт любой экспорт — и весь файл
+    отвергался целиком, ещё до проверки.
+    """
+    from core.input_guard import KIND_EMAIL, detect_kind, looks_like_email
+
+    assert looks_like_email("ivan@xn--80a1acny.xn--p1ai") is True
+    assert detect_kind("ivan@xn--80a1acny.xn--p1ai") == KIND_EMAIL
+
+
+def test_punycode_zone_file_passes_the_guard():
+    """Тот же случай целым файлом, как его увидит владелец."""
+    from core.input_guard import KIND_EMAIL, check_file
+
+    path = written("ivan@xn--80a1acny.xn--p1ai\nanna@xn--80a1acny.xn--p1ai\n".encode("utf-8"))
+    try:
+        assert check_file(path, KIND_EMAIL)["ok"] is True
+    finally:
+        os.unlink(path)
+
+
+def test_punycode_zone_does_not_open_the_door_to_junk():
+    """Обратная сторона: «xn--» само по себе зоной не становится."""
+    from core.input_guard import looks_like_email
+
+    assert looks_like_email("ivan@x.xn--") is False
+    assert looks_like_email("ivan@xn--") is False
+    assert looks_like_email("ivan@x.!!") is False
+
+
+# ═══════════════════════════════ G15: один ящик — один ключ
+
+def test_idn_dedup_treats_both_spellings_as_one_mailbox():
+    """`ivan@почта.рф` и `ivan@xn--80a1acny.xn--p1ai` — ОДИН ящик.
+
+    Ключи были разные, и человек получал письмо дважды. Хуже: отписавшийся
+    под одним написанием не был защищён от рассылки по другому.
+    """
+    from core.cleaner import normalize_for_dedup
+
+    assert (normalize_for_dedup("ivan@почта.рф")
+            == normalize_for_dedup("ivan@xn--80a1acny.xn--p1ai"))
+
+
+def test_idn_dedup_subtracts_the_unsubscribed_in_either_spelling():
+    """Тот же ключ обязан работать и в вычитании отписок."""
+    from core.baseops import subtract
+
+    left = subtract(["ivan@xn--80a1acny.xn--p1ai", "ivan@gmail.com"],
+                    ["ivan@почта.рф"])
+    assert left == ["ivan@gmail.com"]
+
+
+def test_idn_dedup_returns_the_original_address_untouched():
+    """Ключ — только для сравнения. Наружу идёт то, что дал владелец."""
+    from core.baseops import dedupe
+
+    assert dedupe(["ivan@почта.рф", "ivan@xn--80a1acny.xn--p1ai"]) == ["ivan@почта.рф"]
+
+
+def test_idn_dedup_keeps_the_old_rules_intact():
+    """Обратная сторона: прежние правила ключа не поехали."""
+    from core.cleaner import normalize_for_dedup as key
+
+    assert key("john.doe@gmail.com") == key("johndoe@gmail.com")
+    assert key("j@googlemail.com") == key("j@gmail.com")
+    assert key("john.doe@outlook.com") != key("johndoe@outlook.com")
+    assert key("ivan@почта.рф") != key("anna@почта.рф")
+
+
+# ═══════════════════════════════ G16: имя, которому неоткуда взяться
+
+def test_undefined_names_nowhere_in_the_project():
+    """Использованное имя без импорта — то же молчание, что и импорт в пустоту.
+
+    В классическом окне так и было: `StreamLoader` вызывался в сборе адресов,
+    а импорта не было. Сбор с прокси падал NameError внутри потока — без
+    строки в логе, без окна с ошибкой. Проверка на импорты этого не ловит:
+    там имя модуля неверное, здесь имени нет вовсе.
+    """
+    from pyflakes.api import check
+    from pyflakes.reporter import Reporter
+
+    class Collect(io.StringIO):
+        pass
+
+    out, err = Collect(), Collect()
+    reporter = Reporter(out, err)
+    for path in source_files():
+        rel = os.path.relpath(path, ROOT)
+        if rel.startswith(("tests" + os.sep, ".unlazy" + os.sep)):
+            continue
+        check(io.open(path, encoding="utf-8", errors="replace").read(), rel, reporter)
+
+    # Имена из ui/colors.py приходят звёздным импортом: pyflakes их не видит,
+    # но они настоящие. Их сомнения отбрасываем, чужие — нет.
+    import ui.colors as colors
+    known = set(dir(colors))
+
+    bad = []
+    for line in out.getvalue().splitlines():
+        # Само по себе «здесь есть звёздный импорт» — предупреждение о
+        # способе, а не находка. Отбрасываем именно его, а не все подряд.
+        if "unable to detect undefined names" in line:
+            continue
+        if "undefined name" not in line and "may be undefined" not in line:
+            continue
+        found = re.search(r"'([A-Za-z_][A-Za-z0-9_]*)'", line)
+        if found and found.group(1) in known:
+            continue
+        bad.append(line)
+    assert bad == [], "имени неоткуда взяться: %s" % bad[:5]
+
+
+def test_undefined_names_check_can_actually_fail():
+    """Отрицательный контроль: сито обязано ловить подставленную ошибку."""
+    from pyflakes.api import check
+    from pyflakes.reporter import Reporter
+
+    out, err = io.StringIO(), io.StringIO()
+    check("def f():\n    return ThisNameDoesNotExist\n", "проба.py", Reporter(out, err))
+    assert "undefined name" in out.getvalue()
+
+
+def test_classic_parser_tab_reads_proxies():
+    """Тот самый случай, названный по имени."""
+    import ui.parser_tab as tab
+
+    source = io.open(tab.__file__, encoding="utf-8").read()
+    assert "from core.streamer import StreamLoader" in source
+
+
+# ═══════════════════════════════ G17: нумерация в начале строки
+
+NUMBERED = [
+    ("1. ivan@gmail.com", "ivan@gmail.com"),
+    ("2) anna@mail.ru", "anna@mail.ru"),
+    ("100: bob@yahoo.com", "bob@yahoo.com"),
+    ("3-й petr@aol.com", "petr@aol.com"),
+    ("5 kate@icloud.com", "kate@icloud.com"),
+    ("7. 1.2.3.4:8080", "1.2.3.4:8080"),
+]
+
+
+@pytest.mark.parametrize("line,expected", NUMBERED)
+def test_numbering_is_actually_stripped(line, expected):
+    """Образец не снимал НИЧЕГО: лишняя косая закрывала класс символов.
+
+    Он требовал после цифр буквального «:й». Списки, скопированные с форума
+    или из документа, нумерованы почти всегда, и нумерованный прокси
+    `1. 1.2.3.4:8080` прокси не является — он терялся построчно.
+    """
+    from core.streamer import clean_input_line_fast
+
+    assert clean_input_line_fast(line) == expected
+
+
+def test_numbering_leaves_a_clean_line_alone():
+    """Обратная сторона: то, что не нумерация, не трогаем."""
+    from core.streamer import clean_input_line_fast
+
+    for line in ("ivan@gmail.com", "1.2.3.4:8080", "1234567890@mail.ru",
+                 "site:vk.com @mail.ru"):
+        assert clean_input_line_fast(line) == line
+
+
+def test_numbering_has_one_definition_for_the_whole_program():
+    """Копий образца было три, и рабочей — одна.
+
+    Окно чистило вставку своей копией, движок — своей испорченной, а третья
+    лежала в gui.py и не использовалась вовсе.
+    """
+    from core.streamer import clean_input_line_fast
+    from ui.widgets import clean_input_line
+
+    assert clean_input_line("1. ivan@gmail.com") == "ivan@gmail.com"
+    assert clean_input_line.__module__ != clean_input_line_fast.__module__
+    assert clean_input_line("1. ivan@gmail.com") == clean_input_line_fast("1. ivan@gmail.com")
+
+    gui = io.open(os.path.join(ROOT, "ui", "gui.py"), encoding="utf-8").read()
+    assert "CLEAN_PREFIX_RE = re.compile" not in gui
+
+
+def test_numbering_survives_a_whole_numbered_file():
+    """Как это выглядит у владельца: файл, скопированный с нумерацией."""
+    from core.streamer import StreamLoader
+
+    path = written("1. ivan@gmail.com\n2. анна@mail.ru\n3. bob@yahoo.com\n".encode("cp1251"))
+    try:
+        lines = list(StreamLoader([{"type": "file", "path": path}]).stream_lines())
+        assert lines == ["ivan@gmail.com", "анна@mail.ru", "bob@yahoo.com"]
+    finally:
+        os.unlink(path)
+
+
+# ═══════════════════════════════ G18: ячейка CSV — не формула
+
+def test_csv_cell_does_not_become_a_formula_in_excel():
+    """База собрана со страниц в интернете, то есть её пишет кто угодно.
+
+    Ячейка, начинающаяся со знака равенства, в Excel не показывается, а
+    ВЫПОЛНЯЕТСЯ.
+    """
+    from core.baseops import csv_cell
+
+    for danger in ("=HYPERLINK(\"http://x\")", "+1+1", "-2+3", "@SUM(A1)"):
+        assert csv_cell(danger).startswith("'"), danger
+
+
+def test_csv_cell_leaves_ordinary_values_alone():
+    """Обратная сторона: обычное значение не портим."""
+    from core.baseops import csv_cell
+
+    for ok in ("ivan@gmail.com", "Иван", "Россия", "85", ""):
+        assert csv_cell(ok) == ok
+    assert csv_cell(None) is None
+    assert csv_cell(42) == 42
+
+
+def test_csv_export_puts_the_guard_on_every_column():
+    """Проверяется выгрузка целиком, а не одна функция."""
+    import csv
+
+    from core.baseops import write_chunks_stream, csv_row
+
+    def writer(handle, rows):
+        w = csv.writer(handle)
+        w.writerow(["Email", "Name"])
+        for row in rows:
+            w.writerow(csv_row(row))
+
+    path = tempfile.mktemp(suffix=".csv")
+    try:
+        write_chunks_stream([["ivan@gmail.com", "=HYPERLINK(\"http://x\")"]],
+                            path, 0, writer)
+        text = io.open(path, encoding="utf-8-sig").read()
+        assert "'=HYPERLINK" in text
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)

@@ -21,7 +21,6 @@ from ui.widgets import (ProxyHunterInputSelector, ProxyHunterSlider,
 from core.pipeline import ValidationPipeline
 from core.streamer import StreamLoader
 
-CLEAN_PREFIX_RE = re.compile(r'^\d+[-.)\]:й]*\s+')
 
 class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
     def __init__(self):
