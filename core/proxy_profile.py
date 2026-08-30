@@ -350,3 +350,85 @@ def _country_breakdown(values):
         country = (info.get("asn_country") or "").upper() or "??"
         counts[country] = counts.get(country, 0) + 1
     return counts
+
+
+# Провайдеры, у которых требования к нашему адресу жёстче прочих. Порядок —
+# по доле в типичной базе: gmail проверяется всегда и почти всем, yahoo и
+# outlook закрывают заметный кусок, icloud поменьше.
+# Имена берутся ИЗ PROVIDER_FITNESS, а не переписываются рядом: свой список
+# разошёлся с настоящим на первом же прогоне («Gmail» против «Gmail / Yandex»)
+# и молча отчитался, что доступных провайдеров нет вовсе.
+_READINESS_ORDER = tuple(PROVIDER_FITNESS)
+
+# Кто обязателен: без него проверять нечего вообще. Остальные лишь сужают
+# охват.
+_READINESS_REQUIRED = "Gmail / Yandex"
+
+# Что именно чинить, если провайдер закрыт. Владельцу нужен не диагноз, а
+# следующий шаг: «нет PTR» само по себе не подсказывает, что делать.
+_READINESS_FIX = {
+    "Gmail / Yandex": "прокси не открывает порт 25 — нужен другой поставщик или свой VPS",
+    "Outlook / Hotmail": "выходной IP в чёрных списках или с плохой репутацией — нужен чистый адрес",
+    "Yahoo / AOL": "у выходного IP нет обратной записи (PTR) — её выдаёт хостер VPS",
+    "iCloud / GMX": "выходной IP с плохой репутацией — нужен чистый адрес",
+}
+
+
+def readiness_report(profiles):
+    """Что владелец сможет проверить этими прокси, а что нет.
+
+    Зачем отдельно от pool_summary. Сводка отвечает на вопрос «какие у меня
+    прокси», а этот отчёт — на вопрос «стоит ли вообще запускать». Разница
+    практическая: прогон без годных прокси возвращает сплошное «не доказано»,
+    и понимает это владелец только через полчаса, глядя в лог. Лучше сказать
+    заранее и назвать причину.
+
+    Возвращает {"ready": bool, "usable": n, "total": n,
+                "providers": [{name, ok, reason}], "verdict": текст}.
+    """
+    profiles = profiles if isinstance(profiles, dict) else {}
+    values = [info for info in profiles.values() if isinstance(info, dict)]
+    total = len(values)
+
+    fitness = provider_fitness(profiles)
+    providers = []
+    for name in _READINESS_ORDER:
+        counts = fitness.get(name) or {}
+        ok = int(counts.get("ok", 0))
+        providers.append({
+            "name": name,
+            "ok": ok,
+            "reason": "" if ok else _READINESS_FIX.get(name, ""),
+        })
+
+    # Годным считаем прокси, который хотя бы куда-то пускает: без этого он не
+    # проверит ни одного адреса, сколько бы ни было у него хороших признаков.
+    usable = sum(1 for v in values
+                 if v.get("exit_ip") and v.get("outlook_ok") is not None
+                 or v.get("exit_ip"))
+    gmail_ok = next((p["ok"] for p in providers
+                     if p["name"] == _READINESS_REQUIRED), 0)
+
+    if not total:
+        verdict = ("Прокси не загружены. Проверка пойдёт с вашего домашнего "
+                   "адреса: Yahoo, AOL и Outlook на такой не отвечают, и их "
+                   "адреса уйдут в «не доказано».")
+        ready = False
+    elif not gmail_ok:
+        verdict = ("Ни один прокси не открывает порт 25 — проверить нельзя "
+                   "ничего. Порты 587 и 465 для валидации не годятся: они для "
+                   "отправки через релей.")
+        ready = False
+    else:
+        closed = [p["name"] for p in providers if not p["ok"]]
+        if closed:
+            verdict = ("Проверять можно, но %s останутся недоказанными: %s."
+                       % (", ".join(closed),
+                          "; ".join(p["reason"] for p in providers
+                                    if not p["ok"] and p["reason"])))
+        else:
+            verdict = "Все проверенные провайдеры доступны."
+        ready = True
+
+    return {"ready": ready, "usable": usable, "total": total,
+            "providers": providers, "verdict": verdict}

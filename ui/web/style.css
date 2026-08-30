@@ -917,3 +917,8 @@ input[type="number"], textarea {
   border-radius: 50%;
 }
 .who__mail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Устаревший вердикт. Не красный — это не ошибка, а напоминание: ящик могли
+   удалить после проверки, и такую строку стоит перепроверить перед рассылкой. */
+.grid td.is-stale { color: var(--warn); }
+.select--sm { height: 26px; padding: 0 var(--s-2); font-size: 12px; }

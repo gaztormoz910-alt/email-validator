@@ -216,3 +216,73 @@ def write_chunks(rows, path, size, writer):
             writer(handle, part)
         written.append(target)
     return written
+
+
+# Как называть сегмент в имени файла. Кириллица и пробелы в именах файлов
+# работают, но ломаются при переносе между системами и в чужих рассыльщиках.
+_SEGMENT_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "",
+    "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def segment_filename(value):
+    """Имя файла для сегмента: латиница, цифры, дефис.
+
+    Пустое значение — это «не определено», и такой сегмент тоже нужен: адреса
+    без страны никуда не деваются, и потерять их при раскладке нельзя.
+    """
+    text = str(value or "").strip().lower()
+    if not text:
+        return "ne-opredeleno"
+    out = []
+    for char in text:
+        if char in _SEGMENT_TRANSLIT:
+            out.append(_SEGMENT_TRANSLIT[char])
+        elif char.isalnum() and char.isascii():
+            out.append(char)
+        else:
+            out.append("-")
+    name = "".join(out).strip("-")
+    while "--" in name:
+        name = name.replace("--", "-")
+    return name or "ne-opredeleno"
+
+
+def split_by_segment(rows, key):
+    """Раскладывает строки по значению одного поля.
+
+    key — "country", "gender" или "provider". Возвращает
+    {значение: [строки]}, где пустое значение живёт под своим ключом, а не
+    выбрасывается: адрес без страны — это адрес, а не мусор.
+
+    Генератор строк принимается лениво, но результат собирается в память:
+    раскладка по сегментам нужна для выгрузки, а выгрузка и так материализует
+    файлы. На десяти миллионах адресов это заметно, поэтому в интерфейсе она
+    делается по уже отфильтрованной выборке.
+    """
+    # Мусор на входе — это пустая раскладка, а не падение. Функция вызывается
+    # из выгрузки, где исключение уронило бы фоновый поток и оставило владельца
+    # без файлов и без объяснения.
+    if rows is None or isinstance(rows, (str, bytes)):
+        return {}
+    try:
+        iterator = iter(rows)
+    except TypeError:
+        return {}
+
+    buckets = {}
+    for row in iterator:
+        if not isinstance(row, dict):
+            continue
+        if key == "provider":
+            email = str(row.get("email") or "")
+            value = email.rpartition("@")[2].strip().lower() if "@" in email else ""
+        else:
+            data = row.get("data") if isinstance(row.get("data"), dict) else {}
+            value = str(data.get(key) or "").strip()
+        buckets.setdefault(value, []).append(row)
+    return buckets

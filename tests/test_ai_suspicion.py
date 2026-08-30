@@ -114,7 +114,9 @@ def test_disposable_domain_still_gets_a_verdict():
     рассылку.
     """
     source = read_source()
-    assert 'self.callbacks[\'on_result\'](email, "Trap/Disposable", "Disposable Email Domain"' in source, \
+    # Результаты уходят через общую дверь _emit: она считает выданное
+    # для инварианта «подано = выдано». Форма вызова другая, смысл тот же.
+    assert 'self._emit(email, "Trap/Disposable", "Disposable Email Domain"' in source, \
         "вердикт по одноразовому домену пропал"
 
 

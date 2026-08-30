@@ -168,7 +168,14 @@ class ValidationPipeline:
         # спокойно взводил его обратно. Прогон продолжался вопреки команде, а
         # окно оставалось запертым до конца проверки.
         self._stop_requested = False
-        
+        # Сколько результатов реально ушло наружу. Нужен для проверки
+        # «подано = выдано»: в обработке адреса восемнадцать мест, где
+        # исключение проглатывается, и без счёта потеря адреса выглядит как
+        # его отсутствие во входе. Владелец видит 78 в счётчике и 77 строк —
+        # и не знает, чего именно недосчитался.
+        self._emitted = 0
+        self._emitted_lock = threading.Lock()
+
         self.cleaner = EmailCleaner()
         self.filter = None
         self.network = None
@@ -566,11 +573,19 @@ class ValidationPipeline:
         self._cache_hits = 0
         if use_cache:
             try:
-                cache = ResultCache()
+                # Путь из настроек: положив кэш в синхронизируемую папку
+                # (OneDrive, сетевой диск), два рабочих места перестают
+                # проверять одно и то же по второму разу.
+                from core.settings import cache_path
+                chosen = cache_path()
+                cache = ResultCache(path=chosen)
                 if cache.enabled:
                     dropped = cache.purge_expired()
                     self.cache = cache
                     msg = f"[INFO] Кэш вердиктов: {cache.size()} адресов из прошлых прогонов."
+                    from core.cache import DEFAULT_CACHE_PATH
+                    if chosen != DEFAULT_CACHE_PATH:
+                        msg += f" Общий кэш: {chosen}."
                     if dropped:
                         msg += f" Просроченных удалено: {dropped}."
                     self.callbacks['on_log'](msg, "info")
@@ -734,6 +749,28 @@ class ValidationPipeline:
                     # а решение «хватит ли этих прокси» пользователь принимает
                     # именно по этим числам. Считает их core/proxy_profile.py,
                     # чтобы панель, лог и CLI не могли разойтись.
+                    # Готовность — до прогона, а не после.
+                    #
+                    # Раньше владелец узнавал, что прокси не годятся, из
+                    # сплошного «не доказано» через полчаса работы. Причина
+                    # при этом лежала в одной строке профиля, которую никто
+                    # не читал. Теперь она произносится вслух и с указанием,
+                    # что чинить.
+                    try:
+                        from core.proxy_profile import readiness_report
+                        ready = readiness_report(proxy_profiles)
+                        self.callbacks['on_log'](
+                            ("[INFO] Готовность прокси: %s" if ready["ready"]
+                             else "[DEAD] Готовность прокси: %s") % ready["verdict"],
+                            "info" if ready["ready"] else "dead")
+                        for item in ready["providers"]:
+                            if not item["ok"]:
+                                self.callbacks['on_log'](
+                                    "[DEAD]    %s — 0 годных прокси: %s"
+                                    % (item["name"], item["reason"]), "dead")
+                    except Exception:
+                        pass
+
                     if 'on_proxy_profile' in self.callbacks:
                         try:
                             from core.proxy_profile import pool_summary
@@ -745,6 +782,36 @@ class ValidationPipeline:
                         f"[DEAD] Профилирование прокси не удалось ({type(e).__name__}).", "dead")
 
         self.network = NetworkValidator(timeout=timeout, proxies=proxies)
+
+        # Spamhaus ZEN — крупнейший чёрный список, и до сих пор он молчал.
+        # Код опроса был написан и покрыт тестами, но включался только в них:
+        # в рабочем прогоне резолвер никто не задавал, и зона не спрашивалась
+        # вовсе. Причина не в лени, а в самом Spamhaus: публичные резолверы
+        # он не обслуживает и отвечает NXDOMAIN даже на обязательную тестовую
+        # запись. Нужен свой — на том же VPS, где стоит прокси.
+        resolvers = []
+        try:
+            from core.settings import spamhaus_resolvers
+            resolvers = spamhaus_resolvers()
+        except Exception:
+            resolvers = []
+
+        if resolvers and self.network:
+            if self.network.set_spamhaus_resolver(resolvers):
+                self.callbacks['on_log'](
+                    f"[INFO] Spamhaus ZEN подключён через {', '.join(resolvers)} — "
+                    "санитарный контракт зоны пройден.", "info")
+            else:
+                self.callbacks['on_log'](
+                    f"[DEAD] Spamhaus ZEN не отвечает через {', '.join(resolvers)}: "
+                    "зона не прошла санитарный контракт (127.0.0.2 обязана "
+                    "числиться, 127.0.0.1 — нет). Проверяю без неё.", "dead")
+        elif not resolvers:
+            self.callbacks['on_log'](
+                "[INFO] Spamhaus ZEN не опрашивается: нужен свой резолвер, "
+                "публичные он не обслуживает. Укажите его в data/settings.json "
+                "полем spamhaus_resolvers.", "info")
+
         if proxy_profiles:
             self.network.set_proxy_profiles(proxy_profiles)
             # Профиль протухает: у ротирующегося прокси выходной IP меняется
@@ -757,6 +824,17 @@ class ValidationPipeline:
             self.ai = EmailAI()
             self.ai.train_models()
             self.callbacks['on_log']("[INFO] ИИ успешно обучен и готов к бою!", "info")
+
+    def _emit(self, email, status, reason, mx, data):
+        """Единственная дверь наружу для результата.
+
+        Отдельным методом, потому что считать надо в ОДНОМ месте: результат
+        отправляется из семи разных веток, и счётчик, размазанный по ним,
+        разойдётся с действительностью на первой же правке.
+        """
+        with self._emitted_lock:
+            self._emitted += 1
+        self.callbacks['on_result'](email, status, reason, mx, data)
 
     def run_pipeline(self, email_sources, threads=50, fix_typos=True, check_spam=True, deep_ping=True, enable_ai=False, enable_osint=False,
                      resume=False):
@@ -771,6 +849,8 @@ class ValidationPipeline:
         # случай прямого вызова run_pipeline в обход start (так делают тесты).
         self.is_running = True
         self.is_paused = False
+        with self._emitted_lock:
+            self._emitted = 0
         
         from core.streamer import StreamLoader
         # Стартовая ОЦЕНКА по размеру файла, а не точный подсчёт.
@@ -895,7 +975,7 @@ class ValidationPipeline:
                 data["provider_type"] = "Disposable"
                 data["provider_name"] = "Disposable"
                 data["domain_type"] = "Disposable"
-                self.callbacks['on_result'](email, "Trap/Disposable", "Disposable Email Domain", "N/A", data)
+                self._emit(email, "Trap/Disposable", "Disposable Email Domain", "N/A", data)
                 return
 
             # Шаг 1.1b: Дополнительная проверка через SpamFilter (внешние чёрные списки)
@@ -909,7 +989,7 @@ class ValidationPipeline:
                     data["provider_type"] = "Disposable (внешний список)"
                     data["provider_name"] = "Disposable"
                     data["domain_type"] = "Disposable"
-                    self.callbacks['on_result'](email, "Trap/Disposable", "External Blacklist Match", "N/A", data)
+                    self._emit(email, "Trap/Disposable", "External Blacklist Match", "N/A", data)
                     return
 
             # Шаг 1.2: Проверка на ролевые ящики (Role-based) — п.2.1
@@ -1006,7 +1086,7 @@ class ValidationPipeline:
 
                     with self._cache_lock:
                         self._cache_hits += 1
-                    self.callbacks['on_result'](
+                    self._emit(
                         email, status_display,
                         f"{cached['reason']} [из кэша, {cached['age_days']} дн. назад]",
                         cached["mx"], data)
@@ -1064,11 +1144,11 @@ class ValidationPipeline:
                 self._enrich_and_score(email, data, res, status_display,
                                        original_smtp_status, is_role, enable_ai)
 
-                self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
+                self._emit(email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
                 # Журнал сделанного: при возобновлении этот адрес пропустится
                 state.mark_done(normalize_for_dedup(email))
             else:
-                self.callbacks['on_result'](email, "Unverified", "Skipped Ping", "N/A", data)
+                self._emit(email, "Unverified", "Skipped Ping", "N/A", data)
 
         # Аппаратное ограничение количества потоков для предотвращения зависания сети и роутера
         safe_threads = min(int(threads), 300)
@@ -1174,7 +1254,7 @@ class ValidationPipeline:
                     email = item[0] if item else "?"
                     self.callbacks['on_log'](f"[DEAD] Ошибка обработки {email}: {type(e).__name__}: {e}", "dead")
                     try:
-                        self.callbacks['on_result'](email, "Unknown", f"Processing error: {type(e).__name__}", "N/A", item[1])
+                        self._emit(email, "Unknown", f"Processing error: {type(e).__name__}", "N/A", item[1])
                     except Exception:
                         pass
                 # Прогресс двигают только ОКОНЧАТЕЛЬНЫЕ вердикты.
@@ -1244,7 +1324,7 @@ class ValidationPipeline:
                     self._enrich_and_score(email, data, res, status_display,
                                            original_smtp_status, is_role, enable_ai)
 
-                    self.callbacks['on_result'](email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
+                    self._emit(email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
                     state.mark_done(normalize_for_dedup(email))
                     with retry_lock:
                         retry_count += 1
@@ -1339,7 +1419,7 @@ class ValidationPipeline:
             leftover += 1
             data["validated_at"] = _utc_now().strftime("%Y-%m-%d %H:%M")
             try:
-                self.callbacks['on_result'](
+                self._emit(
                     email, "Unknown", "Greylisted (перепроверка не выполнена)", "N/A", data)
             except Exception:
                 pass
@@ -1392,6 +1472,29 @@ class ValidationPipeline:
             state.close()
         except Exception:
             pass
+
+        # Инвариант: сколько адресов приняли в работу, столько результатов и
+        # выдали. Расхождение означает, что адрес потерялся молча — сбой внутри
+        # обработки, проглоченный одним из except. Раньше такое было видно
+        # только внимательному глазу: счётчик показывал одно, таблица другое.
+        with self._emitted_lock:
+            emitted = self._emitted
+        expected = total_emails if isinstance(total_emails, int) else 0
+        if expected and emitted != expected:
+            lost = expected - emitted
+            if lost > 0:
+                self.callbacks['on_log'](
+                    f"[DEAD] ПОТЕРЯНО АДРЕСОВ: {lost}. Принято в работу "
+                    f"{expected}, показано {emitted}. Это сбой внутри обработки, "
+                    "а не свойство базы — сообщите о нём.", "dead")
+            else:
+                self.callbacks['on_log'](
+                    f"[DEAD] Результатов больше, чем адресов: показано {emitted} "
+                    f"при {expected} принятых. Возможен двойной показ.", "dead")
+        elif expected:
+            self.callbacks['on_log'](
+                f"[INFO] Сверка: принято {expected}, показано {emitted} — сходится.",
+                "info")
 
         self.is_running = False
         self.callbacks['on_complete']()
