@@ -3,6 +3,7 @@
 import re
 
 from .parser_pipeline import GLOBAL_VERIFIED_DOMAINS
+from core.email_syntax import to_ascii_domain
 
 # --- Нормализация адресов для дедупликации (п.28 чек-листа) ---
 #
@@ -80,6 +81,18 @@ def normalize_for_dedup(email: str) -> str:
 
     email = email.strip().lower()
     local, domain = email.rsplit("@", 1)
+
+    # Домен приводим к punycode. Один и тот же ящик пишут двумя способами:
+    # `ivan@почта.рф` и `ivan@xn--80a1acny.xn--p1ai` — это одна строка на
+    # проводе, но два разных ключа, если сравнивать как есть. Цена та же, что
+    # у любого пропущенного дубля: письмо приходит дважды. И хуже —
+    # отписавшийся под одним написанием не защищён от рассылки по другому.
+    #
+    # Ключ уходит только на сравнение; наружу по-прежнему отдаётся исходный
+    # адрес, переписывать данные владельца нельзя.
+    ascii_domain = to_ascii_domain(domain)
+    if ascii_domain:
+        domain = ascii_domain
 
     # Плюс-тег отбрасываем только у провайдеров, где это реально работает
     if domain in _PLUS_TAG_DOMAINS and "+" in local:

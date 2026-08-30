@@ -11,10 +11,17 @@ import customtkinter as ctk
 from tkinter import filedialog
 
 from ui.colors import *
+from core.streamer import clean_input_line_fast
 
 def clean_input_line(line):
-    # Убирает нумерацию типа "1. ", "2)", "1-й ", "100:", "1 ", оставляя только суть.
-    return CLEAN_PREFIX_RE.sub('', line.strip())
+    """Убирает нумерацию «1. », «2)», «1-й », «100:», оставляя только суть.
+
+    Берётся из core/streamer.py, а не пишется здесь заново. Раньше имя
+    CLEAN_PREFIX_RE в этом модуле не было определено вовсе — оно приезжало
+    только на вид, через звёздный импорт цветов. Вставка списка в поле
+    падала NameError, и падение это было тихим.
+    """
+    return clean_input_line_fast(line)
 
 def _format_sources(data):
     """Коротко: откуда взяты имя, пол и страна.
