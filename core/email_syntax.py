@@ -26,6 +26,8 @@ import re
 __all__ = [
     "to_ascii_domain",
     "has_non_ascii_local",
+    "has_quoted_local",
+    "MAX_LABEL_BYTES",
     "validate_email_syntax",
     "harvest_pattern",
     "MAX_EMAIL_BYTES",
@@ -35,6 +37,11 @@ __all__ = [
 
 # RFC 5321 §4.5.3.1 — пределы в октетах.
 MAX_LOCAL_BYTES = 64
+# RFC 1035 §2.3.4 — метка домена не длиннее 63 октетов. Это не наша строгость,
+# а физический предел DNS: метку длиннее зарегистрировать нельзя, и запрос по
+# ней не уйдёт. Без этой проверки адрес с меткой в 250 символов проходил
+# синтаксис и тратил впустую запрос DNS и попытку SMTP.
+MAX_LABEL_BYTES = 63
 MAX_DOMAIN_BYTES = 255
 MAX_EMAIL_BYTES = 320
 
@@ -152,6 +159,33 @@ def has_non_ascii_local(email: str) -> bool:
     return not email.rsplit("@", 1)[0].isascii()
 
 
+def has_quoted_local(email):
+    """Локальная часть в кавычках: `"john smith"@example.com`.
+
+    По RFC 5321 §4.1.2 это законная форма, но проверить её мы не можем:
+    кавычки надо сохранить в команде RCPT, а внутри них законны пробел и даже
+    собственная `@`, из-за чего адрес не разбирается обычным способом.
+
+    Отдельная функция нужна ровно затем, чтобы такой адрес получил «не
+    проверено», а не «неправильный синтаксис». Разница принципиальна: второе
+    — это приговор живому ящику без единого запроса к серверу.
+    """
+    if not isinstance(email, str) or "@" not in email:
+        return False
+    local = email.rpartition("@")[0].strip()
+    return len(local) >= 2 and local.startswith('"') and local.endswith('"')
+
+
+def _labels_fit(domain_ascii):
+    """Каждая метка домена укладывается в предел DNS."""
+    if not isinstance(domain_ascii, str) or not domain_ascii:
+        return False
+    for label in domain_ascii.split("."):
+        if not label or _byte_length(label) > MAX_LABEL_BYTES:
+            return False
+    return True
+
+
 def validate_email_syntax(email: str) -> bool:
     """Проверяет синтаксис email. True — адрес построен корректно.
 
@@ -179,6 +213,8 @@ def validate_email_syntax(email: str) -> bool:
     # Проверяем длину именно punycode-вида: по проводу уходит он, и лимит в
     # 255 октетов относится к нему. `münchen.de` короче своего xn---варианта.
     if _byte_length(domain_ascii) > MAX_DOMAIN_BYTES:
+        return False
+    if not _labels_fit(domain_ascii):
         return False
 
     # Не-ASCII локальная часть: общей регуляркой её не проверить, поэтому
