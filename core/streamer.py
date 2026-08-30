@@ -1,6 +1,8 @@
 import os
 import re
 
+from core.encoding import open_text
+
 CLEAN_PREFIX_RE = re.compile(r'^\d+[-.)\\]:й]*\s+')
 
 # Regex для определения email в любой позиции
@@ -376,7 +378,7 @@ class StreamLoader:
         elif source["type"] == "file":
             filepath = source["path"]
             if os.path.exists(filepath):
-                with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                with open_text(filepath) as f:
                     for line in f:
                         if line.strip():
                             lines.append(line.strip())
@@ -405,7 +407,7 @@ class StreamLoader:
                 filepath = source["path"]
                 if not os.path.exists(filepath):
                     continue
-                lines_iter = open(filepath, "r", encoding="utf-8", errors="ignore")
+                lines_iter = open_text(filepath)
             else:
                 continue
 
@@ -446,7 +448,7 @@ class StreamLoader:
             elif source["type"] == "file":
                 filepath = source["path"]
                 if os.path.exists(filepath):
-                    with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                    with open_text(filepath) as f:
                         for line in f:
                             line = line.strip()
                             if line:
