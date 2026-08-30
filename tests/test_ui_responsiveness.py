@@ -192,7 +192,10 @@ class TestStatusGrouping(unittest.TestCase):
             # ловушках, и владелец принимал по этому числу решение о рассылке.
             "Risky": "unknown",
             "Unknown": "unknown",
-            "Unverified": "other",
+            # Unverified — «проверку не делали», то есть ровно «не
+            # доказано». Раньше он уходил в невидимую группу other и пропадал
+            # из таблицы вместе с Catch-All.
+            "Unverified": "unknown",
         }
         for status, expected in cases.items():
             self.assertEqual(group_of(status), expected, f"статус {status}")
