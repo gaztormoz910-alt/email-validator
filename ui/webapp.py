@@ -414,6 +414,7 @@ class ValidatorApi:
             return {"ok": False, "error": "Сначала выберите адреса и прокси"}
 
         from core.parser.ml_predictor import set_country_mode
+        from core.streamer import StreamLoader
         set_country_mode(payload.get("country") or "coverage")
 
         self.store.clear()
@@ -427,7 +428,19 @@ class ValidatorApi:
             timeout=self._number(payload, "timeout", 5, 1, 300),
             fix_typos=True, check_spam=True, deep_ping=True,
             enable_ai=bool(payload.get("ai", True)),
-            proxies=list(self.proxy_sources),
+            # ИСТОЧНИКИ, а не строки прокси, конвейеру подавать нельзя.
+            #
+            # Он ждёт поток строк вида «1.2.3.4:8080», а получал список
+            # словарей {"type": ..., "content": ...}. Ни одна такая запись
+            # прокси не является, поэтому проверка честно отвечала «рабочих
+            # 0 из 0» — и прогон шёл БЕЗ ЕДИНОГО ПРОКСИ, с домашнего адреса.
+            # В логе это выглядит как сплошные RISKY: Yahoo отказывает по
+            # FCrDNS, Outlook по репутации, а владелец видит «валидатор врёт».
+            #
+            # Прежнее окно читало источники через StreamLoader и подавало
+            # строки; при переезде на веб-стек этот шаг потерялся. Читаем
+            # лениво: список прокси бывает на миллионы строк.
+            proxies=StreamLoader(list(self.proxy_sources)).stream_lines(),
             enable_osint=bool(payload.get("osint", True)),
             use_cache=bool(payload.get("cache", True)),
             resume=False)
