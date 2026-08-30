@@ -101,8 +101,14 @@ class TestJunk(unittest.TestCase):
     def test_junk_backtick_from_owner_file_is_repaired(self):
         """Из файла владельца: `hjohnuc@gmail.com конкурент считает живым."""
         raw = "`hjohnuc@gmail.com"
-        self.assertFalse(validate_email_syntax(raw),
-                         "исходная строка и не должна проходить синтаксис")
+        # Обратная кавычка входит в atext RFC 5322 §3.2.3, поэтому синтаксис
+        # такую строку пропускает — и правильно делает: приговор без сети
+        # неисправим. Отсекает её правило Gmail (у него в имени только
+        # латиница, цифры и точки), а до этого чистильщик просто убирает
+        # мусорный символ и адрес становится нормальным.
+        from core.local_rules import check_local_part, OK
+        self.assertNotEqual(check_local_part(raw)[0], OK,
+                            "правило Gmail обязано заметить чужой символ")
         cleaned = EmailCleaner().clean_email(raw)
         self.assertEqual(cleaned, "hjohnuc@gmail.com")
         self.assertTrue(validate_email_syntax(cleaned),
