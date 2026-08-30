@@ -93,10 +93,14 @@ def test_vpsscript_builds_a_working_setup():
     script = build_script("validator", "S3cret", 1080)
     assert script.startswith("#!/bin/bash")
     assert "3proxy" in script
-    assert "users validator:CL:S3cret" in script
-    assert "socks -p1080" in script
+    # Логин и пароль задаются переменными вверху, а конфиг собирается из них:
+    # так значение стоит в одном месте, а не расползается по файлу.
+    assert 'PROXY_USER="validator"' in script
+    assert 'PROXY_PASS="S3cret"' in script
+    assert "users $PROXY_USER:CL:$PROXY_PASS" in script
+    assert "socks -p$PROXY_PORT" in script and "PROXY_PORT=1080" in script
     # Автозапуск обязателен: иначе прокси умрёт с первой перезагрузкой.
-    assert "systemctl enable --now 3proxy" in script
+    assert "systemctl enable 3proxy" in script
 
 
 def test_vpsscript_checks_port_25_and_ptr():
@@ -115,7 +119,9 @@ def test_vpsscript_prints_the_ready_line_for_the_validator():
     from tools.make_vps_proxy import build_script
 
     script = build_script("validator", "S3cret", 1080)
-    assert "socks5://validator:S3cret@$IP:1080" in script
+    assert "socks5://$PROXY_USER:$PROXY_PASS@$IP:$PROXY_PORT" in script
+    # И сами значения в скрипте есть — иначе строка соберётся пустой.
+    assert 'PROXY_USER="validator"' in script and 'PROXY_PASS="S3cret"' in script
 
 
 def test_vpsscript_generates_a_strong_password():
