@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core import baseops
 from core.pipeline import ValidationPipeline
 from core.provider import format_base_scan, scan_base_providers
+from core.encoding import open_text
 
 EXPORT_FIELDS = [
     "email", "status", "reason", "mx", "name", "first_name", "last_name",
@@ -101,7 +102,9 @@ def cmd_validate(args):
         if not os.path.exists(args.proxies):
             print(f"Файла с прокси нет: {args.proxies}", file=sys.stderr)
             return 1
-        with open(args.proxies, "r", encoding="utf-8", errors="ignore") as f:
+        # errors="ignore" молча выбрасывал байты; список прокси обычно
+        # в ASCII, но комментарий по-русски в нём — обычное дело.
+        with open_text(args.proxies) as f:
             proxies = [line.strip() for line in f if line.strip()]
         if not proxies:
             print("Список прокси пуст.", file=sys.stderr)

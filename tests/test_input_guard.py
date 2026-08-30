@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 NEWLINE = "\n"
 
+from core.encoding import SAMPLE_BYTES  # noqa: E402
 from core.input_guard import (  # noqa: E402
     KIND_DORK, KIND_EMAIL, KIND_PROXY, KIND_UNKNOWN,
     check, check_file, check_text, classify, detect_kind, fix_layout,
@@ -220,6 +221,7 @@ def test_file_reads_only_a_sample_not_the_whole_base(tmp_path):
 
     total_lines = 200_000
     served = []
+    sniffed = []
     real_open = io.open
 
     class Counting:
@@ -241,9 +243,33 @@ def test_file_reads_only_a_sample_not_the_whole_base(tmp_path):
             served.append(self.lines)
             return self._handle.__exit__(*exc)
 
+    class Sniffing:
+        """Двоичное чтение для опознания кодировки: считает БАЙТЫ.
+
+        Определение кодировки — второй читатель того же файла, и на нём то же
+        требование: заглянуть в начало, а не прочитать базу целиком.
+        """
+
+        def __init__(self, handle):
+            self._handle = handle
+
+        def read(self, size=-1):
+            data = self._handle.read(size)
+            sniffed.append(len(data))
+            return data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._handle.__exit__(*exc)
+
     def spy(path, *args, **kwargs):
         handle = real_open(path, *args, **kwargs)
-        return Counting(handle) if str(path) == str(big) else handle
+        if str(path) != str(big):
+            return handle
+        mode = kwargs.get("mode") or (args[0] if args else "r")
+        return Sniffing(handle) if "b" in mode else Counting(handle)
 
     io.open = spy
     try:
@@ -255,6 +281,9 @@ def test_file_reads_only_a_sample_not_the_whole_base(tmp_path):
     assert served, "файл вообще не открывался"
     # Прочитано меньше сотой доли строк: выборка, а не весь файл.
     assert served[0] < total_lines / 100, (served[0], total_lines)
+    # И опознание кодировки тоже читает выборку, а не всю базу.
+    assert sniffed, "кодировка не определялась — файл читался вслепую"
+    assert max(sniffed) <= SAMPLE_BYTES, max(sniffed)
 
 
 def test_file_missing_is_reported_not_crashed(tmp_path):

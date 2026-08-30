@@ -71,7 +71,7 @@ def set_country_mode(mode):
     поведение на противоположное хуже, чем не сменить его вовсе.
     """
     global NAME_COUNTRY_MIN_SHARE, NAME_COUNTRY_MIN_RATIO, _country_mode
-    if mode not in COUNTRY_MODES:
+    if not isinstance(mode, str) or mode not in COUNTRY_MODES:
         return _country_mode
     _country_mode = mode
     NAME_COUNTRY_MIN_SHARE, NAME_COUNTRY_MIN_RATIO = COUNTRY_MODES[mode]

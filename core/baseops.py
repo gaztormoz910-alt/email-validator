@@ -14,6 +14,8 @@
 
 import os
 
+from core.encoding import open_text
+
 from core.cleaner import normalize_for_dedup
 
 _EMAIL_HINT = "@"
@@ -53,7 +55,13 @@ def read_emails(path, limit=None):
     except (TypeError, ValueError, OSError):
         return emails
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        # Кодировка определяется, а не предполагается. Здесь это дороже
+        # всего остального: через read_emails идёт ВЫЧИТАНИЕ СПИСКА
+        # ОТПИСОК. Прочитав cp1251 как UTF-8 с errors="ignore", мы
+        # превращали «анна@mail.ru» в «@mail.ru», он не совпадал с
+        # адресом в базе — и человек, прямо попросивший его не трогать,
+        # получал письмо снова.
+        with open_text(path) as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
@@ -131,6 +139,28 @@ def suppression_keys(path):
     return {_key(e) for e in read_emails(path) if _key(e)}
 
 
+# В какой кодировке писать выгрузку.
+#
+# Excel на русской Windows открывает CSV не в UTF-8, а в системной кодировке,
+# и «Иван» превращается в «РІР°РЅ». Признаёт он ровно один признак — метку
+# порядка байт в начале файла (кодек utf-8-sig её и ставит). Владелец
+# открывает выгрузку именно в Excel, поэтому метка нужна.
+#
+# В .txt метку не ставим: такой файл обычно возвращается на вход валидатору
+# или уходит в чужой рассыльщик, и лишние байты в начале первой строки там
+# ни к чему.
+EXPORT_BOM_EXTENSIONS = frozenset({".csv"})
+
+
+def export_encoding(path):
+    """Кодировка для записи выгрузки по расширению файла."""
+    try:
+        ext = os.path.splitext(str(path))[1].lower()
+    except Exception:
+        return "utf-8"
+    return "utf-8-sig" if ext in EXPORT_BOM_EXTENSIONS else "utf-8"
+
+
 def write_chunks_stream(rows, path, size, writer):
     """То же, что write_chunks, но вход — ГЕНЕРАТОР, а не список.
 
@@ -171,7 +201,7 @@ def write_chunks_stream(rows, path, size, writer):
         # неясно, будет он единственным или первым из многих. Поэтому пишем
         # под номером, а в конце единственный файл переименовываем обратно.
         target = path if (size < 1) else f"{base}_{index:03d}{ext}"
-        with open(target, "w", newline="", encoding="utf-8") as handle:
+        with open(target, "w", newline="", encoding=export_encoding(target)) as handle:
             writer(handle, buffer)
         written.append(target)
         total += len(buffer)
@@ -212,7 +242,7 @@ def write_chunks(rows, path, size, writer):
     single = len(parts) == 1
     for index, part in enumerate(parts, 1):
         target = path if single else f"{base}_{index:03d}{ext}"
-        with open(target, "w", newline="", encoding="utf-8") as handle:
+        with open(target, "w", newline="", encoding=export_encoding(target)) as handle:
             writer(handle, part)
         written.append(target)
     return written

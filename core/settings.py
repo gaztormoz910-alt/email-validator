@@ -66,6 +66,11 @@ def load(refresh=False):
 
 
 def get(name, default=None):
+    # Имя настройки может прийти откуда угодно, вплоть до разобранного
+    # запроса страницы. Список или словарь в роли ключа роняет поиск по
+    # словарю, а падение в чтении настроек останавливает запуск.
+    if not isinstance(name, str):
+        return default
     return load().get(name, DEFAULTS.get(name, default))
 
 

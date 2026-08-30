@@ -13,6 +13,7 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
 from ui.colors import *
+from core.baseops import export_encoding
 
 
 
@@ -87,7 +88,8 @@ class ParserTabMixin:
             try:
                 import csv
                 if filepath.endswith(".csv"):
-                    with open(filepath, "w", newline="", encoding="utf-8") as f:
+                    with open(filepath, "w", newline="",
+                              encoding=export_encoding(filepath)) as f:
                         writer = csv.writer(f)
                         writer.writerow(["Email", "Dork Source"])
                         for r in self.parser_results_data:

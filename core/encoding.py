@@ -28,6 +28,7 @@ Windows-1251, экспорт из старой CRM — UTF-16, файл из б�
      кодировка после UTF-8.
 """
 import io
+import os
 
 __all__ = ["detect_encoding", "open_text", "read_sample"]
 
@@ -52,12 +53,26 @@ _BOMS = (
 )
 
 
+def _is_path(path):
+    """Похоже ли значение на путь.
+
+    Проверка не придирчивость, а защита: io.open принимает ещё и ЧИСЛО, и
+    трактует его как готовый файловый дескриптор. detect_encoding(True) —
+    это дескриптор 1, то есть стандартный вывод программы; блок with его
+    закрывает, и дальше программа теряет способность печатать. Логическое
+    значение в Python — это число, поэтому bool отсекается отдельно.
+    """
+    return isinstance(path, (str, bytes, os.PathLike)) and not isinstance(path, bool)
+
+
 def read_sample(path, size=SAMPLE_BYTES):
     """Первые байты файла. Пустой ответ, если файл недоступен."""
+    if not _is_path(path):
+        return b""
     try:
         with io.open(path, "rb") as handle:
             return handle.read(size)
-    except OSError:
+    except (OSError, ValueError):
         return b""
 
 
@@ -107,5 +122,7 @@ def open_text(path, encoding=None):
     строке, а не исчезнуть. Исчезнувший байт превращает `анна@mail.ru` в
     `@mail.ru` — внешне правильный адрес, который на самом деле чужой.
     """
+    if not _is_path(path):
+        raise TypeError("нужен путь к файлу, получено %s" % type(path).__name__)
     return io.open(path, "r", encoding=encoding or detect_encoding(path),
                    errors="replace")
