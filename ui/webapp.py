@@ -545,6 +545,10 @@ class ValidatorApi:
                 "gender": data.get("gender", ""),
                 "country": data.get("country", ""),
                 "when": data.get("validated_at", ""),
+                # Насколько вердикту можно верить сегодня. Ящик могли удалить
+                # через день после проверки, и «Годен» месячной давности —
+                # уже не то же самое, что «Годен» сегодняшний.
+                "age": _verdict_age(data.get("validated_at", "")),
             })
         return {"rows": out, "page": number, "pages": pages, "total": total}
 
@@ -851,6 +855,73 @@ class ValidatorApi:
         threading.Thread(target=write, daemon=True).start()
         return {"ok": True, "path": os.path.basename(path), "count": len(rows)}
 
+    def export_segments(self, payload):
+        """Раскладывает выборку по сегментам в отдельные файлы.
+
+        Смысл в том, чтобы не делать десять ручных выгрузок: письмо женщинам
+        из США и письмо мужчинам из Индии — разные письма, и разбирать базу
+        руками владелец будет каждый раз заново.
+        """
+        if self._export_busy:
+            return {"ok": False, "error": "Выгрузка уже идёт"}
+
+        key = str(payload.get("by") or "country").strip()
+        if key not in ("country", "gender", "provider"):
+            return {"ok": False, "error": "Неизвестный признак: %s" % key}
+
+        import webview
+        if self.window is None:
+            return {"ok": False, "error": "Окно недоступно"}
+        chosen = self.window.create_file_dialog(webview.FOLDER_DIALOG)
+        if not chosen:
+            return {"ok": False, "cancelled": True}
+        folder = chosen if isinstance(chosen, str) else chosen[0]
+
+        picked = self._filters(payload)
+        self._export_busy = True
+        threading.Thread(target=self._segments_worker,
+                         args=(folder, key, picked), daemon=True).start()
+        return {"ok": True}
+
+    def _segments_worker(self, folder, key, picked):
+        import csv
+
+        from core.baseops import segment_filename, split_by_segment
+        try:
+            rows = list(self.store.iter_matching(filters=picked))
+            buckets = split_by_segment(rows, key)
+            if not buckets:
+                self._on_log("[DEAD] В выборке нечего раскладывать.", "dead")
+                return
+
+            written = 0
+            for value, group in sorted(buckets.items(),
+                                       key=lambda kv: -len(kv[1])):
+                name = "%s-%s.csv" % (key, segment_filename(value))
+                path = os.path.join(folder, name)
+                with io.open(path, "w", encoding="utf-8", newline="") as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow(["Email", "Status", "Name", "Gender",
+                                     "Country", "Score", "ValidatedAt"])
+                    for row in group:
+                        data = row.get("data") or {}
+                        writer.writerow([
+                            row["email"], row["status"], data.get("name", ""),
+                            data.get("gender", ""), data.get("country", ""),
+                            data.get("engagement_score", ""),
+                            data.get("validated_at", ""),
+                        ])
+                written += 1
+                self._on_log("[VALID] %s — %d адресов." % (name, len(group)), "valid")
+
+            self._on_log("[INFO] Разложено файлов: %d. Папка: %s"
+                         % (written, folder), "info")
+        except Exception as exc:
+            self._on_log("[DEAD] Раскладка не удалась: %s: %s"
+                         % (type(exc).__name__, exc), "dead")
+        finally:
+            self._export_busy = False
+
     def copy_rows(self, payload):
         """Адреса выборки текстом — страница положит их в буфер обмена."""
         picked = self._filters(payload)
@@ -959,6 +1030,40 @@ def start_api_server(api):
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, server.server_address[1], token
+
+
+def _verdict_age(stamp):
+    """Сколько дней вердикту и пора ли перепроверять.
+
+    Возвращает {"days": n, "stale": bool} либо пустой словарь, если даты нет.
+    Порог берётся из настроек: у базы, которую рассылают раз в квартал, и у
+    базы, которую жгут еженедельно, «свежесть» разная.
+    """
+    import datetime
+
+    text = str(stamp or "").strip()
+    if not text:
+        return {}
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            when = datetime.datetime.strptime(text, fmt)
+            break
+        except ValueError:
+            when = None
+    if when is None:
+        return {}
+
+    # Время берётся без привязки к зоне: метки в базе пишутся в UTC тем же
+    # способом, и сравнивать их проще всего между собой.
+    days = (datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - when).days
+    if days < 0:
+        days = 0
+    try:
+        from core.settings import get
+        limit = int(get("verdict_fresh_days", 30) or 30)
+    except Exception:
+        limit = 30
+    return {"days": days, "stale": days > max(1, limit)}
 
 
 def _gravatar_hash(email):
