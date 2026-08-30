@@ -228,6 +228,23 @@ function shortDate(value) {
 
 /* Пол одной буквой: колонка узкая, а «Мужской» в ней превращается в
    «Мужс…» — то же место, но уже нечитаемо. Полное слово в подсказке. */
+/* Возраст вердикта в подсказке и пометка устаревшего.
+
+   «Годен» месячной давности — уже не то же самое, что «Годен» сегодняшний:
+   ящик могли удалить на следующий день после проверки. Отдельной колонки не
+   заводим — она вытеснила бы что-то нужное; хватает цвета и подсказки. */
+function whenTitle(row) {
+  const base = row.when || "";
+  if (!row.age || typeof row.age.days !== "number") return base;
+  const days = row.age.days;
+  const word = days === 0 ? "сегодня"
+    : days === 1 ? "вчера"
+    : `${days} дн. назад`;
+  return row.age.stale
+    ? `${base} — проверено ${word}, вердикт устарел: стоит перепроверить`
+    : `${base} — проверено ${word}`;
+}
+
 function shortGender(value) {
   const v = String(value || "").toLowerCase();
   if (v.startsWith("муж")) return "М";
@@ -318,7 +335,7 @@ function renderRows(data) {
       ["c-name", row.name, row.name],
       ["c-gender", shortGender(row.gender), row.gender],
       ["c-country", row.country, row.country],
-      ["c-when", shortDate(row.when), row.when],
+      ["c-when", shortDate(row.when), whenTitle(row)],
     ];
     cells.forEach(([cls, text, title], index) => {
       const td = document.createElement("td");
@@ -340,6 +357,7 @@ function renderRows(data) {
       } else {
         td.textContent = text || "—";
         if (title) td.title = title;
+        if (cls === "c-when" && row.age && row.age.stale) td.classList.add("is-stale");
       }
       tr.appendChild(td);
     });
@@ -889,6 +907,16 @@ $("#btnExport").addEventListener("click", async () => {
   const res = await api("export", selection({ chunk }));
   if (res.cancelled) return;
   toast(res.ok ? "Сохраняю в фоне — окно не ждёт" : (res.error || "Не удалось"),
+        res.ok ? "ok" : "bad");
+});
+
+$("#segmentBy").addEventListener("change", async () => {
+  const by = $("#segmentBy").value;
+  if (!by) return;
+  $("#segmentBy").value = "";
+  const res = await api("export_segments", selection({ by }));
+  if (res.cancelled) return;
+  toast(res.ok ? "Раскладываю в фоне — смотрите лог" : (res.error || "Не удалось"),
         res.ok ? "ok" : "bad");
 });
 
