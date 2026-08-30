@@ -226,3 +226,115 @@ def test_window_unlocks_when_the_collection_is_told_to_stop():
     api.parser._stop_event.set()
     assert api._busy() is False, "окно осталось запертым после команды «Стоп»"
     assert not api.paste({"kind": "dorks", "text": "site:vk.com"}).get("error")
+
+
+# ────────────────────────────────────────────── двойной запуск
+
+def test_double_click_on_start_launches_only_one_run():
+    """Второй щелчок во время подготовки не должен запускать второй конвейер.
+
+    Признак «идёт прогон» взводится поздно — уже внутри рабочего потока и
+    после подготовки, а она длится минутами. Всё это время повторный щелчок
+    проходил проверку и стартовал ЕЩЁ ОДИН прогон. В логе владельца это
+    выглядело как удвоение всех строк, а счётчики показывали один прогон,
+    потому что второй запуск очищал хранилище.
+    """
+    import threading as th
+    import time as tm
+
+    from ui.webapp import ValidatorApi
+
+    api = ValidatorApi()
+    api.paste({"kind": "emails", "text": "ivan@gmail.com"})
+    api.paste({"kind": "proxies", "text": "1.2.3.4:8080"})
+
+    launched = []
+
+    def fake_start(**kwargs):
+        launched.append(1)
+
+        def worker():
+            tm.sleep(0.4)                    # подготовка
+            api.pipeline.is_running = True   # только теперь конвейер объявился
+            tm.sleep(0.2)
+            api.pipeline.is_running = False
+
+        thread = th.Thread(target=worker, daemon=True)
+        thread.start()
+        return thread
+
+    api.pipeline.start = fake_start
+
+    assert api.start({})["ok"] is True
+    tm.sleep(0.1)                            # владелец жмёт второй раз
+    second = api.start({})
+    assert second["ok"] is False
+    assert "уже идёт" in second["error"]
+
+    tm.sleep(1.0)
+    assert launched == [1], "запущено конвейеров: %d" % len(launched)
+
+
+def test_double_start_window_is_released_when_the_run_ends():
+    """Положительный контроль: запрет не может остаться навсегда.
+
+    Иначе «второй запуск невозможен» достигалось бы тем, что и первый больше
+    никогда не повторить.
+    """
+    import threading as th
+    import time as tm
+
+    from ui.webapp import ValidatorApi
+
+    api = ValidatorApi()
+    api.paste({"kind": "emails", "text": "ivan@gmail.com"})
+    api.paste({"kind": "proxies", "text": "1.2.3.4:8080"})
+
+    launched = []
+
+    def fake_start(**kwargs):
+        launched.append(1)
+        thread = th.Thread(target=lambda: tm.sleep(0.2), daemon=True)
+        thread.start()
+        return thread
+
+    api.pipeline.start = fake_start
+
+    assert api.start({})["ok"] is True
+    tm.sleep(0.6)
+    assert api._busy() is False, "запрет остался после конца прогона"
+    assert api.start({})["ok"] is True, "повторный запуск стал невозможен"
+    tm.sleep(0.4)
+    assert len(launched) == 2
+
+
+def test_double_start_a_crashed_launch_does_not_lock_the_button():
+    """Упавшая подготовка не должна запирать кнопку до перезапуска программы."""
+    import threading as th
+    import time as tm
+
+    from ui.webapp import ValidatorApi
+
+    api = ValidatorApi()
+    api.paste({"kind": "emails", "text": "ivan@gmail.com"})
+    api.paste({"kind": "proxies", "text": "1.2.3.4:8080"})
+
+    def crashing_start(**kwargs):
+        def worker():
+            # Настоящий поток конвейера ловит своё исключение сам (это уже
+            # проверено выше); здесь важно лишь то, что он умер, не объявив
+            # себя идущим. Ловим и мы, чтобы не сыпать в вывод чужой шум.
+            try:
+                tm.sleep(0.1)
+                raise RuntimeError("подстава")
+            except RuntimeError:
+                pass
+
+        thread = th.Thread(target=worker, daemon=True)
+        thread.start()
+        return thread
+
+    api.pipeline.start = crashing_start
+    assert api.start({})["ok"] is True
+    tm.sleep(0.6)
+    assert api._busy() is False

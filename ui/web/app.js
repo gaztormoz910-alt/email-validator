@@ -131,6 +131,10 @@ const parser = { tab: "log", page: 1, running: false, total: -1 };
 
 /* ── источники: файлы и вставленный текст ─────────────────── */
 
+/* Что сейчас лежит в каждом поле, текстом. null означает «источник есть, но
+   он слишком велик, чтобы показывать его в поле». */
+const sourceText = { emails: null, proxies: null, dorks: null, pproxy: null };
+
 const EMPTY_HINT = {
   emails:  "txt или csv · можно перетащить сюда",
   proxies: "socks5, socks4 или http",
@@ -152,6 +156,13 @@ function renderSources(data) {
       show($(clearId), false);
     }
   };
+  // Текст источников запоминается, чтобы поле вставки открывалось с тем, что
+  // уже загружено, — независимо от того, файлом это пришло или руками.
+  sourceText.emails = data.emails.editable ? data.emails.text : null;
+  sourceText.proxies = data.proxies.editable ? data.proxies.text : null;
+  sourceText.dorks = data.dorks.editable ? data.dorks.text : null;
+  sourceText.pproxy = data.pproxy.editable ? data.pproxy.text : null;
+
   bind("emails", data.emails, "#dropEmails", "#clearEmails");
   bind("proxies", data.proxies, "#dropProxies", "#clearProxies");
   bind("dorks", data.dorks, "#dropDorks", "#clearDorks");
@@ -224,6 +235,56 @@ function shortGender(value) {
   return value || "";
 }
 
+/* Кружок с инициалами и устойчивым цветом.
+
+   Цвет выводится из самого адреса, поэтому у одного человека он всегда один
+   и тот же — строку узнаёшь боковым зрением, не читая. Насыщенность и
+   светлота зафиксированы: случайный цвет из всего пространства даёт то
+   невидимые на тёмном фоне, то кислотные кружки. */
+function avatarCell(row) {
+  const box = document.createElement("span");
+  box.className = "who";
+
+  const ava = document.createElement("span");
+  ava.className = "ava";
+
+  const email = String(row.email || "");
+  let hue = 0;
+  for (let i = 0; i < email.length; i += 1) {
+    hue = (hue * 31 + email.charCodeAt(i)) % 360;
+  }
+  ava.style.background = `hsl(${hue} 58% 42%)`;
+  ava.textContent = initials(email);
+
+  if (row.avatar) {
+    const img = document.createElement("img");
+    img.src = `https://www.gravatar.com/avatar/${row.avatar}?s=44&d=404`;
+    img.alt = "";
+    img.loading = "lazy";
+    // Не загрузилась — остаётся кружок с инициалами. Без этого на машине без
+    // сети в каждой строке висела бы битая картинка.
+    img.addEventListener("error", () => img.remove());
+    ava.appendChild(img);
+  }
+
+  const mail = document.createElement("span");
+  mail.className = "who__mail";
+  mail.textContent = email;
+
+  box.append(ava, mail);
+  return box;
+}
+
+/* Две буквы из адреса: по ним кружок отличается от соседнего. */
+function initials(email) {
+  const local = String(email || "").split("@")[0] || "";
+  const parts = local.split(/[._-]+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return local.slice(0, 2).toUpperCase();
+}
+
 function scoreClass(score) {
   const n = Number(score);
   if (!Number.isFinite(n) || score === "") return "";
@@ -249,7 +310,7 @@ function renderRows(data) {
   for (const row of data.rows) {
     const tr = document.createElement("tr");
     const cells = [
-      ["c-email", row.email, row.email],
+      ["c-email", null, row.email],
       ["c-verdict", null, null],
       ["c-score", null, null],
       ["c-prov", row.provider, row.provider],
@@ -262,7 +323,10 @@ function renderRows(data) {
     cells.forEach(([cls, text, title], index) => {
       const td = document.createElement("td");
       td.className = cls;
-      if (index === 1) {
+      if (index === 0) {
+        td.appendChild(avatarCell(row));
+        td.title = row.email;
+      } else if (index === 1) {
         const badge = document.createElement("span");
         badge.className = `v v--${row.group}`;
         badge.textContent = VERDICT_TEXT[row.group] || row.status;
@@ -476,11 +540,13 @@ let lastProxySig = "";
 let missed = 0;
 let skip = 0;
 
+let logSeen = 0;                 // номер последней показанной строки лога
+
 async function tick() {
   if (skip > 0) { skip -= 1; return; }
   let s;
   try {
-    s = await api("state");
+    s = await api("state", { logSince: logSeen });
   } catch {
     missed += 1;
     skip = Math.min(8, missed);   // мост ещё не поднялся или окно закрывается
@@ -509,6 +575,7 @@ async function tick() {
   $("#progressWrap").classList.toggle("is-done", pct === 100 && total > 0);
 
   appendLog(s.log);
+  if (typeof s.logSeq === "number") logSeen = Math.max(logSeen, s.logSeq);
   setText($("#logNote"), s.dropped ? `строк лога пропущено: ${num(s.dropped)}` : "");
 
   const active = s.state === "running" || s.state === "paused";
@@ -636,7 +703,10 @@ function openPaste(kind) {
   setText($("#pasteTitle"), spec.title);
   setText($("#pasteHint"), spec.hint);
   const area = $("#pasteArea");
-  area.value = "";
+  // Открываем поле с тем, что уже загружено: владелец видит свои данные и
+  // правит их на месте, а не гадает, что там сейчас. Файл при этом
+  // равноправен со вставкой — он тоже лежит здесь текстом.
+  area.value = sourceText[kind] || "";
   area.placeholder = spec.placeholder;
   setText($("#pasteError"), "");
   show($("#pasteError"), false);
@@ -661,6 +731,11 @@ pasteModal.querySelector("form").addEventListener("submit", async (event) => {
     return;
   }
 
+  // Правка заменяет содержимое поля целиком, а не добавляется к нему: иначе
+  // исправленный список лёг бы поверх старого, и оба ушли бы в проверку.
+  if (sourceText[pasteKind] !== null && sourceText[pasteKind] !== "") {
+    await api("clear", { kind: pasteKind });
+  }
   const data = await api("paste", { kind: pasteKind, text });
   renderSources(data);
   if (data.error) {
@@ -1033,10 +1108,15 @@ function syncLock() {
 refreshSources();
 /* Хвост лога — чтобы после перезагрузки страницы терминал не оказался пустым
    при идущем прогоне: очередь к тому моменту уже отдана прошлой странице. */
-/* Первый опрос — только после хвоста: иначе он успеет забрать очередь, и те
-   же строки придут дважды. */
-api("log_tail").then((r) => appendLog(r.log)).catch(() => {}).finally(tick);
-setInterval(tick, 250);
+/* Хвост лога и опрос больше не спорят за одни и те же строки: хвост говорит,
+   на каком номере он кончился, а опрос просит только то, что после него.
+   Раньше порядок решал всё — если опрос успевал первым, пришедший следом
+   хвост показывал те же строки второй раз. Владелец видел это как «дубликаты
+   не удалились», хотя база схлопывалась правильно. */
+api("log_tail")
+  .then((r) => { appendLog(r.log); logSeen = Math.max(logSeen, r.seq || 0); })
+  .catch(() => {})
+  .finally(() => { tick(); setInterval(tick, 250); });
 
 api("parser_log_tail").then((r) => appendParserLog(r.log)).catch(() => {}).finally(parserTick);
 /* Сбор опрашивается вдвое реже проверки: там события идут не потоком,

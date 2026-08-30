@@ -1207,3 +1207,227 @@ def test_fits_breakpoints_for_one_selector_go_widest_first():
                 "правило для %dpx стоит раньше более широкого %dpx и будет им "
                 "перебито; общие селекторы: %s"
                 % (blocks[a][0], blocks[b][0], sorted(shared)))
+
+# ══════════════════════════════════════════ Таблица видна всегда
+
+def test_table_visible_never_collapses_to_nothing():
+    """Владелец открыл «Результаты» и увидел пустоту под фильтрами.
+
+    Строк при этом было 78. Виноват flex:1 с min-height:0 — он честно
+    отдаёт всё место соседям, и на невысоком окне таблице не доставалось
+    НИЧЕГО.
+    """
+    css = read("style.css")
+    body = styles(css, ".tablewrap")
+    assert body, "нет правила для области таблицы"
+    assert "min-height" in body, body
+    found = re.search(r"min-height:\s*(\d+)px", body)
+    assert found and int(found.group(1)) >= 200, body
+
+
+def test_table_visible_log_and_proxy_keep_their_height_too():
+    """Лог и профиль прокси схлопывались ровно так же."""
+    css = read("style.css")
+    for selector in (".log", ".proxy"):
+        body = styles(css, selector)
+        assert body and "min-height" in body, (selector, body)
+
+
+def test_table_visible_area_scrolls_on_its_own():
+    """Не поместилась — листается, а не обрезается."""
+    css = read("style.css")
+    body = styles(css, ".tablewrap")
+    assert "overflow: auto" in body, body
+
+
+# ══════════════════════════════════════════ Аватарки
+
+def test_avatar_is_shown_when_enrichment_found_one():
+    """Картинка запрашивается только для тех, у кого аватарка найдена.
+
+    Слать хеш для всех подряд значило бы дёргать чужой сервер на каждую
+    строку таблицы и заодно рассказывать ему всю базу.
+    """
+    from ui.webapp import ValidatorApi
+
+    api = ValidatorApi()
+    api._on_result("johnacreps@gmail.com", "Valid", "250 OK", "mx",
+                   {"engagement_score": 90, "has_gravatar": True})
+    api._on_result("nobody@gmail.com", "Valid", "250 OK", "mx",
+                   {"engagement_score": 80, "has_gravatar": False})
+
+    rows = {row["email"]: row for row in api.page({"groups": ["valid"]})["rows"]}
+    assert rows["johnacreps@gmail.com"]["avatar"], "аватарка не приехала на страницу"
+    assert rows["nobody@gmail.com"]["avatar"] == "", "хеш ушёл без нужды"
+
+
+def test_avatar_hash_is_what_gravatar_expects():
+    """Хеш считается от адреса в нижнем регистре без пробелов."""
+    import hashlib
+
+    from ui.webapp import _gravatar_hash
+
+    email = "  JohnACreps@Gmail.com  "
+    expected = hashlib.md5(b"johnacreps@gmail.com").hexdigest()
+    assert _gravatar_hash(email) == expected
+
+
+def test_avatar_cell_shows_initials_and_a_stable_colour():
+    """У одного адреса цвет кружка всегда один и тот же.
+
+    По нему строку узнаёшь боковым зрением, не читая; случайный цвет на
+    каждой перерисовке эту пользу уничтожает.
+    """
+    js = read("app.js")
+    assert "function avatarCell(" in js
+    assert "function initials(" in js
+    # Цвет выводится из адреса, а не берётся случайно.
+    assert "email.charCodeAt(i)" in js
+    assert "Math.random" not in js.split("function avatarCell(")[1][:900]
+    # Насыщенность и светлота зафиксированы: иначе кружки то невидимы, то
+    # кислотные.
+    assert "58% 42%" in js
+
+
+def test_avatar_fallback_when_the_picture_does_not_load():
+    """Без сети в каждой строке висела бы битая картинка."""
+    js = read("app.js")
+    block = js.split("function avatarCell(")[1][:1200]
+    assert 'addEventListener("error"' in block, block[:400]
+    assert "img.remove()" in block
+
+
+def test_avatar_fallback_initials_are_readable():
+    """Две буквы, а не одна: иначе половина кружков неразличима."""
+    js = read("app.js")
+    block = js.split("function initials(")[1][:600]
+    assert "parts[0][0] + parts[1][0]" in block
+    assert "slice(0, 2)" in block
+
+
+def test_avatar_does_not_break_the_address_column():
+    """Адрес рядом с кружком по-прежнему обрезается многоточием."""
+    css = read("style.css")
+    assert "text-overflow: ellipsis" in styles(css, ".who__mail")
+    assert "flex: none" in styles(css, ".ava"), "кружок сожмётся длинным адресом"
+
+
+# ══════════════════════════════════════════ Файл и поле ввода — одно и то же
+
+def test_source_text_file_lands_in_the_input(tmp_path):
+    """Выбранный файл попадает в поле текстом и правится там же."""
+    from ui.webapp import ValidatorApi
+
+    base = tmp_path / "base.txt"
+    base.write_text("\n".join("user%d@gmail.com" % i for i in range(20)),
+                    encoding="utf-8")
+
+    api = ValidatorApi()
+    api._pick_files = lambda kind: [str(base)]
+    api.choose({"kind": "emails"})
+
+    info = api.sources()["emails"]
+    assert info["editable"] is True
+    assert "user0@gmail.com" in info["text"]
+    assert info["title"] == "base.txt", info
+
+
+def test_source_text_pasted_text_is_offered_back(tmp_path):
+    """Вставленное руками возвращается в поле так же, как содержимое файла."""
+    from ui.webapp import ValidatorApi
+
+    api = ValidatorApi()
+    api.paste({"kind": "emails", "text": "ivan@gmail.com\nanna@yahoo.com"})
+    info = api.sources()["emails"]
+    assert info["editable"] is True
+    assert info["text"] == "ivan@gmail.com\nanna@yahoo.com"
+
+
+def test_source_text_huge_file_is_refused_openly(tmp_path):
+    """Гигантский файл в поле не показывается — и об этом сказано прямо.
+
+    Строка на миллионы адресов в текстовом поле вешает окно. Молчаливое
+    «поле пустое» было бы хуже отказа: владелец решил бы, что файл не
+    загрузился.
+    """
+    from ui.webapp import ValidatorApi
+
+    big = tmp_path / "huge.txt"
+    with io.open(big, "w", encoding="utf-8") as handle:
+        for i in range(400_000):
+            handle.write("user%d@gmail.com\n" % i)
+
+    api = ValidatorApi()
+    assert big.stat().st_size > ValidatorApi.INLINE_LIMIT, "файл вышел маловат"
+
+    api._pick_files = lambda kind: [str(big)]
+    api.choose({"kind": "emails"})
+
+    info = api.sources()["emails"]
+    assert info["count"] == 1, "файл не подключился"
+    assert info["editable"] is False
+    assert info["text"] == ""
+    # Владельцу это объяснено в логе, а не просто умолчано.
+    said = " ".join(line["text"] for line in api.state()["log"])
+    assert "в поле ввода не показан" in said, said
+
+
+def test_source_text_page_opens_the_field_with_what_is_loaded():
+    """Поле вставки открывается с уже загруженным, а не пустым."""
+    js = read("app.js")
+    assert "const sourceText" in js
+    assert "area.value = sourceText[kind]" in js
+    # И правка заменяет содержимое, а не добавляется к нему.
+    assert 'api("clear", { kind: pasteKind })' in js
+
+
+def test_same_input_file_and_paste_produce_identical_work(tmp_path):
+    """Движку всё равно, как данные пришли: вход обязан быть тем же.
+
+    Это и есть требование владельца целиком: «софту должно быть срать, как
+    я данные загружаю».
+    """
+    from ui.webapp import ValidatorApi
+
+    lines = ["ivan@gmail.com", "anna@yahoo.com;Анна;Женский;США",
+             "petr@mail.ru,Пётр Смирнов,Мужской,Россия"]
+    text = "\n".join(lines)
+
+    base = tmp_path / "base.txt"
+    base.write_text(text, encoding="utf-8")
+
+    from_file = ValidatorApi()
+    from_file._pick_files = lambda kind: [str(base)]
+    from_file.choose({"kind": "emails"})
+
+    from_paste = ValidatorApi()
+    from_paste.paste({"kind": "emails", "text": text})
+
+    def payload(api):
+        return [dict(source) for source in api.email_sources]
+
+    file_side = payload(from_file)
+    paste_side = payload(from_paste)
+
+    assert len(file_side) == len(paste_side) == 1
+    assert file_side[0]["type"] == paste_side[0]["type"] == "text"
+    assert file_side[0]["content"] == paste_side[0]["content"] == text
+
+
+def test_same_input_both_paths_pass_the_same_guard(tmp_path):
+    """И проверка ввода одинакова: прокси не пролезут ни одним путём."""
+    from ui.webapp import ValidatorApi
+
+    proxies = tmp_path / "proxy.txt"
+    proxies.write_text("\n".join("1.2.3.%d:8080" % i for i in range(1, 30)),
+                       encoding="utf-8")
+
+    api = ValidatorApi()
+    api._pick_files = lambda kind: [str(proxies)]
+    assert api.choose({"kind": "emails"}).get("error")
+    assert len(api.email_sources) == 0
+
+    api2 = ValidatorApi()
+    assert api2.paste({"kind": "emails",
+                       "text": proxies.read_text(encoding="utf-8")}).get("error")
+    assert len(api2.email_sources) == 0
