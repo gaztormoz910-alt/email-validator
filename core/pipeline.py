@@ -345,6 +345,44 @@ class ValidationPipeline:
             self._http_alive_cache[domain] = False
         return False
 
+    def _enrich_offline(self, email, data, status_display, enable_ai):
+        """Обогащение для адреса, который до сервера не дойдёт.
+
+        Отсеянные по одноразовому домену выходили из обработки сразу и
+        оставались без имени, пола и страны: в таблице у них пустые колонки,
+        хотя всё это считается локально по самому адресу и не стоит ни одного
+        запроса в сеть. Владелец просил, чтобы каждый адрес проходил все
+        применимые критерии, — и этот как раз применим.
+
+        Сеть здесь не задействуется вовсе: Gravatar, возраст домена и живой
+        сайт спрашиваются только у Valid, Risky и Role-based, а сюда приходят
+        совсем другие статусы. Скор при этом не трогаем — он уже выставлен
+        вызывающим кодом и означает «слать нельзя».
+        """
+        try:
+            score_before = data.get("engagement_score")
+            grade_before = data.get("engagement_grade")
+            provider_before = data.get("provider_name")
+            type_before = data.get("provider_type")
+            domain_before = data.get("domain_type")
+
+            self._enrich_and_score(
+                email, data,
+                {"reason": "", "mx_record": "N/A", "mx_records": []},
+                status_display, status_display, False, enable_ai)
+
+            # Возвращаем то, что решил вызывающий: у одноразового домена
+            # оценка равна нулю по определению, и пересчитывать её незачем.
+            data["engagement_score"] = score_before
+            data["engagement_grade"] = grade_before
+            data["provider_name"] = provider_before
+            data["provider_type"] = type_before
+            data["domain_type"] = domain_before
+        except Exception:
+            # Обогащение — дополнение к вердикту, а не условие его выдачи.
+            # Упасть здесь значит потерять адрес целиком ради колонки с именем.
+            pass
+
     def _enrich_and_score(self, email, data, res, status_display,
                           original_smtp_status, is_role, enable_ai):
         """Обогащение и скоринг одного адреса.
@@ -975,6 +1013,7 @@ class ValidationPipeline:
                 data["provider_type"] = "Disposable"
                 data["provider_name"] = "Disposable"
                 data["domain_type"] = "Disposable"
+                self._enrich_offline(email, data, "Trap/Disposable", enable_ai)
                 self._emit(email, "Trap/Disposable", "Disposable Email Domain", "N/A", data)
                 return
 
@@ -989,6 +1028,7 @@ class ValidationPipeline:
                     data["provider_type"] = "Disposable (внешний список)"
                     data["provider_name"] = "Disposable"
                     data["domain_type"] = "Disposable"
+                    self._enrich_offline(email, data, "Trap/Disposable", enable_ai)
                     self._emit(email, "Trap/Disposable", "External Blacklist Match", "N/A", data)
                     return
 
