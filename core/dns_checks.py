@@ -292,6 +292,19 @@ class DnsChecksMixin:
             self._ptr_cache[mx_host] = result
         return result
 
+    # Единственные два исключения, которые являются ОТВЕТОМ, а не сбоем:
+    #
+    #   NXDOMAIN — такого домена нет вовсе;
+    #   NoAnswer — домен есть, но записей запрошенного типа у него нет.
+    #
+    # Всё остальное (таймаут, «серверы имён недоступны», обрыв связи) означает
+    # «мы не спросили», и путать одно с другим нельзя. Раньше здесь стоял
+    # голый `except Exception: pass`, и таймаут резолвера возвращал тот же
+    # пустой список, что и несуществующий домен, — то есть ПРИГОВОР ВСЕМУ
+    # ДОМЕНУ. Моргнувший интернет хоронил живые адреса целыми доменами, и в
+    # логе это выглядело как «No MX/A records (Dead Domain)».
+    _ANSWERED_NOTHING = (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer)
+
     def get_mx_records(self, domain: str):
         """Ищет MX-записи домена, с фоллбэком на A и AAAA (RFC 5321, п.1.4).
 
@@ -330,8 +343,10 @@ class DnsChecksMixin:
                 return result
         except DNSUnavailable:
             dns_failed = True
+        except self._ANSWERED_NOTHING:
+            pass                      # это ОТВЕТ: таких записей у домена нет
         except Exception:
-            pass
+            dns_failed = True         # всё прочее — мы не спросили
 
         # Фоллбэк на A-запись (п.1.4): если MX нет — пробуем сам домен как mail-сервер
         try:
@@ -343,8 +358,10 @@ class DnsChecksMixin:
             return result
         except DNSUnavailable:
             dns_failed = True
-        except Exception:
+        except self._ANSWERED_NOTHING:
             pass
+        except Exception:
+            dns_failed = True
 
         # Фоллбэк на AAAA-запись (IPv6) — п.1 DNS +1 балл
         try:
@@ -355,8 +372,10 @@ class DnsChecksMixin:
             return result
         except DNSUnavailable:
             dns_failed = True
-        except Exception:
+        except self._ANSWERED_NOTHING:
             pass
+        except Exception:
+            dns_failed = True
 
         # DNS не ответил — вывода о домене сделать нельзя. Не кэшируем:
         # иначе один сбой похоронил бы домен на весь прогон.

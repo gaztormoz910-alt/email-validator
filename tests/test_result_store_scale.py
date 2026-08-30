@@ -281,9 +281,17 @@ class TestGarbageInput(unittest.TestCase):
         rows = self.store.page(("valid",), page=1, size=10)
         self.assertEqual(rows[0]["data"]["name"], "Ok")
 
-    def test_unknown_status_lands_in_other(self):
+    def test_unknown_status_is_visible_not_hidden(self):
+        """Непонятный статус попадает в «не доказано», а не в невидимую группу.
+
+        Раньше он уходил в other, которую не показывает ни один фильтр окна:
+        адрес считался в «Всего проверено» и пропадал из таблицы. Показать
+        его честно недоказанным лучше, чем спрятать совсем.
+        """
         self.store.append("z@example.com", None, "r", "mx", {})
-        self.assertEqual(self.store.counts()["other"], 1)
+        self.assertEqual(self.store.counts()["other"], 0)
+        self.assertEqual(self.store.counts()["unknown"], 1)
+        self.assertEqual(len(self.store.page(("unknown",), size=10)), 1)
 
 
 if __name__ == "__main__":
