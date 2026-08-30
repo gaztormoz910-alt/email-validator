@@ -136,6 +136,13 @@ def _facet_of(payload, key):
 FLUSH_EVERY = 500
 
 
+# Порядок строк в таблице. Сначала качество по убыванию — сотня сверху, ноль
+# внизу, — потом порядок поступления, чтобы одинаковые оценки не прыгали
+# между перерисовками. Сортировка живёт в запросе, а не в странице: иначе она
+# упорядочивала бы только видимую сотню строк.
+ORDER_BY = "ORDER BY score DESC, pos ASC"
+
+
 # Грани, по которым владелец отбирает строки помимо вердикта. Ключ здесь —
 # имя колонки в таблице; оно же приезжает с страницы.
 FACETS = ("country", "gender", "provider")
@@ -190,7 +197,7 @@ class ResultStore:
     же, что был у чисто-оперативной версии, поэтому окно про подмену не знает.
     """
 
-    def __init__(self, path=None):
+    def __init__(self, path=None, drop_repeats=False):
         self._lock = threading.RLock()
         # Позиции по группам. array('q') вместо list: восемь байт на элемент
         # против двадцати восьми у списка питоновских int.
@@ -209,6 +216,24 @@ class ResultStore:
         self._pending = []
         # Запасной путь: строки в ОЗУ, если БД недоступна.
         self._memory_rows = {}
+        # Ключи ещё не записанной пачки и ключи строк, живущих только в ОЗУ.
+        # Отбрасывать ли повторный результат по уже показанному ящику.
+        #
+        # По умолчанию НЕТ, и это важно. Хранилище общего назначения не должно
+        # молча глотать строки: тот, кто положил в него шесть записей, вправе
+        # получить шесть. Тихое схлопывание превращает потерю данных в
+        # «особенность», которую замечаешь через месяц.
+        #
+        # Окно включает его сознательно: там строка — это предложение
+        # отправить письмо, и один ящик двумя строками означает двойную
+        # отправку. Дедуп входа делает конвейер, это лишь пояс поверх
+        # подтяжек — на случай, если результат придёт дважды по любой другой
+        # причине.
+        self._drop_repeats = bool(drop_repeats)
+        # Нужны для проверки «этот ящик уже показан»: в БД такой поиск идёт по
+        # индексу, а вот про несохранённую пачку она ещё не знает.
+        self._pending_keys = set()
+        self._memory_keys = set()
 
         self._open(path)
 
@@ -340,11 +365,40 @@ class ResultStore:
 
     # --- запись ---------------------------------------------------------
 
+    def _already_shown(self, key):
+        """Показан ли уже этот ящик. Вызывается под захваченным локом.
+
+        Пояс поверх подтяжек. Дедуп входа делает конвейер, но если результат
+        по одному адресу придёт дважды по любой другой причине, владелец
+        увидит один ящик двумя строками — то есть предложение отправить
+        письмо дважды. Жалоба на спам стоит дороже одного лишнего поиска по
+        индексу.
+        """
+        if not self._drop_repeats or not key:
+            return False
+        if key in self._pending_keys or key in self._memory_keys:
+            return True
+        if self._conn is None:
+            return False
+        try:
+            cursor = self._conn.execute(
+                "SELECT 1 FROM rows WHERE email_lc = ? LIMIT 1", (key,))
+            return cursor.fetchone() is not None
+        except Exception:
+            return False
+
     def append(self, email, status, reason, mx, data):
-        """Добавляет строку и обновляет индексы. Возвращает её группу."""
+        """Добавляет строку и обновляет индексы. Возвращает её группу.
+
+        Повторный результат по уже показанному ящику отбрасывается: возвращаем
+        его прежнюю группу, но второй строки не создаём.
+        """
         payload = data if isinstance(data, dict) else {}
         group = group_of(status)
+        key = str(email or "").strip().lower()
         with self._lock:
+            if self._already_shown(key):
+                return group
             position = self._total
             self._total += 1
             self._index[group].append(position)
@@ -356,6 +410,7 @@ class ResultStore:
                 self._memory_rows[position] = {
                     "email": email, "status": status, "reason": reason,
                     "mx": mx, "data": payload}
+                self._memory_keys.add(key)
                 return group
 
             try:
@@ -366,7 +421,8 @@ class ResultStore:
                 position, email, status, reason, mx, blob,
                 group, _score_of(payload),
                 _facet_of(payload, "country"), _facet_of(payload, "gender"),
-                _provider_of(email), str(email or "").lower()))
+                _provider_of(email), key))
+            self._pending_keys.add(key)
             if len(self._pending) >= FLUSH_EVERY:
                 self._flush_locked()
         return group
@@ -383,6 +439,9 @@ class ResultStore:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", self._pending)
             self._conn.commit()
             self._pending.clear()
+            # Записанное теперь найдётся в базе по индексу — держать ключи в
+            # памяти больше незачем.
+            self._pending_keys.clear()
         except Exception:
             # Запись сломалась на середине прогона. Соединение НЕ закрываем:
             # то, что уже легло на диск, читается по-прежнему, и терять его
@@ -393,13 +452,17 @@ class ResultStore:
                 self._memory_rows[position] = {
                     "email": email, "status": status, "reason": reason,
                     "mx": mx, "data": _loads(blob)}
+                self._memory_keys.add(str(email or "").strip().lower())
             self._pending.clear()
+            self._pending_keys.clear()
             self._writes_ok = False
 
     def clear(self):
         with self._lock:
             self._pending.clear()
+            self._pending_keys.clear()
             self._memory_rows.clear()
+            self._memory_keys.clear()
             for name in GROUPS:
                 # array не умеет clear() в старых версиях — режем срезом.
                 del self._index[name][:]
@@ -575,6 +638,21 @@ class ResultStore:
         start = (page - 1) * size
 
         with self._lock:
+            if _filters_are_plain(picked) and self._sql_ready(picked["groups"]):
+                # Даже без фильтров идём через SQL: сортировка по качеству
+                # обязана действовать на ВСЮ выборку, а не на ту сотню строк,
+                # что попала на экран. Отсортировать страницу после выборки —
+                # значит показать «лучшие из случайных ста», а владелец решает
+                # по этому списку, кому слать.
+                self._flush_locked()
+                try:
+                    where, params = self._where(picked)
+                    cursor = self._conn.execute(
+                        "SELECT pos FROM rows WHERE %s %s LIMIT ? OFFSET ?"
+                        % (where, ORDER_BY), params + [size, start])
+                    return self._fetch([row[0] for row in cursor])
+                except Exception:
+                    pass
             if _filters_are_plain(picked):
                 chosen = list(itertools.islice(self._selected(picked["groups"]),
                                                start, start + size))
@@ -585,23 +663,25 @@ class ResultStore:
                 try:
                     where, params = self._where(picked)
                     cursor = self._conn.execute(
-                        "SELECT pos FROM rows WHERE %s ORDER BY pos LIMIT ? OFFSET ?"
-                        % where, params + [size, start])
+                        "SELECT pos FROM rows WHERE %s %s LIMIT ? OFFSET ?"
+                        % (where, ORDER_BY), params + [size, start])
                     return self._fetch([row[0] for row in cursor])
                 except Exception:
                     pass          # молча падаем на медленный, но верный путь
 
             # Запасной путь без БД: строки достаются по одной, потому что
-            # грани лежат внутри строки. Перебор обрывается по набору
-            # страницы, поэтому стоит он размера страницы, а не базы.
+            # грани лежат внутри строки. Здесь перебор оборвать нельзя —
+            # сортировка по качеству требует видеть всю выборку, иначе на
+            # первой странице окажутся лучшие из первых ста, а не лучшие
+            # вообще. Путь запасной и включается, только когда база не
+            # открылась.
             chosen = []
             for position in self._selected(picked["groups"]):
                 rows = self._fetch([position])
                 if rows and self._matches(rows[0], picked):
-                    chosen.append(position)
-                    if len(chosen) >= start + size:
-                        break
-            return self._fetch(chosen[start:start + size])
+                    chosen.append((-_score_of(rows[0].get("data")), position))
+            chosen.sort()
+            return self._fetch([pos for _score, pos in chosen[start:start + size]])
 
     def matching_count(self, groups=None, min_score=0, filters=None):
         """Сколько строк проходит фильтр.

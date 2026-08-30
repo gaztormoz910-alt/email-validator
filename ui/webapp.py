@@ -28,6 +28,8 @@
 же ResultStore, что и прежнее окно.
 """
 
+import hashlib
+import io
 import json
 import mimetypes
 import os
@@ -59,7 +61,10 @@ class ValidatorApi:
         from core.pipeline import ValidationPipeline
 
         self._group_of = group_of
-        self.store = ResultStore()
+        # Повтор по уже показанному ящику в таблицу не попадает: строка здесь
+        # означает предложение отправить письмо, и один ящик двумя строками —
+        # это двойная отправка и жалоба на спам.
+        self.store = ResultStore(drop_repeats=True)
         self.log = LogBuffer(capacity=4000)
 
         # Четыре вида источников: два у проверки, два у сбора адресов.
@@ -75,6 +80,10 @@ class ValidatorApi:
         self._state = "idle"                # idle | running | paused | done
         self._proxy_summary = None
         self._pending = []                  # строки лога, ещё не отданные
+        # Сквозной номер строки. Без него «хвост» и «очередь» не согласовать:
+        # хвост отдаёт всё подряд, а очередь — только новое, и общие строки
+        # приходят дважды. Замерено: из 290 показанных строк 129 были дублями.
+        self._log_seq = 0
         # Хвост лога хранится отдельно: страница может перезагрузиться (F5,
         # переоткрытие окна), а уже отданные строки к тому моменту стёрты из
         # очереди. Без хвоста после перезагрузки терминал оказывается пустым,
@@ -85,6 +94,10 @@ class ValidatorApi:
 
         # Сбор адресов: свой конвейер, свой лог, свои счётчики.
         self.parser = None
+        # «Запуск уже нажали, конвейер ещё не успел объявить себя идущим».
+        # Промежуток между этими двумя событиями и был дырой для второго
+        # прогона.
+        self._starting = False
         self._parser_state = "idle"
         self._parser_progress = (0, 0, 0, "Парсинг")
         self._parser_stats = {"dorksDone": 0, "dorksTotal": 0,
@@ -113,6 +126,19 @@ class ValidatorApi:
     def proxy_sources(self):
         return self._sources["proxies"]
 
+    # До какого размера файл читается в поле ввода целиком.
+    #
+    # Владелец просил полной равнозначности: «софту должно быть срать, как я
+    # данные загружаю». Она и сделана — но у показа в поле есть физический
+    # потолок. Строка на десять миллионов адресов, положенная в textarea,
+    # вешает окно намертво: браузер держит её целиком, считает переносы и
+    # перерисовывает на каждое нажатие клавиши. Поэтому крупный файл остаётся
+    # файлом, и об этом сказано прямо, а не умолчано.
+    #
+    # На сам ПРОГОН это не влияет никак: движок читает оба вида источника
+    # одинаково и потоково.
+    INLINE_LIMIT = 5 * 1024 * 1024
+
     # Вид источника -> что в нём ожидается. Нужно проверке ввода: положить
     # список прокси в поле адресов проще простого, а всплывает ошибка только
     # через минуту прогона тысячами непонятных отказов.
@@ -136,7 +162,7 @@ class ValidatorApi:
         «не идёт» и не запирать ввод во время сбора вовсе. Тот же признак,
         что и в parser_start, где решается, можно ли запускать второй раз.
         """
-        if getattr(self.pipeline, "is_running", False):
+        if self._starting or getattr(self.pipeline, "is_running", False):
             return True
         parser = getattr(self, "parser", None)
         if parser is None:
@@ -169,8 +195,9 @@ class ValidatorApi:
 
     # ---------------------------------------------------- от движка ----
     def _on_log(self, text, tag="info"):
-        line = {"text": str(text), "tag": tag}
         with self._lock:
+            self._log_seq += 1
+            line = {"text": str(text), "tag": tag, "n": self._log_seq}
             self._pending.append(line)
             self._history.append(line)
             if len(self._history) > self._history_cap:
@@ -215,26 +242,56 @@ class ValidatorApi:
 
         paths = self._pick_files(kind)
         expected = self._EXPECTED_KIND.get(kind)
-        accepted, refused = [], []
+        accepted, refused, oversized = [], [], []
         for path in paths:
             # Проверяется КАЖДЫЙ файл, а не первый: владелец выбирает их
             # пачкой, и прокси среди пяти баз иначе проедут незамеченными.
             verdict = input_guard.check_file(path, expected) if expected else {"ok": True}
-            if verdict["ok"]:
-                accepted.append(path)
-                target.append({"type": "file", "path": path})
-            else:
+            if not verdict["ok"]:
                 refused.append(verdict["reason"])
+                continue
+
+            accepted.append(path)
+            # Небольшой файл становится ТЕКСТОМ — ровно тем же, что получилось
+            # бы от вставки руками. Дальше он и правится в поле, и уходит в
+            # движок одинаково: разницы между двумя способами загрузки больше
+            # нет.
+            text = self._read_inline(path)
+            if text is None:
+                target.append({"type": "file", "path": path})
+                oversized.append(os.path.basename(path))
+            else:
+                target.append({"type": "text", "content": text,
+                               "title": os.path.basename(path)})
 
         if accepted:
             self._on_log(f"[INFO] Подключено файлов: {len(accepted)}.", "info")
         for reason in refused:
             self._on_log(f"[DEAD] Файл отклонён: {reason}", "dead")
+        for name in oversized:
+            self._on_log(
+                f"[INFO] {name} больше {self.INLINE_LIMIT // (1024 * 1024)} МБ — "
+                "в поле ввода не показан, но в проверку пойдёт целиком.", "info")
 
         result = self.sources()
         if refused:
             result["error"] = refused[0]
         return result
+
+    def _read_inline(self, path):
+        """Текст файла, если он не слишком велик для поля ввода.
+
+        None означает «слишком большой» — тогда файл остаётся файлом. Это не
+        отговорка: строка на десять миллионов адресов в текстовом поле вешает
+        окно, а движку она в поле и не нужна.
+        """
+        try:
+            if os.path.getsize(path) > self.INLINE_LIMIT:
+                return None
+            with io.open(path, "r", encoding="utf-8", errors="replace") as handle:
+                return handle.read()
+        except OSError:
+            return None
 
     def paste(self, payload):
         """Список, вставленный текстом вместо файла."""
@@ -254,7 +311,7 @@ class ValidatorApi:
                 self._on_log(f"[DEAD] Вставка отклонена: {verdict['reason']}", "dead")
                 return dict(self.sources(), error=verdict["reason"])
 
-        bucket.append({"type": "text", "content": text})
+        bucket.append({"type": "text", "content": text, "title": "вставленный текст"})
         return self.sources()
 
     def clear(self, payload):
@@ -268,12 +325,21 @@ class ValidatorApi:
         """Что сейчас подключено. Считается лениво — файл не читается."""
         def describe(sources):
             if not sources:
-                return {"count": 0, "title": "Выберите файл", "detail": ""}
-            names = [os.path.basename(s["path"]) if s["type"] == "file" else "вставленный текст"
+                return {"count": 0, "title": "Выберите файл", "detail": "",
+                        "text": "", "editable": True}
+            names = [s.get("title") or os.path.basename(s["path"])
+                     if s["type"] == "file" else (s.get("title") or "вставленный текст")
                      for s in sources]
             title = names[0] if len(names) == 1 else f"{len(names)} источника"
+
+            # Текст для поля ввода. Он есть, только если ВСЕ источники —
+            # текстовые: показать половину и дать её править значило бы тихо
+            # потерять вторую половину при сохранении.
+            editable = all(s["type"] == "text" for s in sources)
+            text = "\n".join(s.get("content", "") for s in sources) if editable else ""
             return {"count": len(sources), "title": title,
-                    "detail": ", ".join(names[:3])}
+                    "detail": ", ".join(names[:3]),
+                    "text": text, "editable": editable}
 
         missing = []
         if not self._sources["emails"]:
@@ -335,8 +401,15 @@ class ValidatorApi:
         return int(max(low, min(high, value)))
 
     def start(self, payload):
-        if self.pipeline.is_running:
+        # Признак «идёт прогон» у конвейера взводится ПОЗДНО — внутри рабочего
+        # потока и уже после подготовки, а она длится минутами: перебор прокси,
+        # прогрев модели. Всё это время повторный щелчок по кнопке проходил бы
+        # проверку и запускал ВТОРОЙ конвейер: строки лога удваивались, а
+        # счётчики показывали один прогон, потому что второй очищал хранилище.
+        # Владелец принимал это за неудалённые дубликаты.
+        if self._busy() or self._starting:
             return {"ok": False, "error": "Проверка уже идёт"}
+        self._starting = True
         if not self.email_sources or not self.proxy_sources:
             return {"ok": False, "error": "Сначала выберите адреса и прокси"}
 
@@ -348,7 +421,7 @@ class ValidatorApi:
         self._state = "running"
         self._proxy_summary = None
 
-        self.pipeline.start(
+        thread = self.pipeline.start(
             email_sources=list(self.email_sources),
             threads=self._number(payload, "threads", 100, 1, 500),
             timeout=self._number(payload, "timeout", 5, 1, 300),
@@ -358,6 +431,15 @@ class ValidatorApi:
             enable_osint=bool(payload.get("osint", True)),
             use_cache=bool(payload.get("cache", True)),
             resume=False)
+
+        # Сторож снимает запрет, как только поток кончился: без него упавшая
+        # подготовка запирала бы запуск до перезапуска программы.
+        def release():
+            if thread is not None:
+                thread.join()
+            self._starting = False
+
+        threading.Thread(target=release, daemon=True).start()
         return {"ok": True}
 
     def pause(self, payload=None):
@@ -376,7 +458,19 @@ class ValidatorApi:
         counts = self.store.counts()
         current, total = self._progress
         with self._lock:
-            lines, self._pending = self._pending, []
+            since = payload.get("logSince") if isinstance(payload, dict) else None
+            if since is None:
+                lines, self._pending = self._pending, []
+            else:
+                # Страница says, что уже видела всё до этого номера. Берём из
+                # хвоста строго новое — так ответ не зависит от того, кто
+                # успел первым, хвост или опрос.
+                try:
+                    since = int(since)
+                except (TypeError, ValueError):
+                    since = 0
+                lines = [line for line in self._history if line.get("n", 0) > since]
+                self._pending = []
         return {
             "state": self._state,
             "running": bool(self.pipeline.is_running),
@@ -388,6 +482,7 @@ class ValidatorApi:
             "progress": {"current": current, "total": total,
                          "pct": int(current * 100 / total) if total else 0},
             "log": lines,
+            "logSeq": self._log_seq,
             "dropped": self.log.dropped,
             "proxy": self._proxy_summary,
             "exportBusy": self._export_busy,
@@ -401,8 +496,12 @@ class ValidatorApi:
         ближайшим опросом.
         """
         with self._lock:
+            # Отдаём хвост и СРАЗУ говорим, на каком номере он кончается.
+            # Страница дальше просит только строки после него, поэтому
+            # порядок «хвост против опроса» перестаёт что-либо значить.
+            tail = list(self._history)
             self._pending = []
-            return {"log": list(self._history)}
+            return {"log": tail, "seq": self._log_seq}
 
     def page(self, payload):
         """Страница таблицы. Берётся из того же хранилища, что и раньше."""
@@ -419,6 +518,11 @@ class ValidatorApi:
             data = row.get("data") or {}
             out.append({
                 "email": row["email"],
+                # Хеш для аватарки, и только когда обогащение её нашло.
+                # Слать хеш для всех подряд значило бы дёргать чужой сервер на
+                # каждую строку таблицы и рассказывать ему всю базу.
+                "avatar": (_gravatar_hash(row["email"])
+                           if data.get("has_gravatar") else ""),
                 "status": row["status"],
                 "group": self._group_of(row["status"]),
                 "reason": row["reason"],
@@ -842,6 +946,14 @@ def start_api_server(api):
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, server.server_address[1], token
+
+
+def _gravatar_hash(email):
+    """Хеш адреса в том виде, в каком его ждёт gravatar.com."""
+    try:
+        return hashlib.md5(str(email).strip().lower().encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
 
 
 def _storage_path():
