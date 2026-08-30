@@ -1,10 +1,17 @@
 import re
 
+from core.email_syntax import harvest_pattern
+
+
 class EmailExtractor:
     def __init__(self):
-        # Lite14 Style Regex: Extremely robust, ignoring surrounding HTML/garbage
-        # Matches: anything@anything.anything
-        self.pattern = re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+')
+        # Образец общий с проверкой синтаксиса — в режиме «текст со ссылками».
+        #
+        # Свой набор символов был уже: из него выпадали ! # $ % & ' * + / = ?
+        # ^ _ ` { | } ~, которые RFC 5322 в имени ящика разрешает. Адрес не
+        # пропадал, а ОБРЕЗАЛСЯ до другого, тоже существующего: собранный
+        # o'brien@gmail.com попадал в базу как brien@gmail.com.
+        self.pattern = harvest_pattern(wide=False)
         
         # Extensions that are commonly false positives (e.g., from images or files)
         self.bad_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.css', '.js', '.mp4', '.mp3', 'duckduckgo.com', 'duck.com'}
@@ -25,13 +32,18 @@ class EmailExtractor:
 
         # Pull mailto: hrefs first - they live inside tag attributes and would
         # otherwise be lost once the tag itself gets stripped below.
-        mailto_matches = re.findall(r'mailto:([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)', text, flags=re.IGNORECASE)
+        mailto_matches = [m.group(1) for m in re.finditer(
+            r'mailto:(' + self.pattern.pattern + r')', text, flags=re.IGNORECASE)]
 
         # Strip inline tags that might break emails apart in search snippets (like <b>email@...</b>)
         text = re.sub(r'</?(b|i|em|strong|span|u|a)[^>]*>', '', text, flags=re.IGNORECASE)
-        # DuckDuckGo often highlights search terms including quotes, e.g. tom.hovey"@gmail.com"
-        # We must remove quotes so they don't split the email prefix from the domain
-        text = text.replace('"', '').replace("'", '')
+        # DuckDuckGo подсвечивает найденное кавычками: tom.hovey"@gmail.com".
+        # Двойные убираем — в адресе они без экранирования не встречаются.
+        #
+        # А ОДИНАРНУЮ трогать нельзя, хотя раньше убирали и её: апостроф в
+        # o'brien@gmail.com — часть фамилии, и без него получается obrien@ —
+        # чужой существующий ящик. Подменить адрес хуже, чем потерять.
+        text = text.replace('"', '')
         # Replace other formatting/layout tags with spaces to prevent merging unrelated words.
         # Only matches real tags (name starts with a letter, then whitespace/attrs or '>')
         # so plain text incidentally wrapped in <angle brackets>, like <foo@bar.com>, survives.
@@ -76,7 +88,10 @@ class EmailExtractor:
                 continue
                 
             tld = domain_part.rsplit('.', 1)[-1]
-            if len(tld) < 2 or not tld.isalpha():
+            # Punycode-зона (xn--p1ai для .рф) состоит не из одних букв, и
+            # проверка на isalpha() выбрасывала КАЖДЫЙ адрес на кириллическом
+            # домене — молча, без единой строки в логе.
+            if len(tld) < 2 or not (tld.isalpha() or tld.startswith('xn--')):
                 continue
                 
             # If it passed all filters, it's a solid hit

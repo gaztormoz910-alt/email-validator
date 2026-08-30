@@ -62,8 +62,20 @@ _RULES = {}
 
 
 def _register(domains, rule):
+    # Один домен строкой — тоже допустимый вызов: перебор строки по буквам
+    # завёл бы в таблицу правил записи «g», «m», «a», «i», «l».
+    if isinstance(domains, str):
+        domains = (domains,)
+    elif domains is None or not hasattr(domains, "__iter__"):
+        return
+    # Правилом может быть только Rule. Записав в таблицу что угодно, мы
+    # получили бы падение не здесь, а позже — при проверке живого адреса, у
+    # которого домен случайно совпал с мусорным ключом.
+    if not isinstance(rule, Rule):
+        return
     for domain in domains:
-        _RULES[domain] = rule
+        if isinstance(domain, str) and domain:
+            _RULES[domain.lower()] = rule
 
 
 _register(
