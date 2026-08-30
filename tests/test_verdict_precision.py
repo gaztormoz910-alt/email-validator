@@ -313,14 +313,40 @@ class TestCheckEmailAsksForTheControlProbe(unittest.TestCase):
                          "контрольная проба не заказана: сорвавшаяся проверка "
                          "catch-all выдаст ложный Valid")
 
-    def test_giants_do_not_pay_for_it(self):
+    def test_giants_pay_for_it_rarely_but_do_pay(self):
+        """У гигантов контроль идёт изредка — и это сознательная смена решения.
+
+        Раньше здесь стояло «гиганты не платят»: Gmail и Яндекс catch-all не
+        бывают. Соображение верно ровно до тех пор, пока наш исходящий адрес
+        чист. Столкнувшись с перебором адресов с подозрительного IP, крупные
+        почтовики перестают отвечать честно и принимают ЛЮБОГО получателя —
+        так они не дают выяснить, какие ящики существуют. Тогда вся база
+        уезжает в «Годен», и узнаётся это по отскокам после рассылки.
+
+        Поэтому контроль включён и у них, но не на каждом адресе: первый —
+        обязательно, дальше изредка.
+        """
         for domain in ("gmail.com", "yandex.ru", "icloud.com"):
             with self.subTest(domain=domain):
+                validator = self._validator([])
                 seen = []
-                self._validator(seen).check_email(f"someone@{domain}")
-                self.assertEqual(seen, [False],
-                                 "лишняя проба на домене, который catch-all "
-                                 "быть не может")
+
+                def ping(email, mx_records, control_probe=False):
+                    seen.append(control_probe)
+                    return {"status": "valid", "reason": "250 OK"}
+
+                validator.stealth_smtp_ping = ping
+                for _ in range(30):
+                    validator.check_email(f"someone@{domain}")
+
+                self.assertTrue(seen[0],
+                                "первая проверка домена обязана быть "
+                                "контрольной: сервер мог тарпитить уже сейчас")
+                paid = sum(1 for value in seen if value)
+                self.assertLessEqual(paid, 3,
+                                     "контроль у гиганта не должен идти на "
+                                     "каждом адресе — это лишние RCPT")
+                self.assertGreaterEqual(paid, 1)
 
 
 if __name__ == "__main__":
