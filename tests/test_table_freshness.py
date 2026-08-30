@@ -94,20 +94,26 @@ class TestTableSkipsOnlyWhatCannotChange(unittest.TestCase):
                             "смена страницы не сбросила запомненное")
 
     def test_switching_filter_invalidates(self):
-        # Первая сотня со СЛАБЫМ скором, вторая с сильным: только так порог
-        # меняет содержимое первой страницы, а не просто её длину.
-        for i in range(100):
-            self.app.result_store.append(
-                f"weak{i}@example.com", "Valid", "250 OK", "mx",
-                {"engagement_score": 10})
-        for i in range(100, 300):
+        # Сильных МЕНЬШЕ страницы, слабых много. Порядок теперь по убыванию
+        # качества, поэтому сильные всегда сверху; чтобы порог менял
+        # СОДЕРЖИМОЕ первой страницы, а не только её длину, слабые должны
+        # попадать в ту же сотню — и выпадать из неё при пороге.
+        for i in range(30):
             self.app.result_store.append(
                 f"strong{i}@example.com", "Valid", "250 OK", "mx",
                 {"engagement_score": 90})
+        for i in range(30, 300):
+            self.app.result_store.append(
+                f"weak{i}@example.com", "Valid", "250 OK", "mx",
+                {"engagement_score": 10})
         self.app.validator_page = 1
         self.app._on_filter_change()
         with_all = list(self.app._shown_emails)
-        self.assertTrue(with_all[0].startswith("weak"))
+        self.assertTrue(with_all[0].startswith("strong"),
+                        "лучшие должны идти первыми: %s" % with_all[:3])
+        self.assertTrue(any(e.startswith("weak") for e in with_all),
+                        "слабые обязаны попасть в ту же страницу, иначе порог "
+                        "не изменит её содержимое")
 
         self.app.min_score_var.set("50")
         self.app._on_filter_change()
