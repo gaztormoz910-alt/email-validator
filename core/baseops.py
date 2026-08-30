@@ -161,6 +161,40 @@ def export_encoding(path):
     return "utf-8-sig" if ext in EXPORT_BOM_EXTENSIONS else "utf-8"
 
 
+# Знаки, с которых Excel начинает считать содержимое ячейки ФОРМУЛОЙ.
+_FORMULA_STARTERS = ("=", "+", "-", "@", chr(9), chr(13))
+
+
+def csv_cell(value):
+    """Значение для ячейки CSV, которое Excel не примет за формулу.
+
+    Зачем. База собирается со страниц в интернете, то есть её содержимое
+    пишет кто угодно. Ячейка, начинающаяся со знака равенства, в Excel не
+    показывается, а ВЫПОЛНЯЕТСЯ: строка вида `=HYPERLINK(...)` в колонке
+    имени превращает выгрузку в действие, которого владелец не заказывал.
+
+    Ставим апостроф — Excel показывает значение как текст и сам апостроф не
+    печатает. Адрес, начинающийся с `=`, по RFC законен, но встречается
+    исчезающе редко, и потерять его форматирование дешевле, чем выполнить
+    чужую формулу на своей машине.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    return "'" + value if value.startswith(_FORMULA_STARTERS) else value
+
+
+def csv_row(values):
+    """Строка ячеек, каждая — через csv_cell.
+
+    Не-список не роняет выгрузку: сюда приходят строки результата, а падение
+    посреди записи файла оставило бы владельца с обрезанной выгрузкой и без
+    объяснения, на какой строке она кончилась.
+    """
+    if values is None or isinstance(values, (str, bytes)) or not hasattr(values, "__iter__"):
+        return []
+    return [csv_cell(v) for v in values]
+
+
 def write_chunks_stream(rows, path, size, writer):
     """То же, что write_chunks, но вход — ГЕНЕРАТОР, а не список.
 

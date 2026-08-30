@@ -42,7 +42,7 @@ from urllib.parse import urlparse, parse_qs
 from core import input_guard
 from ui.result_store import normalize_filters
 from core.encoding import open_text
-from core.baseops import export_encoding
+from core.baseops import csv_row, export_encoding
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -640,13 +640,16 @@ class ValidatorApi:
                                  "Score", "Provider", "ValidatedAt"])
                 for row in rows:
                     data = row.get("data") or {}
-                    writer.writerow([
+                    # csv_row, а не голый список: база собрана со страниц в
+                    # интернете, и ячейка, начинающаяся со знака равенства,
+                    # в Excel не показывается, а выполняется.
+                    writer.writerow(csv_row([
                         row["email"], row["status"], row["reason"], row["mx"],
                         data.get("name", ""), data.get("first_name", ""),
                         data.get("last_name", ""), data.get("gender", ""),
                         data.get("country", ""), data.get("engagement_score", ""),
                         data.get("provider_name", ""), data.get("validated_at", ""),
-                    ])
+                    ]))
 
             skipped = {"n": 0}
 
@@ -867,7 +870,7 @@ class ValidatorApi:
                         import csv
                         writer = csv.writer(handle)
                         writer.writerow(["email", "dork"])
-                        writer.writerows(rows)
+                        writer.writerows(csv_row(r) for r in rows)
                     else:
                         for email, _dork in rows:
                             handle.write(email + chr(10))
@@ -929,12 +932,12 @@ class ValidatorApi:
                                      "Country", "Score", "ValidatedAt"])
                     for row in group:
                         data = row.get("data") or {}
-                        writer.writerow([
+                        writer.writerow(csv_row([
                             row["email"], row["status"], data.get("name", ""),
                             data.get("gender", ""), data.get("country", ""),
                             data.get("engagement_score", ""),
                             data.get("validated_at", ""),
-                        ])
+                        ]))
                 written += 1
                 self._on_log("[VALID] %s — %d адресов." % (name, len(group)), "valid")
 
