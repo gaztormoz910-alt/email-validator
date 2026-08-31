@@ -702,9 +702,18 @@ class ValidationPipeline:
                 f"[INFO] Тестирование прокси-серверов потоком "
                 f"(потоков: {threads}, таймаут: {timeout}с)...", "info")
             # Теперь таймаут строго подчиняется твоему ползунку (никаких ограничений!)
+            # Прогресс прокси идёт СВОИМ каналом, а не в полосу проверки почт.
+            #
+            # Раньше он шёл в on_progress — тот самый, которым потом двигается
+            # проверка адресов. Владелец видел «Проверено 16 891 из 19 590»
+            # рядом с карточками, где всюду нули, и читал это как почты. А
+            # считались прокси, и «из» было не итогом, а «сколько прочитано на
+            # сейчас»: разница между числами на девяти снимках подряд ровно
+            # 2699 — постоянный отрыв читателя от проверяющего.
+            proxy_progress = self.callbacks.get('on_proxy_progress')
             live_proxies, total_seen = filter_live_proxies(
                 proxies, timeout=timeout, threads=threads,
-                progress_callback=self.callbacks['on_progress'],
+                progress_callback=proxy_progress,
                 log_callback=self.callbacks.get('on_log'))
             self.callbacks['on_log'](f"[INFO] Проверка завершена. Найдено рабочих прокси: {len(live_proxies)} из {total_seen}.", "info")
             if 'on_proxies_tested' in self.callbacks:

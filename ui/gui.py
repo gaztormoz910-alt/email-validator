@@ -88,6 +88,7 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         self.pipeline = ValidationPipeline(callbacks={
             'on_log': self.safe_log,
             'on_progress': self.safe_update_progress,
+            'on_proxy_progress': self.safe_proxy_progress,
             'on_result': self.safe_add_result,
             'on_complete': self.on_pipeline_complete,
             'on_unique_count': self.safe_update_unique_count,
@@ -725,10 +726,26 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
 
     def safe_update_progress(self, current, total):
         self._ui_call(lambda: self._update_progress_ui(current, total))
+
+    def safe_proxy_progress(self, checked, seen):
+        """Проверка прокси — своей подписью и БЕЗ процента.
+
+        Второе число здесь не итог, а «сколько прочитано на сейчас»: список
+        ещё читается. Раньше эти же числа шли в полосу проверки адресов, и
+        подпись «Проверка... (16891/19590)» означала совсем не то, что читал
+        владелец, — при нулях во всех счётчиках рядом.
+        """
+        self._ui_call(lambda: self._update_proxy_progress_ui(checked, seen))
+
+    def _update_proxy_progress_ui(self, checked, seen):
+        self.progress_lbl.configure(
+            text=f"Проверяю прокси: {checked} (прочитано {seen}, файл ещё читается)")
+        self.percent_lbl.configure(text="")
+        self.progress_bar.set(0.0)
         
     def _update_progress_ui(self, current, total):
         pct = int((current / total) * 100) if total > 0 else 0
-        status_text = "Завершено" if pct == 100 else "Проверка..."
+        status_text = "Завершено" if pct == 100 else "Проверка адресов..."
         self.progress_lbl.configure(text=f"{status_text} ({current}/{total})")
         self.percent_lbl.configure(text=f"{pct}%")
         self.progress_bar.set(pct / 100.0)
