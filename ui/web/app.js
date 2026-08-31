@@ -142,9 +142,29 @@ const EMPTY_HINT = {
   pproxy:  "нужны движкам с пометкой Proxies",
 };
 
+// Сколько строк загружено. null означает «ещё считаю»: на большом файле
+// счёт занимает секунды, и показать 0 нельзя — владелец прочитает это как
+// «файл пустой».
+function linesLabel(info) {
+  if (!info.count) return "";
+  if (info.lines === null || info.lines === undefined) return "считаю строки…";
+  return `${num(info.lines)} ${plural(info.lines, "строка", "строки", "строк")}`;
+}
+
+function plural(n, one, few, many) {
+  const a = Math.abs(n) % 100, b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  if (b === 1) return one;
+  return many;
+}
+
 function renderSources(data) {
   const bind = (prefix, info, dropId, clearId) => {
-    setText($(`#${prefix}Title`), info.title);
+    // В заголовке — сколько СТРОК, а не сколько файлов. «13 источника» не
+    // отвечает на вопрос «сколько прокси я загрузил», а именно он и важен.
+    const lines = linesLabel(info);
+    setText($(`#${prefix}Title`), lines ? `${info.title} · ${lines}` : info.title);
     const hint = $(`#${prefix}Hint`);
     if (info.count) {
       setText(hint, info.detail);
@@ -585,12 +605,25 @@ async function tick() {
   setText($("#statNames"),   num(s.counts.names));
 
   const { current, total, pct } = s.progress;
-  setText($("#progressLabel"), total
-    ? `Проверено ${num(current)} из ${num(total)}`
-    : "Проверка ещё не запускалась");
-  setText($("#progressPct"), `${pct}%`);
-  $("#progressBar").style.width = `${pct}%`;
-  $("#progressWrap").classList.toggle("is-done", pct === 100 && total > 0);
+  const px = s.proxyProgress || { checked: 0, seen: 0, running: false };
+  if (px.running) {
+    // Проверка прокси идёт ДО проверки почт. Процента здесь нет и быть не
+    // может: список ещё читается, и целого, от которого считать долю, не
+    // существует. Раньше сюда попадали те же числа под подписью «Проверено
+    // X из Y», и владелец читал их как адреса — при нулях во всех карточках.
+    setText($("#progressLabel"),
+      `Проверяю прокси: ${num(px.checked)} · прочитано ${num(px.seen)}, файл ещё читается`);
+    setText($("#progressPct"), "");
+    $("#progressBar").style.width = "0%";
+    $("#progressWrap").classList.remove("is-done");
+  } else {
+    setText($("#progressLabel"), total
+      ? `Проверено адресов: ${num(current)} из ${num(total)}`
+      : "Проверка ещё не запускалась");
+    setText($("#progressPct"), `${pct}%`);
+    $("#progressBar").style.width = `${pct}%`;
+    $("#progressWrap").classList.toggle("is-done", pct === 100 && total > 0);
+  }
 
   appendLog(s.log);
   if (typeof s.logSeq === "number") logSeen = Math.max(logSeen, s.logSeq);
