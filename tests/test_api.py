@@ -187,6 +187,25 @@ class TestLiveServer(unittest.TestCase):
         self.assertEqual(caught.exception.code, 401,
                          "запрос без токена был обслужен")
 
+    def test_live_refusal_reaches_the_client_with_a_body(self):
+        """Отказ обязан ДОЙТИ, а не оборваться связью.
+
+        Ответить и закрыть соединение, не забрав тело запроса, нельзя: данные
+        остаются в приёмном буфере, ядро закрывает соединение сбросом, и
+        клиент получает не 401, а обрыв. Успеет он дочитать ответ или нет —
+        зависит от расписания потоков, поэтому ошибка плавающая: в наборе
+        мигала раз в несколько прогонов.
+
+        Тело здесь заметное намеренно: чем больше непрочитанных байт, тем
+        вернее сброс. Без вычитывания эта проверка падает
+        ConnectionAbortedError, а не HTTPError.
+        """
+        big = {"email": "a@b.com", "padding": "x" * 200_000}
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self._post("/api/validate-single", big)
+        self.assertEqual(caught.exception.code, 401,
+                         "запрос без токена был обслужен")
+
     def test_live_rejects_broken_json(self):
         request = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/api/validate-single",
@@ -206,3 +225,64 @@ class TestLiveServer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDrainLimit(unittest.TestCase):
+    """Вычитывание тела перед отказом ограничено сверху.
+
+    Иначе клиент, объявивший в Content-Length девять мегабайт и не
+    приславший их, держал бы поток сервера до таймаута сокета — то есть
+    защита от обрыва связи превратилась бы в способ занять сервер.
+    """
+
+    class _Rfile:
+        def __init__(self):
+            self.read_bytes = 0
+
+        def read(self, n):
+            self.read_bytes += n
+            return b"x" * n
+
+    def _handler(self, declared):
+        from api.server import DRAIN_LIMIT, Handler
+
+        handler = Handler.__new__(Handler)
+        handler.headers = {"Content-Length": str(declared)}
+        handler.rfile = self._Rfile()
+        return handler, DRAIN_LIMIT
+
+    def test_drain_stops_at_the_limit(self):
+        handler, limit = self._handler(9 * 1024 * 1024)
+        handler._drain_body()
+        self.assertEqual(handler.rfile.read_bytes, limit)
+
+    def test_drain_reads_only_what_was_declared(self):
+        handler, _ = self._handler(1000)
+        handler._drain_body()
+        self.assertEqual(handler.rfile.read_bytes, 1000)
+
+    def test_drain_survives_a_broken_header(self):
+        handler, _ = self._handler("не число")
+        handler._drain_body()
+        self.assertEqual(handler.rfile.read_bytes, 0)
+
+    def test_drain_survives_a_dead_socket(self):
+        class Dead:
+            def read(self, n):
+                raise OSError("соединение оборвано")
+
+        from api.server import Handler
+
+        handler = Handler.__new__(Handler)
+        handler.headers = {"Content-Length": "1000"}
+        handler.rfile = Dead()
+        handler._drain_body()          # падения быть не должно
+
+    def test_refusals_drain_before_replying(self):
+        """Оба отказа — и 401, и 413 — вычитывают тело."""
+        import inspect
+
+        from api import server
+
+        source = inspect.getsource(server.Handler.do_POST)
+        self.assertEqual(source.count("_drain_body()"), 2, source)

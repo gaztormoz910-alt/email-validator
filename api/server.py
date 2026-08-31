@@ -41,6 +41,14 @@ from core.provider import classify_domain, country_from_domain
 # защита от случайной выгрузки в сто мегабайт, присланной одним POST: такой
 # запрос съел бы память и без всякого умысла.
 MAX_BODY_BYTES = 8 * 1024 * 1024
+
+# Сколько байт отказ готов вычитать, чтобы клиент успел получить ответ.
+#
+# Не весь MAX_BODY_BYTES: клиент может объявить в Content-Length девять
+# мегабайт и не прислать их. Тогда чтение висит до таймаута сокета и держит
+# поток сервера — а именно этого отказ и должен избегать. Четверти мегабайта
+# с запасом хватает на любой настоящий запрос к этому API.
+DRAIN_LIMIT = 256 * 1024
 MAX_EMAILS_PER_CALL = 50_000
 
 _cleaner = EmailCleaner()
@@ -169,6 +177,9 @@ def handle(path, payload):
 class Handler(BaseHTTPRequestHandler):
     server_version = "EmailValidator/1.0"
     token = ""
+    # Ограничение на чтение из сокета. Без него клиент, объявивший тело и не
+    # приславший его, держал бы поток сервера бесконечно.
+    timeout = 15
 
     def log_message(self, fmt, *args):
         pass                                       # своя тишина вместо шума в stderr
@@ -180,6 +191,35 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def _drain_body(self, limit=DRAIN_LIMIT):
+        """Вычитывает тело запроса перед отказом.
+
+        Отвечать и закрывать соединение, не забрав тело, нельзя. Данные
+        остаются в приёмном буфере, ядро закрывает соединение сбросом, и
+        клиент получает не наш честный 401, а обрыв связи: на Windows это
+        ConnectionAbortedError, на других системах — Connection reset. Ошибка
+        плавающая — успеет клиент дочитать ответ или нет, зависит от
+        расписания потоков, — и потому особенно неприятная: в тестах она
+        мигает раз в несколько прогонов, а у владельца выглядит как «сервер
+        иногда не отвечает».
+
+        Читаем не больше предела: смысл отказа 413 в том и состоит, чтобы не
+        принимать гигантское тело.
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return
+        left = min(max(length, 0), limit)
+        while left > 0:
+            try:
+                chunk = self.rfile.read(min(left, 65536))
+            except OSError:
+                return          # соединение уже оборвано — вычитывать нечего
+            if not chunk:
+                break
+            left -= len(chunk)
 
     def _authorized(self):
         if not self.token:
@@ -195,6 +235,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self._authorized():
+            self._drain_body()
             self._reply(401, {"error": "нужен заголовок Authorization: Bearer <токен>"})
             return
         try:
@@ -202,6 +243,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             length = 0
         if length > MAX_BODY_BYTES:
+            self._drain_body()
             self._reply(413, {"error": "тело запроса слишком велико"})
             return
         try:
