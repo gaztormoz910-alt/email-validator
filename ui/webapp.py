@@ -408,19 +408,32 @@ class ValidatorApi:
                     "detail": ", ".join(names[:3]),
                     "text": text, "editable": editable, "lines": lines}
 
+        # Прокси — НЕ обязательное условие запуска.
+        #
+        # Движок умеет идти напрямую и честно об этом предупреждает, а окно
+        # требовало прокси и дальше не пускало. Владелец загружал двадцать
+        # шесть тысяч бесплатных прокси, из которых живых оказывалось
+        # полсотни, ждал двадцать минут перебора — и до проверки почт дело не
+        # доходило вовсе. Со стороны это выглядит как «SMTP-проверки нет».
         missing = []
         if not self._sources["emails"]:
             missing.append("адреса")
-        if not self._sources["proxies"]:
-            missing.append("прокси")
+        direct = not self._sources["proxies"]
         return {
             "emails": describe(self._sources["emails"], "emails"),
             "proxies": describe(self._sources["proxies"], "proxies"),
             "dorks": describe(self._sources["dorks"], "dorks"),
             "pproxy": describe(self._sources["pproxy"], "pproxy"),
             "ready": not missing,
-            "hint": ("Всё готово — можно запускать" if not missing
-                     else "Не хватает: " + " и ".join(missing)),
+            # Прямой прогон возможен, но цена названа прямо: почтовики увидят
+            # домашний адрес владельца, а Yahoo, AOL, Outlook и iCloud с него
+            # вообще не отвечают — им нужен IP с обратным DNS и чистой
+            # репутацией.
+            "direct": direct,
+            "hint": ("Не хватает: " + " и ".join(missing) if missing
+                     else ("Всё готово — можно запускать" if not direct
+                           else "Прокси нет: проверка пойдёт с твоего IP. "
+                                "Gmail и Яндекс ответят, Yahoo/AOL/Outlook/iCloud — нет")),
             # У сбора адресов прокси необязательны: DuckDuckGo Lite ходит
             # напрямую, а Tor-движки поднимают собственный выход.
             "parserReady": bool(self._sources["dorks"]),
@@ -480,12 +493,26 @@ class ValidatorApi:
         # раньше, и выход «сначала выберите адреса и прокси» оставлял его
         # взведённым навсегда: следующий щелчок получал «проверка уже идёт»,
         # хотя не шло ничего, и кнопка не оживала до перезапуска программы.
-        if not self.email_sources or not self.proxy_sources:
-            return {"ok": False, "error": "Сначала выберите адреса и прокси"}
+        if not self.email_sources:
+            return {"ok": False, "error": "Сначала выберите адреса"}
+        if not self.proxy_sources and not payload.get("allowDirect"):
+            # Молча ходить напрямую нельзя: это раскрывает домашний IP
+            # владельца почтовым серверам, и согласие на такое должно быть
+            # осознанным, а не побочным следствием пустого поля.
+            return {"ok": False, "direct": True,
+                    "error": "Прокси не заданы. Проверка пойдёт с твоего "
+                             "домашнего IP — подтверди, если это осознанно."}
         self._starting = True
 
         from core.parser.ml_predictor import set_country_mode
         set_country_mode(payload.get("country") or "coverage")
+
+        if not self.proxy_sources:
+            self._on_log(
+                "[DEAD] Прокси не заданы: проверка идёт с твоего домашнего IP. "
+                "Gmail и Яндекс ответят честно; Yahoo, AOL, Outlook и iCloud "
+                "почти наверняка откажут — им нужен адрес с обратным DNS и "
+                "чистой репутацией.", "dead")
 
         self.store.clear()
         self._progress = (0, 0)

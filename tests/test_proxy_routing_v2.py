@@ -270,13 +270,28 @@ class TestIpLoad(unittest.TestCase):
         self.assertEqual(v.ip_load("b:2"), 0)
 
     def test_load_moves_choice_to_the_quieter_proxy(self):
-        """При прочих равных выбор уходит на менее нагруженный адрес."""
+        """При прочих равных выбор уходит на менее нагруженный адрес.
+
+        Выбор намеренно вероятностный: лучший берётся чаще, но не всегда —
+        иначе один прокси бил бы в один сервер подряд. Из-за этого проверка
+        зависела от состояния ОБЩЕГО генератора случайных чисел: она мигала
+        раз в сотню прогонов и падала от простого добавления соседнего файла
+        тестов, который тратил случайные числа иначе. Семя фиксировано —
+        проверяется поведение выбора, а не везение.
+        """
+        import random
+
         v = make(["hot:1", "cold:2"], {
             "hot:1": {"exit_ip": "1.1.1.1", "latency_ms": 100},
             "cold:2": {"exit_ip": "2.2.2.2", "latency_ms": 100},
         })
         v.note_ip_use("hot:1", 500)
-        picks = [v._pick_best_proxy() for _ in range(60)]
+        state = random.getstate()
+        random.seed(20260901)
+        try:
+            picks = [v._pick_best_proxy() for _ in range(60)]
+        finally:
+            random.setstate(state)
         self.assertGreater(picks.count("cold:2"), picks.count("hot:1"),
                            "нагруженный адрес выбирается не реже свободного")
 

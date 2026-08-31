@@ -310,18 +310,34 @@ def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None,
     return result
 
 
-def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None, log_callback=None):
+def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None,
+                        log_callback=None, enough=0):
     """Проверяет прокси и возвращает (живые, сколько всего увидели).
 
     Вход может быть генератором: список в миллионы строк материализовать
     нельзя. Поэтому общее число возвращается ВТОРЫМ значением — заранее его
     никто не знает, оно становится известно только по мере чтения.
+
+    enough — сколько живых достаточно, чтобы перестать перебирать остальные.
+    Ноль означает «проверить всё», и это значение по умолчанию: чем больше
+    прокси в ротации, тем реже каждый выходной адрес попадается почтовику на
+    глаза. Но у бесплатных списков цена перебора несоразмерна: двадцать шесть
+    тысяч адресов при трёхстах потоках и таймауте в пятнадцать секунд — это
+    больше двадцати минут ДО ПЕРВОЙ ПРОВЕРЕННОЙ ПОЧТЫ, а живыми окажутся
+    полсотни. Владелец должен иметь возможность сказать «мне хватит».
+
+    Останов ленивый: подача просто перестаёт отдавать новые адреса, а уже
+    начатые проверки доводятся до конца. Резать их на полуслове незачем —
+    это оборванные соединения на чужих серверах.
     """
     if not proxies or isinstance(proxies, (str, bytes)) or not hasattr(proxies, "__iter__"):
         return [], 0
     from core.async_proxy import run_async_checker
 
+    live_now = {"n": 0}
+
     def on_prog(c, t, l):
+        live_now["n"] = l
         if progress_callback:
             progress_callback(c, t)
         if log_callback:
@@ -335,8 +351,17 @@ def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None, l
 
     seen = {"total": 0}
 
+    stopped = {"early": False}
+
     def counted(source):
         for item in source:
+            if enough and live_now["n"] >= enough:
+                stopped["early"] = True
+                if log_callback:
+                    log_callback(
+                        "[PROXY] Набрано живых прокси: %d — остальные %s"
+                        % (live_now["n"], "не проверяю, как и просили"), "info")
+                return
             seen["total"] += 1
             yield item
 
