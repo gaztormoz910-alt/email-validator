@@ -151,6 +151,12 @@ function linesLabel(info) {
   return `${num(info.lines)} ${plural(info.lines, "строка", "строки", "строк")}`;
 }
 
+function filesLabel(info) {
+  // «источник», а не «файл»: вставленный руками список — тоже источник, и
+  // «1 файл · вставленный текст» звучало бы неправдой.
+  return `${info.count} ${plural(info.count, "источник", "источника", "источников")}`;
+}
+
 function plural(n, one, few, many) {
   const a = Math.abs(n) % 100, b = a % 10;
   if (a > 10 && a < 20) return many;
@@ -161,13 +167,17 @@ function plural(n, one, few, many) {
 
 function renderSources(data) {
   const bind = (prefix, info, dropId, clearId) => {
-    // В заголовке — сколько СТРОК, а не сколько файлов. «13 источника» не
-    // отвечает на вопрос «сколько прокси я загрузил», а именно он и важен.
-    const lines = linesLabel(info);
-    setText($(`#${prefix}Title`), lines ? `${info.title} · ${lines}` : info.title);
+    // Главная строка карточки — СКОЛЬКО СТРОК ЗАГРУЖЕНО. Это первое, что
+    // владелец хочет знать, и раньше этого не было нигде: в заголовке
+    // стояло «13 источника», то есть число ФАЙЛОВ.
+    //
+    // Имена файлов ушли вниз, в подпись. У заголовка стоит обрезка по
+    // ширине (text-overflow: ellipsis), и приписанное к именам число просто
+    // не поместилось бы: «test_1.txt, test_base.txt, test…» — и всё.
+    setText($(`#${prefix}Title`), info.count ? linesLabel(info) : info.title);
     const hint = $(`#${prefix}Hint`);
     if (info.count) {
-      setText(hint, info.detail);
+      setText(hint, `${filesLabel(info)} · ${info.detail}`);
       $(dropId).classList.add("is-set");
       show($(clearId), true);
     } else {
@@ -199,7 +209,33 @@ function renderSources(data) {
   $("#pBtnStart").disabled = !data.parserReady || parser.running;
 }
 
-async function refreshSources() { renderSources(await api("sources")); }
+let countPoll = null;
+
+// Единственная дверь для показа источников. Половина путей рисовала карточку
+// напрямую ответом от choose/paste/clear и доопрос не заводила — подпись у
+// них застревала на «считаю строки…» до следующего действия владельца.
+function showSources(data) {
+  renderSources(data);
+  armCountPoll(data);
+  return data;
+}
+
+function armCountPoll(data) {
+
+  // Счёт строк идёт в фоне, и его результат приходит ПОСЛЕ этого ответа.
+  // Обычный тик страницы опрашивает только состояние прогона, поэтому без
+  // повторного запроса подпись навсегда застревала на «считаю строки…» —
+  // ровно это и было видно в окне.
+  //
+  // Опрос самозавершающийся: как только все четыре поля назвали число,
+  // он прекращается. Постоянный лишний запрос ради редкого случая не нужен.
+  const counting = ["emails", "proxies", "dorks", "pproxy"]
+    .some((k) => data[k] && data[k].count && (data[k].lines === null || data[k].lines === undefined));
+  clearTimeout(countPoll);
+  if (counting) countPoll = setTimeout(refreshSources, 400);
+}
+
+async function refreshSources() { showSources(await api("sources")); }
 
 /* ── лог ──────────────────────────────────────────────────── */
 
@@ -656,7 +692,7 @@ function bindDrop(dropId, kind) {
   const el = $(dropId);
   el.addEventListener("click", async () => {
     const data = await api("choose", { kind });
-    renderSources(data);
+    showSources(data);
     if (data.error) toast(data.error, "bad");
   });
   el.addEventListener("keydown", (e) => {
@@ -674,7 +710,7 @@ function bindDrop(dropId, kind) {
     const reader = new FileReader();
     reader.onload = async () => {
       const data = await api("paste", { kind, text: String(reader.result || "") });
-      renderSources(data);
+      showSources(data);
       // Перетаскивание проходит ту же проверку, что и вставка: файл, брошенный
       // не в ту зону, — самый частый способ перепутать списки.
       toast(data.error || `Загружено: ${file.name}`, data.error ? "bad" : "ok");
@@ -688,11 +724,11 @@ bindDrop("#dropProxies", "proxies");
 
 $("#clearEmails").addEventListener("click", async (e) => {
   e.stopPropagation();
-  renderSources(await api("clear", { kind: "emails" }));
+  showSources(await api("clear", { kind: "emails" }));
 });
 $("#clearProxies").addEventListener("click", async (e) => {
   e.stopPropagation();
-  renderSources(await api("clear", { kind: "proxies" }));
+  showSources(await api("clear", { kind: "proxies" }));
 });
 
 /* Вставка текстом.
@@ -788,7 +824,7 @@ pasteModal.querySelector("form").addEventListener("submit", async (event) => {
     await api("clear", { kind: pasteKind });
   }
   const data = await api("paste", { kind: pasteKind, text });
-  renderSources(data);
+  showSources(data);
   if (data.error) {
     // Проверку делает питон, а не страница: два разных разбора одних и тех
     // же данных разъезжаются, и тогда окно принимает то, что движок потом
@@ -1077,11 +1113,11 @@ bindDrop("#dropPproxy", "pproxy");
 
 $("#clearDorks").addEventListener("click", async (e) => {
   e.stopPropagation();
-  renderSources(await api("clear", { kind: "dorks" }));
+  showSources(await api("clear", { kind: "dorks" }));
 });
 $("#clearPproxy").addEventListener("click", async (e) => {
   e.stopPropagation();
-  renderSources(await api("clear", { kind: "pproxy" }));
+  showSources(await api("clear", { kind: "pproxy" }));
 });
 
 $("#pasteDorks").addEventListener("click", () => openPaste("dorks"));
