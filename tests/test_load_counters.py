@@ -295,3 +295,56 @@ def test_classic_too_still_counts_loaded_lines():
     classic = io.open(os.path.join(ROOT, "ui", "gui.py"), encoding="utf-8").read()
     assert "_count_lines_async" in classic
     assert "Загружено строк" in classic
+
+
+# ═══════════════════════════════ G8: подпись оживает сама
+
+def test_page_polls_until_the_count_arrives():
+    """Без доопроса подпись навсегда застревала на «считаю строки…».
+
+    Счёт идёт в фоне и заканчивается ПОСЛЕ ответа сервера. Обычный тик
+    страницы опрашивает только состояние прогона, поэтому число не появлялось
+    до следующего действия владельца — а он его и не делал, потому что ждал
+    именно это число.
+    """
+    js = io.open(os.path.join(ROOT, "ui", "web", "app.js"), encoding="utf-8").read()
+    assert "armCountPoll" in js
+    assert "setTimeout(refreshSources" in js
+    # Опрос обязан прекращаться: постоянный лишний запрос ради редкого
+    # случая — это плата, которую платят всегда.
+    assert "clearTimeout(countPoll)" in js
+    assert "data[k].lines === null" in js
+
+
+def test_page_renders_sources_through_one_door():
+    """Половина путей рисовала карточку напрямую и доопрос не заводила.
+
+    choose, paste и clear возвращают готовые данные, и раньше они шли прямо
+    в отрисовку. Подпись у них застревала так же, как при загрузке страницы.
+    """
+    js = io.open(os.path.join(ROOT, "ui", "web", "app.js"), encoding="utf-8").read()
+    # Внутри самой двери вызов, разумеется, есть — его и вырезаем.
+    door = js[js.index("function showSources(data) {"):]
+    door = door[:door.index("}") + 1]
+    outside = js.replace(door, "")
+    bare = [line.strip() for line in outside.splitlines()
+            if "renderSources(" in line and "function renderSources" not in line]
+    assert bare == [], "мимо общей двери: %s" % bare
+
+
+def test_page_puts_the_count_first():
+    """Число строк — заголовок карточки, имена файлов — подпись под ним.
+
+    У заголовка стоит обрезка по ширине, и число, приписанное к списку имён,
+    просто не поместилось бы: «test_1.txt, test_base.txt, test…» — и всё.
+    """
+    js = io.open(os.path.join(ROOT, "ui", "web", "app.js"), encoding="utf-8").read()
+    assert 'setText($(`#${prefix}Title`), info.count ? linesLabel(info) : info.title)' in js
+    assert "filesLabel(info)}` + \"\"" not in js
+    assert "${filesLabel(info)} · ${info.detail}" in js
+
+
+def test_page_calls_a_pasted_list_a_source_not_a_file():
+    """«1 файл · вставленный текст» — неправда: файла там нет."""
+    js = io.open(os.path.join(ROOT, "ui", "web", "app.js"), encoding="utf-8").read()
+    assert 'plural(info.count, "источник", "источника", "источников")' in js
