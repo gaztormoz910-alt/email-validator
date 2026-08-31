@@ -79,6 +79,15 @@ class ValidatorApi:
         self.window = None                  # ставится при создании окна
         self._lock = threading.Lock()
         self._progress = (0, 0)
+        # Проверка прокси идёт ДО проверки почт и своим счётом: (проверено,
+        # прочитано). Второе число — не итог: источник ещё читается.
+        self._proxy_progress = (0, 0)
+        # Сколько строк в каждом наборе источников. None означает «ещё считаю»:
+        # на гигабайтном файле счёт занимает десятки секунд, и делать его в
+        # потоке, который обслуживает страницу, нельзя.
+        self._line_counts = {"emails": 0, "proxies": 0, "dorks": 0, "pproxy": 0}
+        self._count_jobs = {}
+        self._count_lock = threading.Lock()
         self._state = "idle"                # idle | running | paused | done
         self._proxy_summary = None
         self._pending = []                  # строки лога, ещё не отданные
@@ -112,6 +121,7 @@ class ValidatorApi:
         self.pipeline = ValidationPipeline(callbacks={
             "on_log": self._on_log,
             "on_progress": self._on_progress,
+            "on_proxy_progress": self._on_proxy_progress,
             "on_result": self._on_result,
             "on_complete": self._on_complete,
             "on_unique_count": lambda count: None,
@@ -208,6 +218,16 @@ class ValidatorApi:
     def _on_progress(self, current, total):
         self._progress = (int(current or 0), int(total or 0))
 
+    def _on_proxy_progress(self, checked, seen):
+        """Проверка прокси. Второе число — прочитано, а НЕ итог.
+
+        Держится отдельно от прогресса почт намеренно: это разные вещи, и
+        показывать их одной полосой значит врать. Владелец читал «Проверено
+        16 891 из 19 590» как адреса, хотя это были прокси, и «из» росло по
+        мере чтения файла.
+        """
+        self._proxy_progress = (int(checked or 0), int(seen or 0))
+
     def _on_result(self, email, status, reason, mx, data=None):
         data = data if isinstance(data, dict) else {}
         group = self.store.append(email, status, reason, mx, data)
@@ -268,6 +288,7 @@ class ValidatorApi:
 
         if accepted:
             self._on_log(f"[INFO] Подключено файлов: {len(accepted)}.", "info")
+            self._recount(kind)
         for reason in refused:
             self._on_log(f"[DEAD] Файл отклонён: {reason}", "dead")
         for name in oversized:
@@ -317,6 +338,7 @@ class ValidatorApi:
                 return dict(self.sources(), error=verdict["reason"])
 
         bucket.append({"type": "text", "content": text, "title": "вставленный текст"})
+        self._recount(kind)
         return self.sources()
 
     def clear(self, payload):
@@ -324,14 +346,49 @@ class ValidatorApi:
         if self._busy():
             return dict(self.sources(), error=self._BUSY_REFUSAL)
         bucket.clear()
+        self._recount(payload.get("kind"))
         return self.sources()
+
+    def _recount(self, kind):
+        """Пересчитывает строки в источниках вида kind — в фоне.
+
+        Зачем фон. count_total_lines() читает файлы целиком: на списке в
+        миллионы строк это десятки секунд. В потоке, который обслуживает
+        страницу, они превратились бы в зависшее окно сразу после выбора
+        файла. Пока идёт счёт, наружу отдаётся None — страница пишет
+        «считаю…», а не ноль: ноль владелец прочитал бы как «файл пустой».
+        """
+        snapshot = list(self._sources.get(kind) or [])
+        with self._count_lock:
+            job = self._count_jobs.get(kind, 0) + 1
+            self._count_jobs[kind] = job
+            self._line_counts[kind] = 0 if not snapshot else None
+
+        if not snapshot:
+            return
+
+        def work():
+            from core.streamer import StreamLoader
+
+            try:
+                total = StreamLoader(snapshot).count_total_lines()
+            except Exception:
+                total = 0
+            with self._count_lock:
+                # Пока считали, владелец мог добавить ещё файл. Тогда наш
+                # ответ устарел, и записывать его нельзя: на экране осталось
+                # бы число от прошлого набора.
+                if self._count_jobs.get(kind) == job:
+                    self._line_counts[kind] = int(total)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def sources(self, payload=None):
         """Что сейчас подключено. Считается лениво — файл не читается."""
-        def describe(sources):
+        def describe(sources, kind):
             if not sources:
                 return {"count": 0, "title": "Выберите файл", "detail": "",
-                        "text": "", "editable": True}
+                        "text": "", "editable": True, "lines": 0}
             names = [s.get("title") or os.path.basename(s["path"])
                      if s["type"] == "file" else (s.get("title") or "вставленный текст")
                      for s in sources]
@@ -342,9 +399,14 @@ class ValidatorApi:
             # потерять вторую половину при сохранении.
             editable = all(s["type"] == "text" for s in sources)
             text = "\n".join(s.get("content", "") for s in sources) if editable else ""
+            # `count` — сколько ФАЙЛОВ, `lines` — сколько СТРОК. Раньше
+            # наружу уходило только первое, и окно писало «13 источника» —
+            # число, по которому нельзя понять, сколько прокси загружено.
+            with self._count_lock:
+                lines = self._line_counts.get(kind, 0)
             return {"count": len(sources), "title": title,
                     "detail": ", ".join(names[:3]),
-                    "text": text, "editable": editable}
+                    "text": text, "editable": editable, "lines": lines}
 
         missing = []
         if not self._sources["emails"]:
@@ -352,10 +414,10 @@ class ValidatorApi:
         if not self._sources["proxies"]:
             missing.append("прокси")
         return {
-            "emails": describe(self._sources["emails"]),
-            "proxies": describe(self._sources["proxies"]),
-            "dorks": describe(self._sources["dorks"]),
-            "pproxy": describe(self._sources["pproxy"]),
+            "emails": describe(self._sources["emails"], "emails"),
+            "proxies": describe(self._sources["proxies"], "proxies"),
+            "dorks": describe(self._sources["dorks"], "dorks"),
+            "pproxy": describe(self._sources["pproxy"], "pproxy"),
             "ready": not missing,
             "hint": ("Всё готово — можно запускать" if not missing
                      else "Не хватает: " + " и ".join(missing)),
@@ -492,6 +554,7 @@ class ValidatorApi:
         """Всё, что нужно странице для перерисовки. Один запрос на тик."""
         counts = self.store.counts()
         current, total = self._progress
+        proxy_checked, proxy_seen = self._proxy_progress
         with self._lock:
             since = payload.get("logSince") if isinstance(payload, dict) else None
             if since is None:
@@ -516,6 +579,10 @@ class ValidatorApi:
             },
             "progress": {"current": current, "total": total,
                          "pct": int(current * 100 / total) if total else 0},
+            # Проверка прокси — отдельно и БЕЗ процента: пока источник
+            # читается, целого не существует, и делить не на что.
+            "proxyProgress": {"checked": proxy_checked, "seen": proxy_seen,
+                              "running": bool(proxy_seen) and not total},
             "log": lines,
             "logSeq": self._log_seq,
             "dropped": self.log.dropped,

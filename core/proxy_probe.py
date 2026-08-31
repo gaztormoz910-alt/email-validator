@@ -326,7 +326,12 @@ def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None, l
             progress_callback(c, t)
         if log_callback:
             if c % 100 == 0 or c == t:
-                log_callback(f"[PROXY] Проверка... {c}/{t} | Найдено рабочих: {l}", "info")
+                # Не «c/t»: дробь читается как доля от известного целого, а
+                # тут второе число — лишь «сколько прочитано на сейчас».
+                # Источник ещё читается, и итог станет известен только в конце.
+                log_callback(
+                    f"[PROXY] Проверено: {c} | Прочитано: {t} | Рабочих: {l}",
+                    "info")
 
     seen = {"total": 0}
 
