@@ -414,9 +414,28 @@ DISPOSABLE_DOMAINS = {
     "anonaddy.com", "anonaddy.me",
     "simplelogin.io", "simplelogin.co",
     # duck.com, relay.firefox.com, privaterelay.appleid.com — НЕ одноразовые,
-    # это приватные relay-сервисы реальных людей (DuckDuckGo, Firefox, Apple)
+    # это приватные relay-сервисы реальных людей (DuckDuckGo, Firefox, Apple).
+    # Ниже стоит защита, чтобы внешний список не вернул их обратно.
     "icloud.com.disposable",
 }
+
+
+# Домены, которые НИКАКОЙ внешний список не может объявить одноразовыми.
+#
+# Это пересылки, а не временные ящики: письмо через них доходит до настоящего
+# человека в его настоящий почтовый ящик. Пометить такой адрес одноразовым —
+# это ложный приговор живому контакту, тот самый, который владелец удалит и
+# никогда не узнает, что ошибся не он.
+#
+# Защита понадобилась не теоретически. Встроенный список исключал их
+# сознательно — прямо над этой строкой стоит комментарий об этом, — а
+# автообновляемый data/disposable_more.txt возвращал duck.com обратно, и
+# решение молча отменялось скачанным файлом.
+NEVER_DISPOSABLE = frozenset({
+    "duck.com",                     # DuckDuckGo Email Protection
+    "relay.firefox.com",            # Firefox Relay
+    "privaterelay.appleid.com",     # Apple «Скрыть мою почту»
+})
 
 
 def is_disposable(email: str) -> bool:
@@ -427,7 +446,12 @@ def is_disposable(email: str) -> bool:
     if not isinstance(email, str) or "@" not in email:
         return False
     domain = email.rsplit("@", 1)[1].lower().strip()
-    
+
+    # Пересылка — не одноразовый ящик. Проверяется ПЕРВОЙ: иначе достаточно
+    # одной строки в скачанном списке, чтобы живой контакт получил приговор.
+    if domain in NEVER_DISPOSABLE:
+        return False
+
     if domain in DISPOSABLE_DOMAINS:
         return True
         
@@ -456,7 +480,7 @@ def extend_disposable_domains(domains) -> int:
     before = len(DISPOSABLE_DOMAINS)
     for d in domains:
         d = (d or "").strip().lower()
-        if d and "." in d:
+        if d and "." in d and d not in NEVER_DISPOSABLE:
             DISPOSABLE_DOMAINS.add(d)
     return len(DISPOSABLE_DOMAINS) - before
 

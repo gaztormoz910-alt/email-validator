@@ -860,11 +860,31 @@ $$(".seg__item").forEach((btn) => btn.addEventListener("click", () => {
 
 /* Прогон */
 $("#btnStart").addEventListener("click", async () => {
-  const res = await api("start", {
+  const payload = {
     threads: Number(threads.value), timeout: Number(timeout.value),
     ai: $("#optAi").checked, osint: $("#optOsint").checked,
     cache: $("#optCache").checked, country: ui.country,
-  });
+  };
+  let res = await api("start", payload);
+
+  // Прокси не заданы. Прогон возможен, но пойдёт с домашнего адреса
+  // владельца, и почтовики его увидят. Спрашиваем прямо, а не запускаем
+  // молча и не запрещаем совсем: запрет как раз и приводил к тому, что до
+  // проверки почт дело не доходило вовсе.
+  if (!res.ok && res.direct) {
+    const agreed = window.confirm([
+      "Прокси не заданы.",
+      "",
+      "Проверка пойдёт с ТВОЕГО домашнего IP — почтовые серверы его увидят.",
+      "Gmail и Яндекс ответят честно. Yahoo, AOL, Outlook и iCloud почти",
+      "наверняка откажут: им нужен адрес с обратным DNS и чистой репутацией.",
+      "",
+      "Запускать так?",
+    ].join("\n"));
+    if (!agreed) return;
+    payload.allowDirect = true;
+    res = await api("start", payload);
+  }
   if (!res.ok) { toast(res.error || "Не удалось запустить", "bad"); return; }
   logBox.replaceChildren();
   toast("Проверка запущена", "ok");
