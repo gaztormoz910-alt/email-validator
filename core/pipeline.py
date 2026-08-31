@@ -711,15 +711,45 @@ class ValidationPipeline:
             # сейчас»: разница между числами на девяти снимках подряд ровно
             # 2699 — постоянный отрыв читателя от проверяющего.
             proxy_progress = self.callbacks.get('on_proxy_progress')
+            # «Хватит живых» — настройка владельца, по умолчанию выключена.
+            # См. core/settings.py: на бесплатных списках перебор всего файла
+            # съедает больше времени, чем сама проверка почт.
+            try:
+                from core.settings import get as setting
+                enough = int(setting("proxy_enough", 0) or 0)
+            except Exception:
+                enough = 0
+
             live_proxies, total_seen = filter_live_proxies(
                 proxies, timeout=timeout, threads=threads,
                 progress_callback=proxy_progress,
-                log_callback=self.callbacks.get('on_log'))
-            self.callbacks['on_log'](f"[INFO] Проверка завершена. Найдено рабочих прокси: {len(live_proxies)} из {total_seen}.", "info")
+                log_callback=self.callbacks.get('on_log'),
+                enough=max(0, enough))
+            # Итог перебора говорится числом И смыслом. «Найдено 54 из 26390»
+            # само по себе не отвечает на вопрос, который у владельца в
+            # голове: «а проверятся ли теперь мои почты».
+            share = (100.0 * len(live_proxies) / total_seen) if total_seen else 0.0
+            self.callbacks['on_log'](
+                "[INFO] Проверка прокси закончена: живых %d из %d (%.1f%%)."
+                % (len(live_proxies), total_seen, share), "info")
             if 'on_proxies_tested' in self.callbacks:
                 self.callbacks['on_proxies_tested'](len(live_proxies), total_seen)
             if not live_proxies:
-                self.callbacks['on_log']("[DEAD] Внимание: Ни один из загруженных прокси не работает. Валидация скорее всего завершится с ошибками.", "dead")
+                self.callbacks['on_log'](
+                    "[DEAD] Ни один прокси не отвечает на порт 25. Проверять "
+                    "почту через них нечем: почтовые серверы слушают именно "
+                    "этот порт, а 587 и 465 к проверке ящиков отношения не "
+                    "имеют. Вердиктов не будет — ни одного. Возьми прокси с "
+                    "открытым портом 25 или подними свой VPS "
+                    "(tools/make_vps_proxy.py), либо запусти без прокси и "
+                    "проверь хотя бы Gmail и Яндекс.", "dead")
+            elif len(live_proxies) < 10:
+                self.callbacks['on_log'](
+                    "[DEAD] Живых прокси всего %d. На большой базе этого мало: "
+                    "почтовик считает нагрузку по адресу отправителя, и с "
+                    "нескольких IP он быстро начнёт отвечать «слишком часто» "
+                    "или принимать любые адреса подряд." % len(live_proxies),
+                    "dead")
             proxies = live_proxies
 
             # Профилируем прокси: реальный выходной IP, обратный DNS, чёрные списки.
