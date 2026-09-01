@@ -22,6 +22,7 @@
 
 import json
 import os
+import secrets
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -298,7 +299,15 @@ class Handler(BaseHTTPRequestHandler):
         if not self.token:
             return True
         header = self.headers.get("Authorization", "")
-        return header.strip() == f"Bearer {self.token}"
+        # Постоянное время: обычное сравнение выходит на первом несовпавшем
+        # символе, и по времени ответа токен подбирается посимвольно. Мост окна
+        # (ui/webapp.py) так и делает — здесь было упущено.
+        # Именно БАЙТЫ: compare_digest на строках работает только с ASCII и
+        # бросает TypeError на любом другом токене — то есть превращал бы
+        # кириллический пароль в 500-ю ошибку. Поймано собственным контролем.
+        given = header.strip().encode("utf-8", "surrogatepass")
+        want = ("Bearer %s" % self.token).encode("utf-8", "surrogatepass")
+        return secrets.compare_digest(given, want)
 
     def do_GET(self):
         if self.path == "/api/health":

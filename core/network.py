@@ -1020,6 +1020,9 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
                     if confirmed is None:
                         return result            # сверить не с чем — приговор в силе
                     if confirmed:
+                        # Отмечаем ЧЕМ подтверждён: уверенность в вердикте
+                        # считается по этому признаку, а не по статусу.
+                        result["second_opinion"] = "agreed"
                         return result            # второй сервер согласен
                     # Серверы разошлись: хоронить адрес нельзя.
                     return {
