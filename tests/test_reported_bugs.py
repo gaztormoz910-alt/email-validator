@@ -99,8 +99,11 @@ class TestProgress(unittest.TestCase):
         from core.pipeline import ValidationPipeline
         source = inspect.getsource(ValidationPipeline.run_pipeline)
 
-        # Контроль: обе точки откладывания на месте — значит смотрим туда
-        self.assertIn("defer(email, data, is_role)", source)
+        # Контроль: обе точки откладывания на месте — значит смотрим туда.
+        # Якорь без закрывающей скобки: у вызова прибавились именованные
+        # аргументы (прокси неудачной попытки и причина), и точное совпадение
+        # проверяло бы форму строки, а не то, что адрес откладывается.
+        self.assertIn("defer(email, data, is_role", source)
         self.assertGreaterEqual(source.count("return False"), 2,
                                 "откладывание перестало сообщать о себе вызывающему")
         self.assertIn("if not deferred:", source,

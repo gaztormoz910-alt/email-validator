@@ -192,11 +192,12 @@ def test_giants_every_known_domain_has_rules():
 
 
 def test_giants_aol_rules_are_real_not_decorative():
-    """Правило AOL должно и ловить невозможное, и не трогать живое."""
-    from core.local_rules import IMPOSSIBLE, OK, check_local_part
+    """Правило AOL должно и замечать нарушение, и не трогать живое."""
+    from core.local_rules import IMPOSSIBLE, OK, UNLIKELY, check_local_part
 
-    # Имя длиннее предела: у AOL максимум 32 знака.
-    assert check_local_part("a" * 40 + "@aol.com")[0] == IMPOSSIBLE
+    # Имя длиннее предела: у AOL максимум 32 знака. Это подозрение, а не
+    # приговор — хоронить адрес без ответа сервера мы права не имеем.
+    assert check_local_part("a" * 40 + "@aol.com")[0] == UNLIKELY
     # Обычный живой адрес не страдает.
     assert check_local_part("john.smith@aol.com")[0] == OK
     # Начало не с буквы — подозрение, но не приговор: старые ящики бывают.

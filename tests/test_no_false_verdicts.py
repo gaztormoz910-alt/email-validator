@@ -104,11 +104,12 @@ def test_syntax_allows_the_whole_rfc_atext_set():
 # ══════════════════════════════════════════════ правило имени провайдера
 
 def test_localrule_kills_only_what_could_never_exist():
-    """Приговор без сети — только за то, чего провайдер не выдавал никогда."""
-    # Пустое имя невозможно ни у кого.
+    """Приговор без сети — только там, где адресовать нечего."""
+    # Пустое имя невозможно ни у кого: адресовать нечего.
     assert check_local_part("@gmail.com")[0] == IMPOSSIBLE
-    # Имя длиннее предела: предел у провайдеров только рос, старых исключений нет.
-    assert check_local_part("a" * 35 + "@gmail.com")[0] == IMPOSSIBLE
+    # А длина приговором быть перестала: предел списан со страницы помощи
+    # провайдера, а не получен от сервера. См. core/local_rules.py.
+    assert check_local_part("a" * 35 + "@gmail.com")[0] != IMPOSSIBLE
 
 
 @pytest.mark.parametrize("email,why", [
@@ -120,6 +121,8 @@ def test_localrule_kills_only_what_could_never_exist():
     ("a@yahoo.com", "коротко для Yahoo"),
     ("johnacreps@gmail.com", "обычный живой адрес"),
     ("ivan@corporate-domain.com", "чужой домен — правил нет, молчим"),
+    ("a" * 35 + "@gmail.com", "длиннее предела: предел из таблицы, не с сервера"),
+    (".".join("johndoesmithjr") + "@gmail.com", "точки Gmail в длину не входят"),
 ])
 def test_localrule_sends_everything_else_to_the_server(email, why):
     """Всё, что нарушает лишь НЫНЕШНИЕ правила, обязано идти на сервер.

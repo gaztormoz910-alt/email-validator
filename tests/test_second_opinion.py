@@ -287,4 +287,9 @@ def test_greylist_delay_is_actually_used_by_the_pipeline():
     # первое вхождение — это её объявление далеко от нужного места.
     block = source[source.index("if _is_transient_failure(raw_status"):]
     block = block[:400]
-    assert "defer(email, data, is_role)" in block
+    # Требование — «временный сбой уходит с ОБЫЧНОЙ выдержкой», то есть без
+    # delay= вовсе. Проверяем именно это, а не дословную форму вызова: у него
+    # с тех пор прибавились прокси неудачной попытки и причина отказа.
+    call = block[block.index("defer(email, data, is_role"):]
+    call = call[:call.index(")") + 1]
+    assert "delay=" not in call, call
