@@ -42,21 +42,6 @@ class EmailAI:
         self.is_trained = True
         return True
 
-    def extract_features(self, email):
-        """Признаки локальной части — для отладки и тестов."""
-        local = email.split('@')[0] if isinstance(email, str) and '@' in email else (email or "")
-        if not isinstance(local, str):
-            return [0, 0.0, 0.0, 0.0]
-        length = len(local)
-        digits = sum(c.isdigit() for c in local)
-        vowels = sum(c in 'aeiouyаеёиоуыэюя' for c in local.lower())
-        return [
-            length,
-            local_part_entropy(local),
-            digits / length if length else 0.0,
-            vowels / length if length else 0.0,
-        ]
-
     def predict(self, email):
         """True — адрес похож на машинно-сгенерированный.
 

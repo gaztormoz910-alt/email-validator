@@ -55,7 +55,6 @@ def main(argv):
         cwd=ROOT, env=env, capture_output=True, text=True,
         encoding="utf-8", errors="replace")
 
-    output = (process.stdout or "") + (process.returncode and (process.stderr or "") or "")
     sys.stdout.write(process.stdout or "")
     sys.stdout.write(process.stderr or "")
 
