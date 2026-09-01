@@ -71,19 +71,62 @@ class ProxyPoolMixin:
         return self._max_concurrent_per_proxy
 
     def note_ip_use(self, proxy, count=1):
-        """Отмечает обращение через выходной IP этого прокси."""
+        """Отмечает обращение через выходной IP этого прокси.
+
+        Считается ЗА СУТКИ, а не за прогон. Репутация адреса тратится
+        календарно: почтовик помнит, сколько с него пришло сегодня, и ему
+        безразлично, одним запуском программы или тремя. Раньше счётчик жил в
+        памяти прогона и обнулялся вместе с ним — два прогона в день давали
+        тысячу шестьсот обращений с одного адреса при потолке в восемьсот.
+        """
         exit_ip = (self._proxy_profiles.get(proxy) or {}).get("exit_ip")
         key = exit_ip or proxy
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            count = 1
         with self._ip_load_lock:
-            self._ip_load[key] = self._ip_load.get(key, 0) + int(count)
-            return self._ip_load[key]
+            self._ip_load[key] = self._ip_load.get(key, 0) + count
+            total = self._ip_load[key]
+        memory = getattr(self, "memory", None)
+        if memory is not None and key:
+            try:
+                remembered = memory.ip_load_add(key, count)
+                if remembered > total:
+                    # За сутки этим адресом уже пользовались — берём большее.
+                    with self._ip_load_lock:
+                        self._ip_load[key] = remembered
+                    total = remembered
+            except Exception:
+                pass
+        return total
 
     def ip_load(self, proxy):
-        """Сколько обращений уже ушло через выходной IP этого прокси."""
+        """Сколько обращений уже ушло через выходной IP этого прокси за сутки.
+
+        Смотрит и в память между запусками: новый прогон обязан ЗНАТЬ, что
+        этим адресом сегодня уже пользовались восемьсот раз. Иначе потолок
+        обнуляется вместе с программой и не значит ничего.
+
+        Спрошенное запоминается локально: дальше счёт идёт в памяти прогона,
+        и обращаться к базе на каждом выборе прокси не приходится.
+        """
         exit_ip = (self._proxy_profiles.get(proxy) or {}).get("exit_ip")
         key = exit_ip or proxy
         with self._ip_load_lock:
-            return self._ip_load.get(key, 0)
+            if key in self._ip_load:
+                return self._ip_load[key]
+
+        memory = getattr(self, "memory", None)
+        if memory is None or not key:
+            return 0
+        try:
+            used = int(memory.ip_load_today(key) or 0)
+        except Exception:
+            return 0
+        with self._ip_load_lock:
+            self._ip_load.setdefault(key, used)
+            return self._ip_load[key]
 
     def overloaded_ips(self):
         """Выходные IP, перешагнувшие мягкий потолок суточной нагрузки."""
@@ -202,6 +245,7 @@ class ProxyPoolMixin:
         """
         profiles = profiles if isinstance(profiles, dict) else {}
         self._proxy_profiles = dict(profiles)
+        self._remember_profiles(profiles)
         with self._proxy_score_lock:
             # Факт профилирования храним отдельно от его результатов: если у ВСЕХ
             # прокси PTR точно отсутствует, все три множества окажутся пустыми,
@@ -237,6 +281,36 @@ class ProxyPoolMixin:
             self._yahoo_bad = {p for p, v in profiles.items() if v.get("yahoo_ok") is False}
             self._icloud_bad = {p for p, v in profiles.items() if v.get("icloud_ok") is False}
             self._dirty_proxies |= self._icloud_bad
+
+    def _remember_profiles(self, profiles):
+        """Кладёт профили в память между запусками. Тихо — это ускорение."""
+        memory = getattr(self, "memory", None)
+        if memory is None or not profiles:
+            return
+        try:
+            memory.profiles_save(profiles)
+        except Exception:
+            pass
+
+    def recall_proxy_profiles(self, proxies):
+        """Профили, снятые в прошлый раз и ещё не протухшие.
+
+        Снятие профиля — это выходной IP через EHLO у Gmail, обратный DNS,
+        семь чёрных списков и три прямые пробы почтовиков НА КАЖДЫЙ прокси.
+        На пуле в несколько сотен это минуты простоя перед каждой работой, а
+        выходной адрес у прокси за сутки обычно не меняется.
+
+        Срок жизни записи — сутки (см. core/longterm.py): у дешёвых прокси IP
+        всё-таки меняется, и вечная память была бы хуже её отсутствия.
+        Свежая проба всегда вытесняет запомненное, а не наоборот.
+        """
+        memory = getattr(self, "memory", None)
+        if memory is None:
+            return {}
+        try:
+            return memory.profiles_load(proxies)
+        except Exception:
+            return {}
 
     def refresh_proxy_profiles(self, timeout=10, workers=30):
         """Переснимает профиль живых прокси и возвращает, что изменилось.

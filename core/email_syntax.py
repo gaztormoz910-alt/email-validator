@@ -69,6 +69,28 @@ _ATEXT = r"a-zA-Z0-9!#$%&'*+/=?^_`{|}~\-"
 # самого стандарта, а не наша дополнительная строгость.
 _LOCAL_PART = r'[' + _ATEXT + r']+(?:\.[' + _ATEXT + r']+)*'
 
+# Имя ящика В КАВЫЧКАХ — вторая законная форма (RFC 5321 §4.1.2).
+#
+# Внутри кавычек можно почти всё, включая пробел и собственную «@»:
+# `"john smith"@example.com` — законный адрес, и такие ящики существуют.
+# Раньше валидатор их не проверял вовсе: сначала объявлял «неправильный
+# синтаксис», потом — «не проверено». Между тем послать по такому адресу
+# RCPT можно: smtplib.quoteaddr кавычки сохраняет, надо было лишь перестать
+# отбрасывать адрес на подходе.
+#
+# qtext — печатные ASCII, кроме самой кавычки и обратной косой; всё остальное
+# внутри кавычек допускается парой «косая + символ».
+_QTEXT = r'[ !#-\[\]-~]'
+_QUOTED_PAIR = '\\\\[ -~]'
+_QUOTED_LOCAL_RE = re.compile(r'^"(?:' + _QTEXT + r'|' + _QUOTED_PAIR + r')*"$')
+
+
+def has_quoted_form(local):
+    """Похожа ли локальная часть на форму в кавычках."""
+    return (isinstance(local, str) and len(local) >= 2
+            and local.startswith('"') and local.endswith('"'))
+
+
 # Метка домена по RFC 1035 §2.3.1: начинается и заканчивается буквой или
 # цифрой, дефисы допустимы только внутри. Это не наша дополнительная
 # строгость, а правило DNS: метку вида `e-` зарегистрировать нельзя, поэтому
@@ -115,6 +137,9 @@ def harvest_pattern(wide=True):
     # Знаки, из которых состоит адрес ссылки. По RFC они в локальной части
     # законны, но внутри URL значат другое.
     url_structural = "=&?/#%"
+    # В широком режиме (файл базы: строка — это адрес) образец умеет и форму
+    # в кавычках. В режиме «текст со ссылками» её нет намеренно: кавычки на
+    # странице стоят вокруг чего угодно, и там они принесли бы мусор.
     atext = _ATEXT if wide else "".join(
         ch for ch in _ATEXT if ch not in url_structural)
     # Точка внутри локальной части — РАЗДЕЛИТЕЛЬ, а не обычный знак: она не
@@ -122,6 +147,9 @@ def harvest_pattern(wide=True):
     # цеплялся с последней точки, и `john.doe@gmail.com` попадал в базу как
     # `doe@gmail.com` — самый частый вид адреса, испорченный на каждой строке.
     local = r'[' + atext + r']+(?:\.[' + atext + r']+)*'
+    if wide:
+        quoted = r'"(?:' + _QTEXT + r'|' + _QUOTED_PAIR + r')*"'
+        local = r'(?:' + quoted + r'|' + local + r')'
     return re.compile(local + r'@' + _LABEL + r'(?:\.' + _LABEL + r')*\.' + _TLD_PART)
 
 
@@ -198,13 +226,23 @@ def validate_email_syntax(email: str) -> bool:
         return False
     if _byte_length(email) > MAX_EMAIL_BYTES:
         return False
-    if email.count('@') != 1:
-        return False
-    if _BAD_SYNTAX_PATTERNS.search(email):
+
+    # Разделяем по ПОСЛЕДНЕЙ «@»: внутри кавычек она законна, и
+    # `"a@b"@example.com` — правильный адрес с одним доменом и одним ящиком.
+    local, _, domain = email.rpartition('@')
+    quoted = has_quoted_form(local)
+
+    if not quoted:
+        # Прежние правила действуют без изменений для обычной формы: ровно
+        # одна «@», ни пробелов, ни двойных точек.
+        if email.count('@') != 1:
+            return False
+        if _BAD_SYNTAX_PATTERNS.search(email):
+            return False
+    elif not _QUOTED_LOCAL_RE.match(local):
         return False
 
-    local, _, domain = email.partition('@')
-    if _byte_length(local) > MAX_LOCAL_BYTES:
+    if not local or _byte_length(local) > MAX_LOCAL_BYTES:
         return False
 
     domain_ascii = to_ascii_domain(domain)
@@ -216,6 +254,11 @@ def validate_email_syntax(email: str) -> bool:
         return False
     if not _labels_fit(domain_ascii):
         return False
+
+    # Имя ящика в кавычках уже проверено своей грамматикой выше — остаётся
+    # домен. Общая регулярка ему не годится: она разбирает dot-atom.
+    if quoted:
+        return bool(_DOMAIN_REGEX.match(domain_ascii))
 
     # Не-ASCII локальная часть: общей регуляркой её не проверить, поэтому
     # смотрим только длину и домен. Отбраковывать адрес за это нельзя.

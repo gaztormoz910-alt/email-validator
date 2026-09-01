@@ -195,6 +195,15 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
 
         # Кэш Catch-All доменов — чтобы не делать двойной пинг дважды для одного домена
         self.catchall_cache = BoundedCache()
+
+        # Память между запусками: catch-all доменов, профили прокси, суточная
+        # нагрузка на выходные IP. Недоступная база молча отключает память —
+        # это ускорение, а не источник истины. См. core/longterm.py.
+        try:
+            from core.longterm import LongTermMemory
+            self.memory = LongTermMemory()
+        except Exception:
+            self.memory = None
         self.catchall_lock = threading.Lock()
         # Сколько раз проверяли каждый домен. Нужен, чтобы у гигантов
         # контрольная проба шла не на каждый адрес, а изредка: она стоит один
@@ -369,6 +378,32 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         else:
             return smtplib.SMTP(timeout=self.timeout)
 
+    def _ask_vrfy(self, server, email, domain):
+        """Спрашивает VRFY. Вердикт или None, если ответа по существу нет.
+
+        Разбор идёт тем же классификатором, что и RCPT: коды и формулировки у
+        VRFY те же самые, и заводить для них вторую таблицу правил значило бы
+        завести второе место, где эти правила разъезжаются.
+
+        252 отсекается отдельно и до классификатора: по RFC 5321 §3.5.3 это
+        «не берусь проверить», а классификатор трактует 2xx как согласие.
+        """
+        try:
+            code, message = server.verify(email)
+        except Exception:
+            return None
+        try:
+            numeric = int(code)
+        except (TypeError, ValueError):
+            return None
+        if numeric == 252:
+            return None
+        verdict = self._parse_smtp_response(numeric, message, email, domain)
+        if verdict["status"] == "unknown":
+            return None
+        verdict["reason"] = "VRFY: %s" % verdict.get("reason", "")
+        return verdict
+
     def _parse_smtp_response(self, code, message, email, domain):
         """Вердикт о ящике по ответу сервера. Вся логика — в core/smtp_codes.
 
@@ -457,7 +492,43 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             # Если сервер отверг САМ MAIL FROM (репутация прокси, SPF, требование авторизации),
             # то последующий RCPT вернёт вводящий в заблуждение код вроде "503 Bad sequence",
             # который раньше молча превращался в "невалидный ящик". Проверяем явно.
-            mail_code, mail_msg = server.mail(from_addr)
+            # Не-ASCII имя ящика: проверяем, если сервер объявил SMTPUTF8.
+            #
+            # Раньше мы сдавались на подходе — возвращали «не проверено» ещё до
+            # соединения. Но RFC 6531 существует, и серверы его объявляют:
+            # тогда команду можно послать в UTF-8 и получить нормальный ответ.
+            # Отказываться от ответа, который дают, — это терять адрес на
+            # ровном месте.
+            #
+            # command_encoding у smtplib по умолчанию ASCII, поэтому его
+            # переключаем ЯВНО: иначе адрес не влезет в команду и вылетит
+            # UnicodeEncodeError.
+            mail_options = []
+            if has_non_ascii_local(email):
+                supports_utf8 = False
+                try:
+                    supports_utf8 = server.has_extn("smtputf8")
+                except Exception:
+                    supports_utf8 = False
+                if not supports_utf8:
+                    return {
+                        "status": "unknown",
+                        "reason": ("Не-ASCII имя ящика, а сервер не объявил "
+                                   "SMTPUTF8 — проверить нечем"),
+                        "smtp_banner": banner_text,
+                        "server_outdated": self._is_server_outdated(banner_text),
+                        "has_starttls": has_starttls,
+                    }
+                mail_options = ["SMTPUTF8"]
+                server.command_encoding = "utf-8"
+
+            # options передаются, только когда они есть: у smtplib подпись
+            # mail(sender, options=()), но лишний именованный аргумент в
+            # обычном ASCII-пути ничего не даёт, а совместимости стоит.
+            if mail_options:
+                mail_code, mail_msg = server.mail(from_addr, options=mail_options)
+            else:
+                mail_code, mail_msg = server.mail(from_addr)
             if mail_code >= 400:
                 mail_text = mail_msg.decode('utf-8', 'ignore') if isinstance(mail_msg, bytes) else str(mail_msg)
                 low = mail_text.lower()
@@ -484,6 +555,20 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
 
             result = self._parse_smtp_response(code, message, email, domain)
 
+            # Сервер не дал вердикта — спрашиваем VRFY, раз он уже на связи.
+            #
+            # Команда старая и почти везде выключена, но там, где включена, она
+            # отвечает о ящике ПРЯМО, без всяких проб: одна строка вместо
+            # догадок. Стоит она одного пакета в уже открытой сессии, и пробуем
+            # мы её только тогда, когда иначе результатом был бы «неизвестно».
+            #
+            # Ответ 252 («не могу проверить, но письмо приму») вердиктом НЕ
+            # считается — это ровно то же «не знаю», только другими словами.
+            if result["status"] == "unknown":
+                verified = self._ask_vrfy(server, email, domain)
+                if verified is not None:
+                    result = verified
+
             # Контрольный RCPT в ТОЙ ЖЕ сессии.
             #
             # Сервер ответил 250 — но это ничего не значит, если он отвечает 250
@@ -506,6 +591,9 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
                                         "в той же сессии")
                     with self.catchall_lock:
                         self.catchall_cache[domain] = True
+                    # Такой же факт, как и от тройной пробы, — и помнить его
+                    # надо так же: иначе следующий запуск выяснит его заново.
+                    self._remember_catchall(domain, True)
                 elif ctl_code is not None and ctl_code >= 500:
                     # Выдуманный адрес отвергнут — сервер отвечает честно, и
                     # 250 на реальный адрес это подтверждённый живой ящик.
@@ -667,6 +755,20 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             if domain in self.catchall_cache:
                 return self.catchall_cache[domain]
 
+        # Ответ, выясненный в прошлый раз. Тройная проба стоит трёх RCPT в
+        # отдельной сессии НА КАЖДЫЙ домен базы: спрашивать об одном и том же
+        # при каждом запуске — это лишние сессии и лишний повод попасться на
+        # глаза почтовику ровно за тот ответ, который уже есть.
+        #
+        # У записи есть срок (см. core/longterm.py): домен мог перестать быть
+        # catch-all, и вечная память была бы хуже её отсутствия.
+        if self.memory is not None:
+            remembered = self.memory.catchall_get(domain)
+            if remembered is not None:
+                with self.catchall_lock:
+                    self.catchall_cache[domain] = remembered
+                return remembered
+
         fakes = [
             f"{_generate_random_local('short')}@{domain}",
             f"{_generate_random_local('short')}@{domain}",
@@ -683,11 +785,25 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             if result["status"] != "valid":
                 with self.catchall_lock:
                     self.catchall_cache[domain] = False
+                self._remember_catchall(domain, False)
                 return False
 
         with self.catchall_lock:
             self.catchall_cache[domain] = True
+        self._remember_catchall(domain, True)
         return True
+
+    def _remember_catchall(self, domain, is_catchall):
+        """Кладёт выясненный ответ в память между запусками.
+
+        Тихо: сбой памяти не имеет права влиять на проверку почты.
+        """
+        if self.memory is None:
+            return
+        try:
+            self.memory.catchall_put(domain, is_catchall)
+        except Exception:
+            pass
 
     def stealth_smtp_ping(self, email: str, mx_records: list,
                           control_probe=False) -> dict:
@@ -907,25 +1023,22 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
 
         # Шаг 0: Проверка синтаксиса (п.1.3). IDN проходит — см. validate_email_syntax.
         if not validate_email_syntax(email):
-            # Локальная часть в кавычках законна по RFC 5321 §4.1.2, но
-            # проверить её мы не можем: кавычки надо сохранить в RCPT, а
-            # внутри них законны пробел и собственная «@». Это «не
-            # проверено», а не «неправильный адрес»: приговор живому ящику
-            # без единого запроса к серверу — та самая ошибка, которая
-            # неисправима, потому что владелец такой адрес просто удалит.
-            if has_quoted_local(email):
-                return {"status": "unknown",
-                        "reason": ("Локальная часть в кавычках (RFC 5321 §4.1.2) — "
-                                   "RCPT с ней отправить нельзя, адрес не проверен"),
-                        "mx_record": "N/A"}
+            # Кавычки в имени ящика больше не повод сдаваться: грамматика
+            # RFC 5321 §4.1.2 разбирается, а RCPT с ними строит smtplib —
+            # quoteaddr кавычки сохраняет. Сюда доходит только настоящий
+            # мусор.
             return {"status": "invalid", "reason": "Bad Syntax (RFC 5322)", "mx_record": "N/A"}
 
-        # Не-ASCII локальная часть законна (RFC 6531), но `RCPT TO` с ней не
-        # отправить: команда кодируется в ASCII. Это «не проверили», а не «мёртв».
-        if has_non_ascii_local(email):
-            return {"status": "unknown",
-                    "reason": "Не-ASCII локальная часть (SMTPUTF8) — RCPT отправить нельзя",
-                    "mx_record": "N/A"}
+        # Не-ASCII имя ящика ОТСЮДА НЕ РАЗВОРАЧИВАЕТСЯ.
+        #
+        # Раньше здесь стоял ранний выход «команду с ней не построить», и он
+        # делал поддержку SMTPUTF8 недостижимой: код в _do_single_ping умеет
+        # переключить кодировку команды и получить нормальный ответ, но адрес
+        # до него не доезжал никогда. Проверка расширения — дело сессии, а не
+        # догадки на подходе: спросить сервер можно только у сервера.
+        #
+        # Если расширения у него нет, «не проверено» вернётся из самой сессии,
+        # и там оно будет честным ответом, а не отговоркой.
 
         local_part, _, raw_domain = email.rpartition("@")
         domain = to_ascii_domain(raw_domain.lower())

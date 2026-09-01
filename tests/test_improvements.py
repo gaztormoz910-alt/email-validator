@@ -171,8 +171,12 @@ def test_spamhaus_explains_itself_when_off():
     with io.open(path, encoding="utf-8") as handle:
         source = handle.read()
 
-    assert "публичные он не обслуживает" in source
+    # Формулировка стала точнее: вместо «публичные он не обслуживает» теперь
+    # назван сам код отказа, который зона возвращает, — по нему владелец
+    # отличит «мой резолвер не тот» от «сети нет».
+    assert "127.255.255.254" in source
     assert "settings.json" in source
+    assert "spamhaus_refusal_reason" in source
 
 
 def test_spamhaus_resolvers_read_from_settings():
