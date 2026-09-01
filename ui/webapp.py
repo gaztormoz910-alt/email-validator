@@ -43,6 +43,7 @@ from core import input_guard
 from ui.result_store import normalize_filters
 from core.encoding import open_text
 from core.baseops import csv_row, export_encoding
+from core.parser_pipeline import API_ENGINES as _API_ENGINES
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -773,8 +774,16 @@ class ValidatorApi:
     # опросом. Раньше кнопка «Сбор адресов» в этом окне просто советовала
     # запустить программу заново с флагом --classic.
 
+    # Поисковики и открытые API в одном списке.
+    #
+    # У API нет ни капчи, ни разбора разметки, ни разной выдачи на разных
+    # прокси: они отдают структурированный ответ. Поле «Поисковые запросы»
+    # для них означает запрос к источнику, а для PyPI — имя пакета.
+    # Список движков собирается из ОДНОГО места. Раньше имена API-источников
+    # были переписаны сюда руками, и добавленный в конвейер источник в окне не
+    # появлялся: список в двух местах расходится всегда, вопрос лишь когда.
     PARSER_ENGINES = ["DuckDuckGo Lite", "AOL (Tor)", "Yahoo (Tor)",
-                      "AOL (Proxies)", "Yahoo (Proxies)"]
+                      "AOL (Proxies)", "Yahoo (Proxies)"] + sorted(_API_ENGINES)
 
     def _parser_log(self, message, tag="info"):
         line = {"text": str(message), "tag": tag}

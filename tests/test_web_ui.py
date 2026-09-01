@@ -422,10 +422,20 @@ def test_parser_refuses_an_unknown_engine():
 
 
 def test_parser_shows_every_engine_the_old_window_had():
+    """Ни один прежний движок не потерялся.
+
+    Сравнение стало «содержит», а не «равно», намеренно: к поисковикам
+    добавились источники с открытым API (GitHub, npm, PyPI, Hacker News), и
+    жёсткое равенство запрещало бы добавлять новое. Терять старое — нельзя,
+    и это здесь и проверяется.
+    """
     api = make_api()
     engines = api.parser_state()["engines"]
-    assert engines == ["DuckDuckGo Lite", "AOL (Tor)", "Yahoo (Tor)",
-                       "AOL (Proxies)", "Yahoo (Proxies)"]
+    for old_engine in ("DuckDuckGo Lite", "AOL (Tor)", "Yahoo (Tor)",
+                       "AOL (Proxies)", "Yahoo (Proxies)"):
+        assert old_engine in engines, old_engine
+    assert engines[:5] == ["DuckDuckGo Lite", "AOL (Tor)", "Yahoo (Tor)",
+                           "AOL (Proxies)", "Yahoo (Proxies)"], "порядок поехал"
 
 
 def test_parser_reports_the_same_address_once():
