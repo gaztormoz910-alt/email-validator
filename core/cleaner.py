@@ -46,6 +46,10 @@ _JUNK_EDGES = "`'\"<>()[]{},;:|*!?«»“”‘’" \
 
 _MAILTO_RE = re.compile(r'^\s*mailto:\s*', re.IGNORECASE)
 
+# Разбор кавычек живёт в core/email_syntax.py — там же, где грамматика
+# RFC 5322. Обратной зависимости нет, цикла не будет.
+from core.email_syntax import has_quoted_local            # noqa: E402
+
 
 def strip_wrapping_junk(raw: str) -> str:
     """Снимает обёртку вокруг адреса и приводит его к нижнему регистру.
@@ -56,6 +60,17 @@ def strip_wrapping_junk(raw: str) -> str:
     if not isinstance(raw, str):
         return ""
     value = _MAILTO_RE.sub("", raw)
+    # Кавычка бывает НЕ мусором. RFC 5321 §4.1.2 разрешает имя ящика в
+    # кавычках, и там они — часть адреса: `"very.unusual"@example.com`.
+    # Счистка краёв снимала открывающую и оставляла закрывающую, превращая
+    # валидный адрес в `very.unusual"@example.com`, то есть в ложный invalid
+    # «Bad Syntax» без единого сетевого запроса. Проверено запуском: три
+    # разных адреса в кавычках ломались одинаково.
+    #
+    # Поэтому: если ДО счистки имя ящика было в кавычках, а после перестало,
+    # кавычки этому адресу принадлежат — снимаем всё остальное, но их
+    # оставляем.
+    quoted_before = has_quoted_local(value.strip().lower())
     # Угловые скобки разбираем ПЕРВЫМИ: в выгрузках почтовиков адрес приходит
     # вместе с отображаемым именем — Ivan Petrov <ivan@corp.com>. Если сначала
     # обрезать края, закрывающая скобка исчезнет, и имя останется приклеенным.
@@ -63,7 +78,10 @@ def strip_wrapping_junk(raw: str) -> str:
         inner = value[value.rfind("<") + 1:value.rfind(">")]
         if "@" in inner:
             value = inner
-    return value.strip(_JUNK_EDGES).lower()
+    stripped = value.strip(_JUNK_EDGES).lower()
+    if quoted_before and not has_quoted_local(stripped):
+        return value.strip(_JUNK_EDGES.replace('"', "")).lower()
+    return stripped
 
 
 def normalize_for_dedup(email: str) -> str:

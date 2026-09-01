@@ -922,3 +922,17 @@ input[type="number"], textarea {
    удалить после проверки, и такую строку стоит перепроверить перед рассылкой. */
 .grid td.is-stale { color: var(--warn); }
 .select--sm { height: 26px; padding: 0 var(--s-2); font-size: 12px; }
+
+/* Уверенность в вердикте: маленькая пометка рядом со статусом.
+   Не колонка — колонок и так девять, а лишняя увела бы таблицу в
+   горизонтальную прокрутку на ноутбуке. */
+.conf {
+  margin-left: 6px;
+  font-size: 11px;
+  font-style: normal;
+  opacity: .85;
+  vertical-align: super;
+}
+.conf--high { color: var(--ok, #2e7d32); }
+.conf--mid  { color: var(--warn, #b26a00); }
+.conf--low  { color: var(--dim, #8a8a8a); }

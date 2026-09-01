@@ -33,7 +33,9 @@ from core.encoding import open_text
 EXPORT_FIELDS = [
     "email", "status", "reason", "mx", "name", "first_name", "last_name",
     "gender", "country",
-    "birth_year", "company", "job_role", "score", "grade", "provider",
+    "birth_year", "company", "job_role", "score", "grade",
+    # Уверенность в ВЕРДИКТЕ и её основание — отдельно от скора живости.
+    "verdict_confidence", "verdict_basis", "provider",
     "domain_type", "name_source", "gender_source", "country_source",
     "company_source", "job_role_source", "validated_at",
 ]
@@ -56,6 +58,10 @@ def _row(entry):
         "job_role": data.get("job_role", ""),
         "score": data.get("engagement_score", ""),
         "grade": data.get("engagement_grade", ""),
+        # Уверенность в вердикте и её основание: без них колонки в заголовке
+        # были бы, а значений в них — нет.
+        "verdict_confidence": data.get("verdict_confidence", ""),
+        "verdict_basis": data.get("verdict_basis", ""),
         "provider": data.get("provider_name", ""),
         "domain_type": data.get("domain_type", ""),
         "name_source": data.get("name_source", ""),
