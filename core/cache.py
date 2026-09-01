@@ -74,9 +74,38 @@ class ResultCache:
                        checked_at TEXT NOT NULL
                    )"""
             )
+            self._forget_verdicts_without_proof()
             self._conn.commit()
         except Exception:
             self._close_quietly()
+
+    # Признак вердикта, вынесенного ПРАВИЛОМ ДЛИНЫ без единого запроса к
+    # серверу. Правило понижено до подозрения (см. core/local_rules.py):
+    # предел взят с чужой страницы помощи, а не получен от почтовика, и у
+    # Gmail он ошибался измеримо — точки в имени там не значат ничего.
+    _NO_PROOF_REASON = ("Имя не может существовать%", "%длиннее%")
+
+    def _forget_verdicts_without_proof(self):
+        """Выбрасывает Invalid, вынесенные отменённым правилом длины.
+
+        Без этой чистки исправление до владельца просто не дошло бы: кэш
+        держит Invalid девяносто дней и ещё три месяца отдавал бы живой
+        адрес как отскок, не спрашивая сервер. Чистка одноразовая по сути —
+        новых записей такого вида код больше не создаёт, — и идемпотентная,
+        поэтому её не жалко звать при каждом открытии базы.
+
+        Возвращает число удалённых записей. Тихо: кэш не имеет права ронять
+        проверку.
+        """
+        if self._conn is None:
+            return 0
+        try:
+            cursor = self._conn.execute(
+                "DELETE FROM results WHERE status = ? AND reason LIKE ? AND reason LIKE ?",
+                ("Invalid/Bounce",) + self._NO_PROOF_REASON)
+            return int(cursor.rowcount or 0)
+        except Exception:
+            return 0
 
     # --- служебное ---------------------------------------------------------
 

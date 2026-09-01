@@ -242,7 +242,7 @@ class TestPostmasterTrust(unittest.TestCase):
         v = NetworkValidator(timeout=1)
         v.get_mx_records = lambda d: ["mx.corp-x.com"]
         v.is_catch_all_domain = lambda d, mx: False
-        v.stealth_smtp_ping = lambda e, mx, control_probe=False: {
+        v.stealth_smtp_ping = lambda e, mx, control_probe=False, **kwargs: {
             "status": "invalid", "reason": "550 User Does Not Exist"}
 
         # Негативный контроль: честный сервер — вердикт остаётся invalid
@@ -255,7 +255,7 @@ class TestPostmasterTrust(unittest.TestCase):
         v2 = NetworkValidator(timeout=1)
         v2.get_mx_records = lambda d: ["mx.corp-x.com"]
         v2.is_catch_all_domain = lambda d, mx: False
-        v2.stealth_smtp_ping = lambda e, mx, control_probe=False: {
+        v2.stealth_smtp_ping = lambda e, mx, control_probe=False, **kwargs: {
             "status": "invalid", "reason": "550 User Does Not Exist"}
         v2.postmaster_is_honored = lambda d, mx: False
         lying = v2.check_email("ghost@corp-x.com")
@@ -269,7 +269,7 @@ class TestPostmasterTrust(unittest.TestCase):
         v = NetworkValidator(timeout=1)
         v.get_mx_records = lambda d: ["mx.corp-x.com"]
         v.is_catch_all_domain = lambda d, mx: False
-        v.stealth_smtp_ping = lambda e, mx, control_probe=False: {
+        v.stealth_smtp_ping = lambda e, mx, control_probe=False, **kwargs: {
             "status": "valid", "reason": "250 OK"}
         v.check_dns_health = lambda d, mx_record="": {"score": 0}
         v.postmaster_is_honored = lambda d, mx: probed.append(d) or True
@@ -301,7 +301,7 @@ class TestCheckEmailAsksForTheControlProbe(unittest.TestCase):
         validator.is_catch_all_domain = lambda domain, mx: False
         validator.check_dns_health = lambda domain, mx_record="": {"score": 0}
 
-        def ping(email, mx_records, control_probe=False):
+        def ping(email, mx_records, control_probe=False, **kwargs):
             seen.append(control_probe)
             return {"status": "valid", "reason": "250 OK"}
 
@@ -333,7 +333,7 @@ class TestCheckEmailAsksForTheControlProbe(unittest.TestCase):
                 validator = self._validator([])
                 seen = []
 
-                def ping(email, mx_records, control_probe=False):
+                def ping(email, mx_records, control_probe=False, **kwargs):
                     seen.append(control_probe)
                     return {"status": "valid", "reason": "250 OK"}
 
