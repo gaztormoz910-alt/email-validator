@@ -710,6 +710,12 @@ class ValidatorApi:
                 "group": self._group_of(row["status"]),
                 "reason": row["reason"],
                 "score": data.get("engagement_score", ""),
+                # Уверенность в ВЕРДИКТЕ и её основание — не скор живости.
+                # Показываются рядом со статусом: без них «Годен» на
+                # catch-all домене выглядит так же твёрдо, как «Годен»,
+                # подтверждённый контрольной пробой.
+                "confidence": data.get("verdict_confidence", ""),
+                "basis": data.get("verdict_basis", ""),
                 "provider": data.get("provider_name", ""),
                 "name": data.get("name", ""),
                 "gender": data.get("gender", ""),
@@ -785,7 +791,8 @@ class ValidatorApi:
                 writer = csv.writer(handle)
                 writer.writerow(["Email", "Status", "Reason", "MX", "Name",
                                  "FirstName", "LastName", "Gender", "Country",
-                                 "Score", "Provider", "ValidatedAt"])
+                                 "Score", "Confidence", "ConfidenceBasis",
+                                 "Provider", "ValidatedAt"])
                 for row in rows:
                     data = row.get("data") or {}
                     # csv_row, а не голый список: база собрана со страниц в
@@ -796,6 +803,8 @@ class ValidatorApi:
                         data.get("name", ""), data.get("first_name", ""),
                         data.get("last_name", ""), data.get("gender", ""),
                         data.get("country", ""), data.get("engagement_score", ""),
+                        data.get("verdict_confidence", ""),
+                        data.get("verdict_basis", ""),
                         data.get("provider_name", ""), data.get("validated_at", ""),
                     ]))
 
