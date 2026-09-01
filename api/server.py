@@ -123,6 +123,19 @@ def _emails_of(payload, key="emails"):
     return [str(v) for v in values]
 
 
+def _bounded(value, default, low, high):
+    """Число из запроса в разумных пределах. Мусор — это значение по умолчанию.
+
+    Голый int() падает на «abc», а 100000 потоков валидатор примет и попробует
+    выполнить: запрос может прийти и мимо страницы.
+    """
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
 def handle(path, payload):
     """Чистая логика без HTTP. Отделена, чтобы её можно было проверить тестом.
 
@@ -166,6 +179,66 @@ def handle(path, payload):
                          "/api/intersect": baseops.intersect}[path]
             result = operation(left, right)
             return 200, {"count": len(result), "emails": result}
+
+        if path == "/api/collect":
+            # Сбор адресов из открытого API. Ответ синхронный: источники
+            # отдают структурированный JSON за доли секунды, задача тут не
+            # нужна — в отличие от SMTP.
+            from core.collectors import SOURCES, collect
+
+            source = str(payload.get("source") or "").lower()
+            if source not in SOURCES:
+                return 400, {"error": "источник должен быть одним из: %s"
+                                      % ", ".join(sorted(SOURCES))}
+            kwargs = {}
+            if source == "pypi":
+                packages = payload.get("packages")
+                if isinstance(packages, str):
+                    packages = [packages]
+                if not isinstance(packages, list) or not packages:
+                    return 400, {"error": "для PyPI нужен список packages"}
+                kwargs["packages"] = [str(p) for p in packages[:100]]
+            else:
+                kwargs["query"] = str(payload.get("query") or "")
+                if not kwargs["query"]:
+                    return 400, {"error": "нужно поле query"}
+                if source != "github":
+                    kwargs["limit"] = _bounded(payload.get("limit"), 50, 1, 250)
+                else:
+                    kwargs["pages"] = _bounded(payload.get("pages"), 1, 1, 10)
+
+            emails, errors = collect(source, **kwargs)
+            return 200, {"source": source, "count": len(emails),
+                         "emails": emails, "errors": errors}
+
+        # ── задачи: SMTP-проверка пачкой ────────────────────────────────
+        #
+        # Отдельно от validate-batch, потому что это ДРУГОЙ разговор. Досетевые
+        # проверки отвечают мгновенно; SMTP на пятьдесят тысяч адресов идёт
+        # часами, и держать соединение всё это время нельзя.
+        if path == "/api/jobs/create":
+            from api.jobs import REGISTRY
+
+            return REGISTRY.create(
+                emails=payload.get("emails"),
+                smtp=bool(payload.get("smtp", True)),
+                proxies=payload.get("proxies"),
+                allow_direct=bool(payload.get("allow_direct")),
+                threads=_bounded(payload.get("threads"), 50, 1, 300),
+                timeout=_bounded(payload.get("timeout"), 10, 1, 120))
+
+        if path == "/api/jobs/status":
+            from api.jobs import REGISTRY
+
+            job = REGISTRY.get(payload.get("job_id"))
+            if job is None:
+                return 404, {"error": "нет такой задачи"}
+            return 200, job.snapshot(with_results=bool(payload.get("results", True)))
+
+        if path == "/api/jobs/cancel":
+            from api.jobs import REGISTRY
+
+            return REGISTRY.cancel(payload.get("job_id"))
 
         return 404, {"error": f"нет такого метода: {path}"}
     except ValueError as exc:

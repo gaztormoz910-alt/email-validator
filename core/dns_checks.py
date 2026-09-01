@@ -36,6 +36,30 @@ from core.mail_constants import (DNSBL_ZONES, SPAMHAUS_ZONE,
                                  _dkim_selectors_for)
 
 
+def system_resolvers():
+    """Резолверы, которые прописаны в самой системе.
+
+    Нужны для Spamhaus. Зона не обслуживает КРУПНЫЕ публичные резолверы —
+    Google и Cloudflare получают от неё код отказа или NXDOMAIN, — но это не
+    значит, что своего резолвера нет. У большинства машин в списке лежит ещё и
+    резолвер провайдера или Quad9, а их зона обслуживает.
+
+    Замерено на машине владельца: 1.1.1.1 отвечает 127.255.255.254 (отказ),
+    8.8.8.8 — NXDOMAIN на обязательную тестовую запись (тоже отказ), а 9.9.9.9
+    отвечает правильно: 127.0.0.2 числится, 127.0.0.1 нет. То есть крупнейший
+    чёрный список был доступен всё это время, просто его никто не спросил.
+
+    Порядок сохраняется: система знает, кто ближе.
+    """
+    try:
+        import dns.resolver
+
+        found = list(dns.resolver.Resolver().nameservers or [])
+    except Exception:
+        return []
+    return [str(ns).strip() for ns in found if str(ns).strip()]
+
+
 class DnsChecksMixin:
     """MX, PTR, FCrDNS, DNSBL и здоровье домена. Состояние — в NetworkValidator."""
 
@@ -72,18 +96,65 @@ class DnsChecksMixin:
                 return None
             for rdata in answers:
                 code = rdata.to_text()
+                seen_codes.append(code)
                 if code.startswith('127.0.0.') or code.startswith('127.0.1.'):
                     return True
             return False
 
+        seen_codes = []
         must_be_listed = listed(SPAMHAUS_SANITY_LISTED)
         must_be_clean = listed(SPAMHAUS_SANITY_CLEAN)
+        self._spamhaus_codes = list(seen_codes)
 
         # Контракт: тестовая запись обязана числиться, чистая — нет.
         # Любой другой исход означает, что зона нам не отвечает как надо.
         self._spamhaus_ok = (must_be_listed is True and must_be_clean is False)
         self._spamhaus_resolver = resolver if self._spamhaus_ok else None
         return bool(self._spamhaus_ok)
+
+    def spamhaus_refusal_reason(self):
+        """Почему зона не прошла контракт — словами, а не молчанием.
+
+        У Spamhaus есть отдельный код отказа: 127.255.255.x означает «запрос
+        пришёл с резолвера, который я не обслуживаю» — это публичные DNS вроде
+        8.8.8.8 и резолверы крупных провайдеров. Отличать этот случай от
+        «зона недоступна» важно, потому что чинятся они по-разному: первый —
+        своим резолвером, второй — сетью.
+
+        Измерено: с публичного резолвера ZEN отвечает 127.255.255.254 и на
+        127.0.0.2, и на 127.0.0.1, то есть контракт не проходит НИКОГДА, и
+        крупнейший чёрный список молчит, а владелец об этом не знает.
+        """
+        codes = getattr(self, "_spamhaus_codes", None) or []
+        refusals = [c for c in codes if c.startswith("127.255.255.")]
+        if refusals:
+            return ("зона отказала резолверу (код %s): Spamhaus не обслуживает "
+                    "публичные DNS и резолверы крупных провайдеров. Нужен свой "
+                    "рекурсивный резолвер — например, на том же VPS, где стоит "
+                    "прокси." % refusals[0])
+        if not codes:
+            return ("зона не ответила вовсе: недоступна сеть, резолвер или сам "
+                    "Spamhaus.")
+        return ("зона ответила не по контракту (%s): 127.0.0.2 обязана "
+                "числиться, 127.0.0.1 — нет." % ", ".join(sorted(set(codes))))
+
+    def autodetect_spamhaus_resolver(self, candidates=None):
+        """Ищет резолвер, который зона согласна обслуживать. Возвращает его или None.
+
+        Пробуем по одному и проверяем санитарным контрактом каждый: список из
+        пяти адресов, поданный разом, дал бы ответ первого попавшегося, а нам
+        нужен тот, который отвечает ПРАВИЛЬНО.
+
+        Ничего не найдено — молчим и работаем без Spamhaus, как раньше. Это
+        седьмая зона сверху, а не условие работы.
+        """
+        for resolver in (candidates if candidates is not None else system_resolvers()):
+            try:
+                if self.set_spamhaus_resolver([resolver]):
+                    return resolver
+            except Exception:
+                continue
+        return None
 
     def _spamhaus_lists(self, ip):
         """True/False по Spamhaus, None — не спрашивали или не смогли.

@@ -768,11 +768,30 @@ class ValidationPipeline:
                         self.callbacks['on_log'](
                             f"[PROXY] Профиль... {done}/{total} | с PTR: {ptr_n} | в списках: {bl_n}", "info")
 
+                    # Профили, снятые в прошлый раз, подставляются сразу.
+                    #
+                    # Снятие — это выходной IP через EHLO у Gmail, обратный
+                    # DNS, семь чёрных списков и три прямые пробы почтовиков
+                    # НА КАЖДЫЙ прокси. На пуле в несколько сотен — минуты
+                    # простоя перед каждой работой, а выходной адрес за сутки
+                    # обычно не меняется. Заново снимаем только тех, кого не
+                    # помним; фоновое обновление всё равно идёт раз в десять
+                    # минут и поправит то, что успело устареть.
+                    remembered = self.network.recall_proxy_profiles(live_proxies)
+                    fresh_needed = [p for p in live_proxies if p not in remembered]
+                    if remembered:
+                        self.callbacks['on_log'](
+                            "[PROXY] Из прошлого запуска помню профиль %d прокси "
+                            "из %d — заново проверяю только остальных."
+                            % (len(remembered), len(live_proxies)), "info")
+
                     # Потоки берём из ползунка: раньше здесь было жёсткое 30, и
                     # список в несколько тысяч прокси профилировался часами.
-                    proxy_profiles = profile_proxies(
-                        live_proxies, timeout=timeout, workers=threads,
-                        progress_callback=on_prof)
+                    proxy_profiles = dict(remembered)
+                    if fresh_needed:
+                        proxy_profiles.update(profile_proxies(
+                            fresh_needed, timeout=timeout, workers=threads,
+                            progress_callback=on_prof))
 
                     vals = list(proxy_profiles.values())
                     ptr_n = sum(1 for v in vals if v["has_ptr"] is True)
@@ -879,15 +898,46 @@ class ValidationPipeline:
                     f"[INFO] Spamhaus ZEN подключён через {', '.join(resolvers)} — "
                     "санитарный контракт зоны пройден.", "info")
             else:
+                # Причина называется словами. «Не прошла контракт» не говорит
+                # владельцу, что чинить: отказ резолверу и недоступная сеть
+                # лечатся по-разному.
+                try:
+                    why = self.network.spamhaus_refusal_reason()
+                except Exception:
+                    why = "зона не прошла санитарный контракт"
                 self.callbacks['on_log'](
-                    f"[DEAD] Spamhaus ZEN не отвечает через {', '.join(resolvers)}: "
-                    "зона не прошла санитарный контракт (127.0.0.2 обязана "
-                    "числиться, 127.0.0.1 — нет). Проверяю без неё.", "dead")
-        elif not resolvers:
-            self.callbacks['on_log'](
-                "[INFO] Spamhaus ZEN не опрашивается: нужен свой резолвер, "
-                "публичные он не обслуживает. Укажите его в data/settings.json "
-                "полем spamhaus_resolvers.", "info")
+                    "[DEAD] Spamhaus ZEN не опрашивается через %s: %s "
+                    "Проверяю без него — это значит, что крупнейший чёрный "
+                    "список молчит, и репутация IP оценивается по семи "
+                    "остальным зонам." % (", ".join(resolvers), why), "dead")
+        elif not resolvers and self.network:
+            # Резолвер не задан — не повод молчать. Зона не обслуживает
+            # КРУПНЫЕ публичные резолверы, но в системном списке обычно лежит
+            # ещё и резолвер провайдера или Quad9, а их она обслуживает.
+            #
+            # Замерено на машине владельца: 1.1.1.1 отвечает кодом отказа
+            # 127.255.255.254, 8.8.8.8 — NXDOMAIN даже на обязательную
+            # тестовую запись, а 9.9.9.9 отвечает правильно. То есть
+            # крупнейший чёрный список был доступен всё это время — его просто
+            # никто не спросил.
+            found = None
+            try:
+                found = self.network.autodetect_spamhaus_resolver()
+            except Exception:
+                found = None
+            if found:
+                self.callbacks['on_log'](
+                    "[INFO] Spamhaus ZEN подключён сам через системный "
+                    "резолвер %s — санитарный контракт зоны пройден." % found,
+                    "info")
+            else:
+                self.callbacks['on_log'](
+                    "[DEAD] Spamhaus ZEN не опрашивается: ни один резолвер из "
+                    "системных зона не обслуживает. Крупнейший чёрный список "
+                    "сейчас не участвует в оценке — репутация IP считается по "
+                    "семи остальным зонам. Свой резолвер указывается в "
+                    "data/settings.json полем spamhaus_resolvers; проще всего "
+                    "поднять его на том же VPS, где стоит прокси.", "dead")
 
         if proxy_profiles:
             self.network.set_proxy_profiles(proxy_profiles)

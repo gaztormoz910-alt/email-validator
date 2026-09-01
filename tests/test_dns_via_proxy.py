@@ -43,11 +43,21 @@ class TestIDNSyntax(unittest.TestCase):
         self.assertIsNone(to_ascii_domain(None))
 
     def test_non_ascii_local_is_unknown_not_invalid(self):
-        # RCPT TO с такой локальной частью не отправить (нужен SMTPUTF8),
-        # но хоронить адрес за это нельзя.
+        # Требование здесь одно и оно не менялось: за не-ASCII имя ящика
+        # адрес хоронить нельзя.
+        #
+        # А вот КАКОЙ именно недоказанный статус получится — сместилось, и
+        # осознанно. Раньше проверка разворачивала такой адрес на подходе и
+        # всегда отвечала unknown. Теперь он доходит до сервера: если тот
+        # объявил SMTPUTF8, будет настоящий вердикт, если не объявил —
+        # unknown из самой сессии, а здоровый DNS домена поднимает его до
+        # risky (это давнее правило: домен точно почтовый, просто ответа нет).
+        #
+        # Поэтому проверяется класс ответа, а не одно слово: invalid здесь
+        # быть не может ни при каких обстоятельствах.
         v = NetworkValidator(timeout=2)
         res = v.check_email("иван@почта.рф")
-        self.assertEqual(res["status"], "unknown")
+        self.assertIn(res["status"], ("unknown", "risky", "valid"))
         self.assertNotEqual(res["status"], "invalid")
 
 
