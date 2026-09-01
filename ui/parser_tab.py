@@ -283,21 +283,6 @@ class ParserTabMixin:
     def safe_parser_log(self, message, tag="info"):
         self.log_queue.put((message, tag))
 
-    def _update_parser_log(self, message, tag):
-        self.parser_terminal_box.configure(state="normal")
-        self.parser_terminal_box.insert("end", message + "\n", tag)
-        
-        # Keep only the last 1000 lines to prevent Tkinter from freezing
-        try:
-            line_count = int(self.parser_terminal_box.index('end-1c').split('.')[0])
-            if line_count > 1000:
-                self.parser_terminal_box.delete("1.0", f"{line_count - 1000}.0")
-        except Exception:
-            pass
-            
-        self.parser_terminal_box.see("end")
-        self.parser_terminal_box.configure(state="disabled")
-
     def safe_update_parser_stats(self, dorks_tot, dorks_done, pages, snippets, emails):
         self.stats_queue.put((dorks_tot, dorks_done, pages, snippets, emails))
 
@@ -323,10 +308,6 @@ class ParserTabMixin:
 
     def safe_add_parser_result(self, email, dork, *args, **kwargs):
         self.result_queue.put((email, dork))
-
-    def _add_parser_result_ui(self, email, dork, *args, **kwargs):
-        self.parser_results_data.append({"email": email, "dork": dork})
-        self.parser_tree.insert("", "end", values=(email, dork))
 
     def on_parser_complete(self, aborted=False):
         self._ui_call(self._reset_ui_after_parser_complete)

@@ -276,15 +276,3 @@ class EmailCleaner:
     # Алиас для обратной совместимости (pipeline.py вызывает clean_email)
     def clean_email(self, email: str) -> str:
         return self.correct_and_normalize(email)
-
-    def process_batch(self, raw_emails_dict: dict) -> dict:
-        """
-        Берет словарь почт {email: data}, применяет авто-коррекцию и 
-        удаляет дубликаты, возвращая очищенный словарь.
-        """
-        cleaned_emails = {}
-        for raw, data in raw_emails_dict.items():
-            corrected = self.correct_and_normalize(raw)
-            if corrected and corrected not in cleaned_emails: # Добавляем только если домен прошел проверку
-                cleaned_emails[corrected] = data
-        return cleaned_emails

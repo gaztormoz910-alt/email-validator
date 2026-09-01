@@ -645,7 +645,6 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
             self._set_sidebar_state("normal")
             return
 
-        import itertools
         actual_proxies = itertools.chain([first_proxy], proxy_stream)
 
         threads = int(self.threads_slider.get())
@@ -1053,20 +1052,6 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
     # Потолок на копирование в буфер обмена. Больше в него всё равно не
     # вставляют, а Tk на многомиллионной строке подвешивает окно.
     CLIPBOARD_LIMIT = 200_000
-
-    def _get_filtered_results(self, limit=None):
-        """Выборка списком. Только для маленьких выборок и тестов.
-
-        Для ПОКАЗА и для ЭКСПОРТА этим пользоваться нельзя: здесь
-        материализуется вся база. Таблица ходит в result_store.page(),
-        который обрывается на нужной странице, а выгрузка — в
-        result_store.iter_matching(), который отдаёт строки порциями.
-        """
-        stream = self.result_store.iter_matching(
-            self._selected_groups(), min_score=self._get_min_score())
-        if limit:
-            return list(itertools.islice(stream, limit))
-        return list(stream)
 
     def export_results(self):
         if not len(self.result_store):
