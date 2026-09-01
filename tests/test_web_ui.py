@@ -399,9 +399,22 @@ def test_parser_sources_are_kept_apart_from_the_validator():
 
 
 def test_parser_unknown_source_kind_is_refused():
+    """Незнакомое имя поля — ОТКАЗ С ПРИЧИНОЙ, а не исключение.
+
+    Требование то же самое и не менялось: молча свалить список в первое
+    попавшееся ведро нельзя, так адреса однажды уехали в поле прокси. А вот
+    способ отказать переписан. Раньше отсюда летел ValueError; он доходил до
+    моста, тот отвечал пятисоткой с текстом «ValueError: неизвестный вид
+    источника», и страница показать такое не умеет — для владельца это
+    выглядело как «нажал и ничего».
+    """
     api = make_api()
-    with pytest.raises(ValueError):
-        api.paste({"kind": "чепуха", "text": "x"})
+    answer = api.paste({"kind": "чепуха", "text": "x"})
+
+    assert answer.get("error"), "отказали молча"
+    assert "поле" in answer["error"].lower(), answer["error"]
+    for bucket in api._sources.values():
+        assert bucket == [], "запись всё-таки попала не в своё поле"
 
 
 def test_parser_needs_dorks_but_not_proxies():

@@ -172,10 +172,6 @@ class LongTermMemory:
             commit=True)
         return done is not None
 
-    def catchall_count(self):
-        row = self._query("SELECT COUNT(*) FROM catchall", fetch="one")
-        return int(row[0]) if row and row is not True else 0
-
     # ─────────────────────────────────────────────────── профиль прокси
     def profiles_load(self, proxies):
         """{прокси: профиль} для тех из списка, что помним и не протухли.
@@ -301,18 +297,3 @@ class LongTermMemory:
                 return int(cursor.rowcount or 0)
             except Exception:
                 return 0
-
-    def loaded_ips(self, at_least=1):
-        """{IP: сколько} по сегодняшнему дню — для отчёта о нагрузке."""
-        rows = self._query(
-            "SELECT exit_ip, used FROM ip_load WHERE day = ?",
-            (_today(),), fetch="all")
-        if not rows or rows is True:
-            return {}
-        return {ip: int(used) for ip, used in rows if int(used) >= at_least}
-
-    def forget_everything(self):
-        """Полная очистка — для кнопки «проверить всё заново» и для тестов."""
-        for table in ("catchall", "proxy_profile", "ip_load"):
-            self._query("DELETE FROM %s" % table, commit=True)
-        return True

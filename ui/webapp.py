@@ -198,13 +198,25 @@ class ValidatorApi:
     _BUSY_REFUSAL = ("Идёт проверка — менять исходные данные нельзя. "
                      "Остановите прогон или дождитесь конца.")
 
+    #: Что отвечаем на запрос, который не разобрали. Отдельной строкой,
+    #: потому что её ждут сразу три обработчика и она должна быть одинаковой.
+    _BAD_KIND = ("Не понял, куда это класть: поле не названо или названо "
+                 "неизвестно как. Выберите поле и попробуйте ещё раз.")
+
     def _bucket(self, kind):
-        """Ведро источников по имени. Незнакомое имя — не повод молча
-        свалить список в прокси, как было раньше."""
-        try:
-            return self._sources[kind]
-        except KeyError:
-            raise ValueError("неизвестный вид источника: %r" % (kind,))
+        """Ведро источников по имени, либо None, если имя незнакомое.
+
+        Раньше отсюда летело исключение. Оно доходило до моста, тот отвечал
+        пятисоткой с текстом «ValueError: неизвестный вид источника», и для
+        владельца это выглядело как «нажал и ничего»: страница показать такое
+        не умеет. Незнакомое имя — это ОТКАЗ с причиной, а не поломка.
+
+        Молча сваливать список в первое попавшееся ведро тоже нельзя: так
+        адреса однажды уехали в поле прокси.
+        """
+        if not isinstance(kind, str):
+            return None
+        return self._sources.get(kind)
 
     # ---------------------------------------------------- от движка ----
     def _on_log(self, text, tag="info"):
@@ -258,8 +270,11 @@ class ValidatorApi:
 
     def choose(self, payload):
         """Выбор файлов для базы или для прокси."""
+        payload = payload if isinstance(payload, dict) else {}
         kind = payload.get("kind")
         target = self._bucket(kind)
+        if target is None:
+            return dict(self.sources(), error=self._BAD_KIND)
         if self._busy():
             return dict(self.sources(), error=self._BUSY_REFUSAL)
 
@@ -322,8 +337,11 @@ class ValidatorApi:
 
     def paste(self, payload):
         """Список, вставленный текстом вместо файла."""
+        payload = payload if isinstance(payload, dict) else {}
         kind = payload.get("kind")
         bucket = self._bucket(kind)
+        if bucket is None:
+            return dict(self.sources(), error=self._BAD_KIND)
         if self._busy():
             return dict(self.sources(), error=self._BUSY_REFUSAL)
 
@@ -343,7 +361,10 @@ class ValidatorApi:
         return self.sources()
 
     def clear(self, payload):
+        payload = payload if isinstance(payload, dict) else {}
         bucket = self._bucket(payload.get("kind"))
+        if bucket is None:
+            return dict(self.sources(), error=self._BAD_KIND)
         if self._busy():
             return dict(self.sources(), error=self._BUSY_REFUSAL)
         bucket.clear()
@@ -635,8 +656,14 @@ class ValidatorApi:
 
     def page(self, payload):
         """Страница таблицы. Берётся из того же хранилища, что и раньше."""
+        payload = payload if isinstance(payload, dict) else {}
         picked = self._filters(payload)
-        number = max(1, int(payload.get("page") or 1))
+        # Номер страницы приходит со страницы и может быть чем угодно. Голый
+        # int() падает на «abc», и таблица не показывается вовсе.
+        try:
+            number = max(1, int(payload.get("page") or 1))
+        except (TypeError, ValueError):
+            number = 1
 
         total = self.store.matching_count(filters=picked)
         pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
