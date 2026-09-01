@@ -44,11 +44,31 @@ class TestTransientDetection(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.assertFalse(_is_transient_failure("unknown", reason))
 
-    def test_only_unknown_status_is_retried(self):
-        # Вердикт уже есть — повторять нечего, иначе прогон удвоится впустую
-        for status in ("valid", "invalid", "risky", "catchall", "greylisted"):
+    def test_verdicts_are_not_retried(self):
+        # Вердикт уже есть — повторять нечего, иначе прогон удвоится впустую.
+        # greylisted тоже не здесь: у него своя очередь и своя выдержка.
+        for status in ("valid", "invalid", "catchall", "greylisted"):
             with self.subTest(status=status):
                 self.assertFalse(_is_transient_failure(status, "Timeout"))
+
+    def test_risky_from_our_own_failure_is_retried(self):
+        """risky бывает двух видов, и это РАЗНЫЕ вещи.
+
+        Отказ по репутации нашего IP приходит как unknown, но шаг
+        «DNS-здоровье» повышает его до risky у любого домена с SPF или
+        DMARC — то есть почти у всякого. Про ящик при этом не сказано
+        ничего, и повтор с другого выходного адреса нужен ровно так же.
+        Пока сюда пускали только unknown, самые восстановимые отказы не
+        повторялись никогда.
+        """
+        assert _is_transient_failure(
+            "risky", "5.7.1 550 Отказ по политике/репутации IP "
+                     "(ящик может существовать) [DNS: SPF=✓, DMARC=✓, DKIM=✗]")
+        # А risky, добытый ответом сервера, повторять нечего: это уже суждение
+        # о ящике, а не о нашем прокси.
+        self.assertFalse(_is_transient_failure(
+            "risky", "Второй ответ противоречит первому: адрес отвергли с "
+                     "одного выхода и приняли с другого."))
 
     def test_unrecognised_reason_is_not_retried(self):
         # Незнакомая причина — не гадаем, повтор стоит времени

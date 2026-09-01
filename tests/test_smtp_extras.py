@@ -318,7 +318,7 @@ def test_utf8_live_answer_comes_from_the_server(monkeypatch):
     v = NetworkValidator(timeout=2)
     seen = {}
 
-    def fake_ping(email, mx_records, control_probe=False):
+    def fake_ping(email, mx_records, control_probe=False, **kwargs):
         seen["email"] = email
         return {"status": "unknown",
                 "reason": "Не-ASCII имя ящика, а сервер не объявил SMTPUTF8 — проверить нечем"}

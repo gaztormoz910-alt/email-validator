@@ -457,6 +457,21 @@ class ProxyPoolMixin:
             return ""
         return (self._proxy_profiles.get(proxy) or {}).get("exit_ip") or ""
 
+    def proxy_still_usable(self, proxy):
+        """Тот же прокси, если он ещё в строю, иначе None.
+
+        Нужен повтору после серого списка: сервер ждёт возврата ТОЙ ЖЕ тройки
+        (наш IP, наш отправитель, получатель), и подменять выход при повторе
+        значит начинать выдержку заново. Но если прокси за это время выбыл,
+        настаивать не на чем — вызывающий выберет обычным порядком.
+        """
+        if not proxy or not isinstance(proxy, str):
+            return None
+        with self._proxy_score_lock:
+            if proxy in self._proxy_banned or proxy not in self.proxies:
+                return None
+        return proxy
+
     def _pick_best_proxy(self, need_ptr=False, need_clean=False, want_country="",
                          avoid_exit_of=None):
         """Выбирает живой прокси с наивысшим health score (п.8).

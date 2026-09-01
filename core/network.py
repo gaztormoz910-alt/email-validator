@@ -25,7 +25,8 @@ from core.mail_constants import (                                 # noqa: E402,F
     YAHOO_DOMAINS, AOL_DOMAINS, NEEDS_CLEAN_IP_DOMAINS, NICHE_FREE_DOMAINS,
     MICROSOFT_DOMAINS, LEGIT_HELO_NAMES, DNSBL_ZONES, SPAMHAUS_ZONE,
     SPAMHAUS_SANITY_LISTED, SPAMHAUS_SANITY_CLEAN,
-    PROXY_MAX_CONSECUTIVE_FAILS, MAIL_FROM_POOL, _dkim_selectors_for,
+    PROXY_MAX_CONSECUTIVE_FAILS, MAIL_FROM_POOL, mail_from_for,
+    _dkim_selectors_for,
     SECURITY_GATEWAY_MX, _DKIM_BY_MX, _DKIM_FALLBACK,
 )
 
@@ -429,9 +430,10 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         if proxy is None and self.has_proxies_configured():
             return {"status": "unknown", "reason": "All Proxies Dead (прямое соединение запрещено)"}
 
-        # Ротация MAIL FROM (п.3.2)
-        from_addr = from_email or random.choice(MAIL_FROM_POOL)
+        # Ротация MAIL FROM (п.3.2). Стабильная для домена: см. mail_from_for —
+        # случайный отправитель ломал тройку серого списка.
         domain = email.split("@")[1].lower() if "@" in email else ""
+        from_addr = from_email or mail_from_for(domain)
         server = None
 
         # Пауза перед запросом. Растёт, если этот сервер уже отвечал 421.
@@ -656,8 +658,8 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             fail = {"status": "unknown", "reason": "All Proxies Dead (прямое соединение запрещено)"}
             return [dict(fail) for _ in addresses]
 
-        from_addr = from_email or random.choice(MAIL_FROM_POOL)
         domain = addresses[0].split("@")[1].lower() if addresses and "@" in addresses[0] else ""
+        from_addr = from_email or mail_from_for(domain)
         results = []
         server = None
 
@@ -714,12 +716,14 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         обязательный пункт стандарта — и его отказ РЕАЛЬНОМУ адресу после
         этого не доказывает ничего: так же он отвечает всем подряд.
 
-        True  — postmaster принят, вердиктам сервера можно верить
-        False — postmaster отвергнут, 550 этого сервера ничего не значит
+        True  — обязательный адрес принят, вердиктам сервера можно верить
+        False — обязательный адрес отвергнут, 550 этого сервера ничего не значит
         None  — спросить не удалось (в этом случае поведение прежнее)
 
-        Стоит одной сессии на домен и кэшируется. Спрашиваем только перед тем,
-        как похоронить адрес: на остальных путях это лишняя трата.
+        Обязательных адреса два: postmaster@ и abuse@ (RFC 2142 §4). Второй
+        спрашивается только тогда, когда первый ответа не дал — но в той же
+        сессии, поэтому цена вопроса прежняя: одна сессия на домен, и та
+        только перед тем, как похоронить адрес. Результат кэшируется.
         """
         if not domain:
             return None
@@ -727,17 +731,29 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             if domain in self._postmaster_cache:
                 return self._postmaster_cache[domain]
 
-        results = self._probe_recipients([f"postmaster@{domain}"], mx_record,
+        # Спрашиваем ДВА обязательных адреса в ОДНОЙ сессии: postmaster@
+        # (RFC 5321 §4.5.1) и abuse@ (RFC 2142 §4). Второй RCPT в уже
+        # открытой сессии стоит один пакет — сессия по-прежнему одна на домен.
+        #
+        # Нужен он затем, что на одной пробе вывод срывался чаще, чем
+        # получался: таймаут, мёртвый прокси, отказ по репутации — и функция
+        # возвращала None, а вызывающий после этого верил тому самому 550,
+        # ради проверки которого сюда и пришёл. Вопрос у обоих адресов один:
+        # отвечает ли этот сервер «получателя нет» вообще всем подряд.
+        results = self._probe_recipients([f"postmaster@{domain}",
+                                          f"abuse@{domain}"], mx_record,
                                          proxy=self._pick_best_proxy())
-        if not results:
-            return None
-        status = results[0].get("status")
-        if status in ("valid", "catchall"):
-            verdict = True
-        elif status == "invalid":
-            verdict = False
-        else:
-            # Таймаут, мёртвый прокси, отказ по репутации — вывода нет.
+        verdict = None
+        for result in results or []:
+            status = (result or {}).get("status")
+            if status in ("valid", "catchall"):
+                verdict = True
+                break
+            if status == "invalid":
+                verdict = False
+                break
+            # Иначе вывода нет — спрашиваем следующий обязательный адрес.
+        if verdict is None:
             # Не кэшируем: иначе один сбой навсегда лишил бы домен проверки.
             return None
 
@@ -806,7 +822,8 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             pass
 
     def stealth_smtp_ping(self, email: str, mx_records: list,
-                          control_probe=False) -> dict:
+                          control_probe=False, avoid_exit_of=None,
+                          prefer_exit_of=None) -> dict:
         """
         Умный SMTP-пинг с повторными попытками, мульти-MX фоллбэком (п.3.1),
         и кастомной логикой для проблемных почтовиков.
@@ -821,6 +838,14 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         # для них берём только PTR-прокси, а остальным доменам PTR не нужен.
         needs_ptr = domain in YAHOO_DOMAINS or domain in AOL_DOMAINS
         needs_clean = domain in NEEDS_CLEAN_IP_DOMAINS
+
+        # Это ПОВТОР после неудачи: берём по возможности чистый выход, а не
+        # просто другой. Самая частая причина попасть сюда — отказ по
+        # репутации, и менять грязный адрес на такой же грязный значит
+        # получить тот же ответ вторым заходом. Требование мягкое: если
+        # чистых в пуле нет, выбор вернётся к обычному (см. _pick_best_proxy).
+        if avoid_exit_of:
+            needs_clean = True
 
         # Страна домена получателя: при прочих равных берём прокси оттуда же.
         # Проверять web.de через бразильский адрес — лишний повод для отказа.
@@ -868,11 +893,32 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
                     }
                     break
 
-                proxy = self._pick_best_proxy(need_ptr=needs_ptr,
-                                              need_clean=needs_clean,
-                                              want_country=want_country)
+                # Повтор после СЕРОГО СПИСКА идёт тем же выходом намеренно.
+                # Сервер ждёт возврата той же тройки (IP, отправитель,
+                # получатель); прийти с другого адреса — значит начать
+                # выдержку заново и не выйти из неё никогда.
+                proxy = None
+                if prefer_exit_of and attempt == 0:
+                    proxy = self.proxy_still_usable(prefer_exit_of)
+                if proxy is None:
+                    proxy = self._pick_best_proxy(need_ptr=needs_ptr,
+                                                  need_clean=needs_clean,
+                                                  want_country=want_country,
+                                                  avoid_exit_of=avoid_exit_of)
+                if proxy is None and avoid_exit_of and self.has_proxies_configured():
+                    # Другого выхода в пуле нет. Это НЕ повод отвечать «прокси
+                    # кончились»: они живы, просто все ведут в тот же адрес.
+                    # Повтор тем же выходом хуже нового, но несравнимо лучше
+                    # выдуманного Unknown — живой ящик остался бы непроверенным.
+                    proxy = self._pick_best_proxy(need_ptr=needs_ptr,
+                                                  need_clean=needs_clean,
+                                                  want_country=want_country)
                 result = self._do_single_ping(email, mx_record, proxy=proxy,
                                               control_probe=control_probe)
+                # Чей это ответ. Нужно повтору: отложенный адрес переспрашивать
+                # ТЕМ ЖЕ выходом бессмысленно — он только что не смог.
+                if proxy:
+                    result["proxy"] = proxy
 
                 # Живой ящик подтверждён — дальше искать нечего
                 if result["status"] == "valid":
@@ -1041,7 +1087,8 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         with self.catchall_lock:
             return sorted(self._tarpit_domains)
 
-    def check_email(self, email: str) -> dict:
+    def check_email(self, email: str, avoid_exit_of=None,
+                    prefer_exit_of=None) -> dict:
         """Полная сетевая проверка почты с RFC-валидацией, Catch-All детектором и DNS-здоровьем."""
 
         # Шаг 0: Проверка синтаксиса (п.1.3). IDN проходит — см. validate_email_syntax.
@@ -1078,8 +1125,11 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         # RFC и не существует физически.
         #
         # Два исхода трактуются ПО-РАЗНОМУ, и это принципиально:
-        #   impossible — такого имени провайдер не выдавал никогда, ящика нет.
-        #                Отбраковываем без единого сетевого запроса.
+        #   impossible — адресовать нечего: имя ящика пустое. Это единственный
+        #                случай, когда вердикт выносится без сети. Предел
+        #                ДЛИНЫ сюда больше не относится — он списан с чужой
+        #                страницы помощи, а не получен от сервера
+        #                (см. core/local_rules.py).
         #   unlikely   — нынешние правила нарушены, но старые аккаунты могли
         #                быть заведены до их введения. Такой адрес проверяем
         #                по сети как обычно: ответ сервера главнее правила.
@@ -1120,7 +1170,9 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         # подключения и не объяснит причину.
         gateway = security_gateway(mx_records)
         if gateway:
-            result = self.stealth_smtp_ping(probe_email, mx_records)
+            result = self.stealth_smtp_ping(probe_email, mx_records,
+                                            avoid_exit_of=avoid_exit_of,
+                                            prefer_exit_of=prefer_exit_of)
             if result["status"] == "valid":
                 result["status"] = "catchall"
                 result["reason"] = (f"Catch-All: почтовый шлюз {gateway} "
@@ -1145,7 +1197,9 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             is_catchall = self.is_catch_all_domain(domain, primary_mx)
             if is_catchall:
                 # Для Catch-All доменов: всё равно делаем пинг, но помечаем результат
-                result = self.stealth_smtp_ping(probe_email, mx_records)
+                result = self.stealth_smtp_ping(probe_email, mx_records,
+                                                avoid_exit_of=avoid_exit_of,
+                                                prefer_exit_of=prefer_exit_of)
                 if result["status"] == "valid":
                     # Сервер принял — но домен Catch-All, так что это ненадёжно
                     result["status"] = "catchall"
@@ -1173,7 +1227,9 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         if skip_catchall:
             control = self._time_to_recheck(domain)
         result = self.stealth_smtp_ping(probe_email, mx_records,
-                                        control_probe=control)
+                                        control_probe=control,
+                                        avoid_exit_of=avoid_exit_of,
+                                        prefer_exit_of=prefer_exit_of)
 
         # Гигант, принявший выдуманный адрес, — это не catch-all, а тарпитинг.
         # Называть вещи своими именами здесь важнее обычного: «домен catch-all»
@@ -1186,7 +1242,9 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             with self.catchall_lock:
                 self._tarpit_domains.add(domain)
 
-        # Шаг 4.5: сервер, отвергающий postmaster@, теряет право хоронить адрес.
+        # Шаг 4.5: сервер, отвергающий обязательный адрес, теряет право
+        # хоронить наш. Спрашиваются postmaster@ и abuse@ — оба обязательны и
+        # оба в одной сессии, второй нужен ровно когда первый не ответил.
         #
         # Проверяем ТОЛЬКО перед вердиктом invalid: это одна лишняя сессия на
         # домен, и тратить её на живые адреса незачем. Если сервер нарушает
@@ -1197,7 +1255,8 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             if honored is False:
                 result["status"] = "risky"
                 result["reason"] = ("550, но сервер отвергает и обязательный "
-                                    "postmaster@ — его отказам верить нельзя")
+                                    "адрес (postmaster@ / abuse@) — его "
+                                    "отказам верить нельзя")
                 result["postmaster_honored"] = False
 
         # Шаг 5: DNS-здоровье как бонус (п.2.2 + DKIM)

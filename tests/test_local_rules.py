@@ -45,14 +45,29 @@ class TestRules(unittest.TestCase):
                 self.assertTrue(has_rules(domain))
                 self.assertTrue(provider_of(domain))
 
-    def test_rules_only_two_things_are_impossible(self):
+    def test_rules_only_one_thing_is_impossible(self):
         """Без сети хороним ТОЛЬКО то, где исключений не бывает."""
         empty = check_local_part("@gmail.com")
         self.assertEqual(empty[0], IMPOSSIBLE, "пустое имя должно быть невозможным")
 
+        # Длина сюда БОЛЬШЕ НЕ ОТНОСИТСЯ. Предел взят с нынешней страницы
+        # помощи провайдера, а не из ответа сервера, и приговором служить не
+        # может: одна неточность в таблице выбрасывала живые контакты целым
+        # провайдером сразу.
         too_long = check_local_part("x" * 31 + "@gmail.com")
-        self.assertEqual(too_long[0], IMPOSSIBLE,
-                         "имя длиннее предела провайдера должно быть невозможным")
+        self.assertEqual(too_long[0], UNLIKELY,
+                         "имя длиннее предела — повод усомниться, а не хоронить")
+
+    def test_rules_gmail_dots_do_not_count_towards_length(self):
+        """У Gmail точки ничего не значат — и в длину входить не должны.
+
+        j.o.h.n.d.o.e.s.m.i.t.h@gmail.com — это имя johndoesmith из
+        одиннадцати знаков, записанное через точки. Письмо на него дойдёт.
+        Меря длину по написанию, валидатор объявлял такой адрес мёртвым.
+        """
+        dotted = ".".join("johndoesmithjunior") + "@gmail.com"
+        self.assertGreater(len(dotted.split("@")[0]), 30)
+        self.assertEqual(check_local_part(dotted)[0], OK)
 
     def test_rules_short_name_is_only_unlikely(self):
         """Короткое имя — не приговор: старые аккаунты заводились до правила."""
@@ -199,8 +214,12 @@ class TestNoFalseInvalid(unittest.TestCase):
         """
         # Только НЕИСПРАВИМОЕ. Двойная точка сюда не годится: очистка чинит
         # её намеренно (karl....motiv -> karl.motiv), и это не брак, а ремонт.
+        # Длина в контроле — РОВНО по RFC 5321 §4.5.3.1.1 (64 октета на имя
+        # ящика), а не по таблице провайдера: правило провайдера приговором
+        # больше не служит, и держать его здесь значило бы проверять контролем
+        # то, чего код намеренно не делает.
         for bad in ("@gmail.com", "no-at-sign", "a@b", "a@", "@",
-                    "x" * 31 + "@gmail.com", "ivan@почта", "a b@gmail.com"):
+                    "x" * 65 + "@gmail.com", "ivan@почта", "a b@gmail.com"):
             with self.subTest(bad=bad):
                 cleaned = EmailCleaner().clean_email(bad)
                 rejected = (not cleaned

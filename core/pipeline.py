@@ -42,6 +42,17 @@ _TRANSIENT_MARKERS = (
     # DNS через прокси не ответил — домен не проверен, а не мёртв. Повтор другим
     # прокси обычно решает.
     "dns не удалось спросить",
+    # Отказ по репутации нашего выходного адреса и отказ отправителю. Это
+    # САМЫЕ восстановимые из всех «не проверено»: сервер не сказал про ящик
+    # ничего, он отказал НАМ. Раньше такие адреса не повторялись вовсе —
+    # маркеры были только английские, а формулировки классификатора русские, —
+    # и оставались Unknown навсегда. Теперь повтор идёт с другого выходного
+    # адреса (см. defer/retry_one ниже), то есть ровно тем, что здесь и нужно.
+    "отказ по политике/репутации",
+    "отказ отправителю/релею",
+    # На сервере кончилось место — это про ИХ диск, а не про ящик, и через
+    # несколько минут проходит.
+    "кончилось место",
 )
 
 # Эти Unknown повторять бессмысленно — ответ не изменится от смены прокси
@@ -51,8 +62,20 @@ _PERMANENT_UNKNOWN_MARKERS = (
 
 
 def _is_transient_failure(raw_status: str, reason: str) -> bool:
-    """True, если Unknown вызван временным сбоем и заслуживает повтора."""
-    if raw_status != "unknown":
+    """True, если «не проверено» вызвано сбоем НАШЕЙ стороны и стоит повтора.
+
+    Почему сюда попал ещё и `risky`. Отказ по репутации нашего выходного IP
+    приходит из классификатора как `unknown` — но шаг «DNS-здоровье» в
+    check_email повышает его до `risky`, если у домена есть SPF или DMARC, то
+    есть почти всегда. Это утверждение про ДОМЕН; про ящик по-прежнему не
+    сказано ничего, и повтор с другого выхода нужен ровно так же. Пока сюда
+    пускали только `unknown`, самые восстановимые отказы не повторялись
+    никогда — именно те, где смена выходного адреса и есть весь ответ.
+
+    Настоящие вердикты (`valid`, `invalid`, `catchall`) не повторяются: ответ
+    получен. `greylisted` тоже — у него своя очередь и своя выдержка.
+    """
+    if raw_status not in ("unknown", "risky"):
         return False
     low = (reason or "").lower()
     if any(m in low for m in _PERMANENT_UNKNOWN_MARKERS):
@@ -1044,9 +1067,20 @@ class ValidationPipeline:
         # queue.Queue уже потокобезопасна — отдельный лок не нужен
         greylisted_queue = queue_module.Queue()
 
-        def defer(email, data, is_role, delay=DEFAULT_RETRY_DELAY):
+        def defer(email, data, is_role, delay=DEFAULT_RETRY_DELAY, proxy=None,
+                  reason="", same_exit=False):
+            # Пятым полем едет прокси, через который вышел неудачный ответ.
+            # Повтор ТЕМ ЖЕ выходом — потраченное время: у greylisting запись
+            # ведётся по тройке (IP, отправитель, получатель), а временный
+            # отказ по репутации с того же IP повторится дословно.
+            #
+            # Шестым — причина, по которой адрес сюда попал. Нужна страховке
+            # в конце: если до перепроверки дело не дошло (нажали «Стоп»),
+            # владелец должен увидеть НАСТОЯЩУЮ причину, а не слово
+            # «Greylisted» на адресе, которого серый список не касался.
             greylisted_queue.put((email, data, is_role,
-                                  time.monotonic() + max(0.0, float(delay))))
+                                  time.monotonic() + max(0.0, float(delay)),
+                                  proxy, reason or "", bool(same_exit)))
 
         # Статистика вердиктов по домену. Если у домена МНОГО адресов и ВСЕ до
         # единого ответили 250 OK — это почти наверняка catch-all, даже когда
@@ -1244,7 +1278,12 @@ class ValidationPipeline:
                 # серые списки просят: повтор раньше выдержки получает тот же
                 # серый ответ, то есть тратится впустую. См. core/runstate.py.
                 if raw_status == "greylisted":
-                    defer(email, data, is_role, delay=GREYLIST_RETRY_DELAY)
+                    # ТЕМ ЖЕ выходом: серый список ведётся по тройке
+                    # (IP, отправитель, получатель), и прийти с другого
+                    # адреса значит начать выдержку заново.
+                    defer(email, data, is_role, delay=GREYLIST_RETRY_DELAY,
+                          proxy=res.get("proxy"), reason=res.get("reason", ""),
+                          same_exit=True)
                     return False  # Вердикта нет: адрес ждёт перепроверки
 
                 # Временный отказ (таймаут, сдохший прокси, лимит скорости, блок по
@@ -1252,7 +1291,8 @@ class ValidationPipeline:
                 # же очередь: через паузу лимиты отпускают, прокси восстанавливаются,
                 # и повтор другим прокси часто даёт однозначный ответ вместо Unknown.
                 if _is_transient_failure(raw_status, res.get("reason", "")):
-                    defer(email, data, is_role)
+                    defer(email, data, is_role, proxy=res.get("proxy"),
+                          reason=res.get("reason", ""))
                     return False   # вердикта нет, прогресс не двигаем
 
                 if raw_status == "valid":
@@ -1438,11 +1478,23 @@ class ValidationPipeline:
                 def retry_one(entry):
                     """Обрабатывает один отложенный адрес. Вызывается из пула потоков."""
                     nonlocal retry_count, processed_count
-                    email, data, is_role, _due = entry
+                    (email, data, is_role, _due,
+                     first_proxy, _reason, same_exit) = entry
                     if not self.is_running:
                         return
 
-                    res = self.network.check_email(email)
+                    # Куда идти повтору, зависит от того, ПОЧЕМУ адрес
+                    # отложен. Серый список просит вернуться той же тройкой —
+                    # значит тем же выходом. Временный сбой и отказ по
+                    # репутации, наоборот, повторятся с того же адреса
+                    # дословно — значит любым другим. Если настоять не на
+                    # чем, выбор вернётся к обычному.
+                    if same_exit:
+                        res = self.network.check_email(
+                            email, prefer_exit_of=first_proxy)
+                    else:
+                        res = self.network.check_email(
+                            email, avoid_exit_of=first_proxy)
                     raw_status = res["status"]
                     
                     if raw_status == "valid":
@@ -1556,14 +1608,22 @@ class ValidationPipeline:
         leftover = 0
         while True:
             try:
-                email, data, is_role, _due = greylisted_queue.get_nowait()
+                (email, data, is_role, _due,
+                 _proxy, first_reason, _same) = greylisted_queue.get_nowait()
             except Exception:
                 break
             leftover += 1
             data["validated_at"] = _utc_now().strftime("%Y-%m-%d %H:%M")
+            # Причина — та, с которой адрес сюда попал. Раньше здесь стояло
+            # «Greylisted» для всех подряд, а в очередь попадают ещё таймауты,
+            # мёртвые прокси и отказы по репутации нашего IP. Владелец читает
+            # эту строку, чтобы понять, что чинить: серый список ждут, а
+            # грязный прокси меняют.
+            why = (first_reason or "Перепроверка не выполнена").strip()
+            if "перепроверка не выполнена" not in why.lower():
+                why = f"{why} (перепроверка не выполнена)"
             try:
-                self._emit(
-                    email, "Unknown", "Greylisted (перепроверка не выполнена)", "N/A", data)
+                self._emit(email, "Unknown", why, "N/A", data)
             except Exception:
                 pass
             # Вердикт выдан (пусть и Unknown) — адрес пройден, бар двигаем.
