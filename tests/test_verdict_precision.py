@@ -391,7 +391,13 @@ class TestSecondMx(unittest.TestCase):
         result = v.stealth_smtp_ping("a@b.com", ["mx1", "mx2"])
         self.assertEqual(result["status"], "risky",
                          "серверы разошлись, а адрес всё равно похоронен")
-        self.assertIn("по-разному", result["reason"])
+        # Формулировка переписана вместе с расширением проверки: второе
+        # мнение теперь спрашивается не только у другого MX, но и с другого
+        # выходного IP, и «серверы домена ответили по-разному» перестало быть
+        # правдой для домена с единственным MX. Требование то же: причина
+        # должна называть РАСХОЖДЕНИЕ, а не прятать его за словом «risky».
+        self.assertIn("противоречит", result["reason"])
+        self.assertIn("может существовать", result["reason"])
 
     def test_second_mx_silence_leaves_the_verdict(self):
         """Молчание второго сервера — не несогласие."""

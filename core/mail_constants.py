@@ -108,13 +108,23 @@ SPAMHAUS_SANITY_CLEAN = '1.0.0.127'       # обязана НЕ числитьс
 PROXY_MAX_CONSECUTIVE_FAILS = 3
 
 # Пул правдоподобных адресов для ротации MAIL FROM (п.3.2)
+# Обратные адреса для команды MAIL FROM.
+#
+# У каждого домена здесь ДОЛЖНА быть настоящая MX-запись. Раньше половину пула
+# составляли example.com, example.net и example.org — замерено: у всех трёх
+# Null MX (RFC 7505), то есть домен сам объявляет «почту не принимаю». RFC 7505
+# §4 прямо велит отвергать такого отправителя кодом 550, и строгий сервер так
+# и делает: до вопроса о ЯЩИКЕ дело не доходит, адрес остаётся без вердикта.
+#
+# Gmail и Яндекс их пропускают — проверено, — но настраивать проверку по двум
+# самым терпимым серверам значит терять ответы на всех остальных.
 MAIL_FROM_POOL = [
-    'check@example.com',       # RFC 2606 — зарезервирован, нет SPF
-    'verify@example.net',      # RFC 2606 — зарезервирован, нет SPF
-    'test@example.org',        # RFC 2606 — зарезервирован, нет SPF
-    'noreply@mail.com',        # Минимальный SPF (~all)
-    'check@email.com',         # Минимальный SPF (~all)
-    'verify@usa.com',          # Минимальный SPF (~all)
+    "check@mail.com",
+    "verify@email.com",
+    "noreply@usa.com",
+    "check@gmx.com",
+    "verify@post.com",
+    "noreply@writeme.com",
 ]
 
 # TLD: либо обычные буквы, либо punycode-зона IDN (xn--p1ai для .рф, xn--80asehdb
