@@ -890,7 +890,7 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
                 if result["status"] == "invalid":
                     confirmed = self._confirm_invalid_on_other_mx(
                         email, mx_record, mx_records, needs_ptr, needs_clean,
-                        want_country, deadline)
+                        want_country, deadline, first_proxy=proxy)
                     if confirmed is None:
                         return result            # сверить не с чем — приговор в силе
                     if confirmed:
@@ -898,8 +898,9 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
                     # Серверы разошлись: хоронить адрес нельзя.
                     return {
                         "status": "risky",
-                        "reason": ("Серверы домена ответили по-разному: один отверг "
-                                   "адрес, другой принял. Ящик может существовать."),
+                        "reason": ("Второй ответ противоречит первому: адрес "
+                                   "отвергли с одного выхода и приняли с "
+                                   "другого. Ящик может существовать."),
                         "smtp_banner": result.get("smtp_banner", ""),
                         "has_starttls": result.get("has_starttls"),
                         "server_outdated": result.get("server_outdated", False),
@@ -967,25 +968,47 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
 
     def _confirm_invalid_on_other_mx(self, email, decided_on, mx_records,
                                      needs_ptr, needs_clean, want_country,
-                                     deadline):
-        """Спрашивает ДРУГОЙ MX домена о том же адресе.
+                                     deadline, first_proxy=None):
+        """Второе мнение о приговоре: другой сервер ЛИБО другой выходной IP.
 
-        True  — второй сервер тоже отверг, приговор подтверждён;
-        False — второй сервер принял, значит хоронить адрес нельзя;
-        None  — сверить не с чем (один MX) или не успели по дедлайну.
+        True  — подтверждено, ящика действительно нет;
+        False — второй ответ говорит обратное, хоронить адрес нельзя;
+        None  — сверить не с чем: некому спросить или не успели по дедлайну.
 
-        Стоит одного подключения и только там, где иначе адрес был бы
-        выброшен насовсем. На valid не тратится вовсе.
+        Две оси, и обе нужны.
+
+        ПО СЕРВЕРАМ. У домена бывает несколько MX, настроенных по-разному:
+        запасной узел часто не знает списка ящиков и отвечает 550 на всё
+        подряд.
+
+        ПО ВЫХОДНОМУ IP. Это добавлено позже и закрывает дыру, которая была
+        больше первой: у yandex.ru, mail.ru и почти всей корпоративной почты
+        MX ОДИН, и подтверждать приговор было нечем — второе мнение не
+        спрашивалось вовсе. А отказ по репутации нашего адреса выглядит для
+        нас точно так же, как «ящика нет»: повтори мы его с того же IP, он бы
+        подтвердил сам себя.
+
+        Поэтому спрашиваем ВСЕГДА с другого выходного адреса, а сервер берём
+        другой, если он есть. Если другого IP нет — второго мнения нет, и это
+        честное None, а не молчаливое согласие.
         """
-        others = [mx for mx in (mx_records or []) if mx != decided_on]
-        if not others:
-            return None
         if time.monotonic() > deadline:
             return None
 
+        # Прокси с ДРУГИМ выходным адресом. Без него спрашивать бессмысленно.
         proxy = self._pick_best_proxy(need_ptr=needs_ptr, need_clean=needs_clean,
-                                      want_country=want_country)
-        second = self._do_single_ping(email, others[0], proxy=proxy)
+                                      want_country=want_country,
+                                      avoid_exit_of=first_proxy)
+        if first_proxy and proxy is None:
+            return None          # другого выхода нет — сверить не с чем
+
+        # Сервер по возможности другой: две независимые оси лучше одной.
+        others = [mx for mx in (mx_records or []) if mx != decided_on]
+        target = others[0] if others else decided_on
+        if not others and not first_proxy:
+            return None          # ни другого MX, ни другого IP — сверять нечем
+
+        second = self._do_single_ping(email, target, proxy=proxy)
         status = second.get("status")
         if status == "invalid":
             return True
