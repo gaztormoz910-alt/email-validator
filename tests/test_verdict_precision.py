@@ -44,7 +44,9 @@ class FakeSMTP:
     def has_extn(self, name):
         return False
 
-    def mail(self, addr):
+    def mail(self, addr, options=None):
+        # Подпись как у smtplib.SMTP.mail: options нужен для SMTPUTF8.
+        self.mail_options = list(options or [])
         return (self.mail_code, b"250 sender ok")
 
     def rcpt(self, addr):

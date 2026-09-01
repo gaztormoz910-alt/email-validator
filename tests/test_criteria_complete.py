@@ -289,19 +289,28 @@ def test_command_error_does_not_soften_a_real_verdict():
 
 # ═══════════════════════════════ G7: адрес в кавычках не хоронится
 
-def test_quoted_local_is_unproven_not_wrong():
-    """`"john smith"@example.com` законен по RFC 5321 §4.1.2.
+def test_quoted_local_is_now_checked_not_just_spared():
+    """`"john smith"@example.com` законен по RFC 5321 §4.1.2 — и ПРОВЕРЯЕТСЯ.
 
-    Проверить его мы не можем — кавычки надо сохранить в RCPT, а внутри них
-    законны пробел и собственная «@». Но «не проверено» и «неправильный
-    адрес» — разные вещи: второе владелец удалит и никогда не узнает, что
-    ящик был живой.
+    Прежнее ожидание этой проверки закрепляло промежуточное решение: адрес
+    получал «не проверено» с честной причиной вместо приговора. Это было
+    лучше приговора, но хуже проверки, и решение снято: грамматика в
+    кавычках разбирается, RCPT строит smtplib (quoteaddr кавычки сохраняет),
+    и адрес идёт в сеть наравне с обычным.
+
+    Ожидание переписано СОЗНАТЕЛЬНО, а не подогнано: раз поведение стало
+    лучше, проверка обязана закреплять новое, а не сторожить старое.
     """
+    from core.email_syntax import validate_email_syntax
+
+    assert validate_email_syntax('"john smith"@example.com') is True
+
+    # И до сети такой адрес доходит: отказ, если он будет, приходит от DNS
+    # или сервера, а не от нашей регулярки.
     from core.network import NetworkValidator
 
     result = NetworkValidator(timeout=2).check_email('"john smith"@example.com')
-    assert result["status"] == "unknown", result
-    assert "кавычк" in result["reason"].lower()
+    assert "Bad Syntax" not in result.get("reason", ""), result
 
 
 def test_quoted_local_is_recognised_precisely():
