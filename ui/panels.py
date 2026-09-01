@@ -186,6 +186,18 @@ class PanelsMixin:
         self._settings_hint(self.settings_body,
                             "медленнее, но заполняет колонки для сегментации")
 
+        # Продолжение прерванного прогона. Журнал сделанного пишется всегда;
+        # без этого тумблера он просто никем не читался, и «Стоп» на большой
+        # базе означал начать сначала.
+        self.chk_resume = ctk.CTkSwitch(
+            self.settings_body, text="Продолжить прерванный прогон",
+            text_color=TEXT_MAIN, font=ctk.CTkFont(size=FONT_BODY),
+            progress_color=ACCENT_PRIMARY, button_color=TEXT_MAIN,
+            button_hover_color=TEXT_MAIN)
+        self.chk_resume.pack(padx=SPACE_LG, anchor="w", pady=(SPACE_SM, 0))
+        self._settings_hint(self.settings_body,
+                            "пропустит адреса, уже проверенные по этим же файлам")
+
         self.chk_cache = ctk.CTkSwitch(
             self.settings_body, text="Не перепроверять известное",
             text_color=TEXT_MAIN, font=ctk.CTkFont(size=FONT_BODY),

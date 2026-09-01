@@ -55,6 +55,15 @@ _TRANSIENT_MARKERS = (
     "кончилось место",
 )
 
+# Сколько РАЗ адрес может уйти на перепроверку.
+#
+# Один круг закрывает случай «сорвалось у нас, со второго выхода получилось».
+# Второй нужен для другого случая: первый повтор тоже не дошёл (лимит на том
+# же почтовике, второй грязный выход, вторая выдержка серого списка). Дальше
+# смысла нет — на третьем круге те же адреса дают тот же ответ, а хвост
+# прогона растёт на каждую попытку.
+MAX_RETRY_ROUNDS = 2
+
 # Эти Unknown повторять бессмысленно — ответ не изменится от смены прокси
 _PERMANENT_UNKNOWN_MARKERS = (
     "catch-all", "catchall", "fcrdns", "обратного dns", "не проверяется",
@@ -976,6 +985,20 @@ class ValidationPipeline:
             self.ai.train_models()
             self.callbacks['on_log']("[INFO] ИИ успешно обучен и готов к бою!", "info")
 
+    def _phase(self, name, count=0):
+        """Сообщает окну, чем конвейер занят сейчас. Необязательный канал.
+
+        Классическое окно этого обработчика не ставит, и это нормально:
+        отсутствие канала не должно ронять прогон.
+        """
+        handler = self.callbacks.get('on_phase')
+        if handler is None:
+            return
+        try:
+            handler(str(name or ""), int(count or 0))
+        except Exception:
+            pass
+
     def _emit(self, email, status, reason, mx, data):
         """Единственная дверь наружу для результата.
 
@@ -1068,7 +1091,7 @@ class ValidationPipeline:
         greylisted_queue = queue_module.Queue()
 
         def defer(email, data, is_role, delay=DEFAULT_RETRY_DELAY, proxy=None,
-                  reason="", same_exit=False):
+                  reason="", same_exit=False, attempts=0):
             # Пятым полем едет прокси, через который вышел неудачный ответ.
             # Повтор ТЕМ ЖЕ выходом — потраченное время: у greylisting запись
             # ведётся по тройке (IP, отправитель, получатель), а временный
@@ -1080,7 +1103,8 @@ class ValidationPipeline:
             # «Greylisted» на адресе, которого серый список не касался.
             greylisted_queue.put((email, data, is_role,
                                   time.monotonic() + max(0.0, float(delay)),
-                                  proxy, reason or "", bool(same_exit)))
+                                  proxy, reason or "", bool(same_exit),
+                                  int(attempts)))
 
         # Статистика вердиктов по домену. Если у домена МНОГО адресов и ВСЕ до
         # единого ответили 250 OK — это почти наверняка catch-all, даже когда
@@ -1114,6 +1138,20 @@ class ValidationPipeline:
         proxies_dead_warned = threading.Event()
 
         def warn_if_proxies_dead():
+            # Сначала — поимённо о тех, кто выбыл с прошлого раза. Прокси
+            # уходит из ротации после сбоев на РАЗНЫХ серверах: это либо
+            # закрывшийся порт 25, либо мёртвый адрес. Пока об этом молчали,
+            # владелец видел лишь замедление, а причину — никогда.
+            if self.network is not None:
+                try:
+                    gone = self.network.take_recent_bans()
+                except Exception:
+                    gone = []
+                for proxy in gone:
+                    self.callbacks['on_log'](
+                        f"[DEAD] Прокси выбыл из ротации: {proxy}. Сбои шли на "
+                        "разных серверах — похоже, закрылся порт 25 или адрес "
+                        "перестал отвечать.", "dead")
             if (self.network and self.network.all_proxies_dead()
                     and not proxies_dead_warned.is_set()):
                 proxies_dead_warned.set()
@@ -1469,6 +1507,10 @@ class ValidationPipeline:
         # прокси, лимит скорости). Пауза даёт лимитам отпустить, а повтор идёт
         # другим прокси — значительная часть превращается в однозначный ответ.
         greylisted_count = greylisted_queue.qsize()
+        # Фаза наружу: до неё окно показывало «Проверено адресов: N из N» и
+        # выглядело зависшим, пока шла перепроверка. Строка в логе про это
+        # была, но её надо было заметить.
+        self._phase("retry", greylisted_count)
         if greylisted_count > 0 and self.is_running and deep_ping:
             
             if self.is_running:
@@ -1479,7 +1521,7 @@ class ValidationPipeline:
                     """Обрабатывает один отложенный адрес. Вызывается из пула потоков."""
                     nonlocal retry_count, processed_count
                     (email, data, is_role, _due,
-                     first_proxy, _reason, same_exit) = entry
+                     first_proxy, _reason, same_exit, attempts) = entry
                     if not self.is_running:
                         return
 
@@ -1496,6 +1538,23 @@ class ValidationPipeline:
                         res = self.network.check_email(
                             email, avoid_exit_of=first_proxy)
                     raw_status = res["status"]
+
+                    # Второй круг. Повтор мог не дойти по той же причине, по
+                    # которой не дошёл первый: лимит на том же почтовике,
+                    # второй грязный выход, вторая выдержка серого списка. Тут
+                    # адрес по-прежнему БЕЗ вердикта о ящике, и отдавать его
+                    # как Unknown рано — если попытки ещё остались.
+                    grey = raw_status == "greylisted"
+                    if (attempts + 1 < MAX_RETRY_ROUNDS
+                            and (grey or _is_transient_failure(
+                                raw_status, res.get("reason", "")))):
+                        defer(email, data, is_role,
+                              delay=GREYLIST_RETRY_DELAY if grey else DEFAULT_RETRY_DELAY,
+                              proxy=res.get("proxy") or first_proxy,
+                              reason=res.get("reason", ""),
+                              same_exit=grey, attempts=attempts + 1)
+                        return
+
                     
                     if raw_status == "valid":
                         status_display = "Valid"
@@ -1539,67 +1598,82 @@ class ValidationPipeline:
                 # момент откладывания: пока шёл основной проход, он у большинства
                 # адресов уже истёк, и ждать нечего. Если ждать всё же приходится,
                 # сон идёт короткими шагами, поэтому остановка срабатывает сразу.
-                pending = []
-                while True:
-                    try:
-                        pending.append(greylisted_queue.get_nowait())
-                    except Exception:
+                # Кругов перепроверки может быть несколько: адрес, который
+                # и со второго выхода не получил ответа, кладётся обратно в
+                # очередь — но не больше MAX_RETRY_ROUNDS раз. Первый круг
+                # закрывает случай «сорвалось у нас»; второй — случай, когда
+                # и повтор упёрся в то же самое (лимит на том же почтовике,
+                # вторая выдержка серого списка, второй грязный выход).
+                for retry_round in range(1, MAX_RETRY_ROUNDS + 1):
+                    if not self.is_running:
                         break
-
-                pending.sort(key=lambda entry: entry[3])
-                total_pending = len(pending)
-                retry_workers = max(1, min(safe_threads, total_pending or 1))
-                waited = 0.0
-
-                with ThreadPoolExecutor(max_workers=retry_workers) as retry_pool:
-                    futures = []
-                    index = 0
-                    announced = False
-                    while index < total_pending and self.is_running:
-                        now = time.monotonic()
-                        # Всё, что уже созрело, отправляем в пул немедленно
-                        launched = 0
-                        while index < total_pending and pending[index][3] <= now:
-                            futures.append(retry_pool.submit(retry_one, pending[index]))
-                            index += 1
-                            launched += 1
-                        if launched and not announced:
-                            announced = True
-                            self.callbacks['on_log'](
-                                f"[INFO] Перепроверка началась: {launched} из "
-                                f"{total_pending} адресов созрели сразу, ждать не пришлось.",
-                                "info")
-                        if index >= total_pending:
-                            break
-                        # Ничего не созрело — ждём ровно до ближайшего срока,
-                        # но шагами по четверти секунды, чтобы «Стоп» был мгновенным
-                        remaining = pending[index][3] - time.monotonic()
-                        if remaining > 0:
-                            if not announced and waited == 0.0:
-                                self.callbacks['on_log'](
-                                    f"[INFO] Отложено на перепроверку: {total_pending}. "
-                                    f"Ближайший созреет через {int(remaining)}с — ждём только его.",
-                                    "info")
-                            step = min(0.25, remaining)
-                            time.sleep(step)
-                            waited += step
-
-                    for fut in as_completed(futures):
+                    pending = []
+                    while True:
                         try:
-                            fut.result()
-                        except Exception as e:
-                            self.callbacks['on_log'](
-                                f"[DEAD] Ошибка перепроверки: {type(e).__name__}: {e}", "dead")
+                            pending.append(greylisted_queue.get_nowait())
+                        except Exception:
+                            break
 
-                    # Не дождавшиеся своего срока (нажали «Стоп») возвращаются
-                    # в очередь — ниже их подберёт страховка и отдаст как Unknown
-                    for leftover_entry in pending[index:]:
-                        greylisted_queue.put(leftover_entry)
+                    if not pending:
+                        break            # второму кругу нечего делать
 
-                self.callbacks['on_log'](
-                    f"[INFO] Перепроверка завершена: {retry_count} из {total_pending} адресов "
-                    f"получили окончательный вердикт. Простой в ожидании: {waited:.1f}с "
-                    "(раньше было ровно 90с всегда).", "info")
+                    pending.sort(key=lambda entry: entry[3])
+                    total_pending = len(pending)
+                    retry_workers = max(1, min(safe_threads, total_pending or 1))
+                    waited = 0.0
+
+                    with ThreadPoolExecutor(max_workers=retry_workers) as retry_pool:
+                        futures = []
+                        index = 0
+                        announced = False
+                        while index < total_pending and self.is_running:
+                            now = time.monotonic()
+                            # Всё, что уже созрело, отправляем в пул немедленно
+                            launched = 0
+                            while index < total_pending and pending[index][3] <= now:
+                                futures.append(retry_pool.submit(retry_one, pending[index]))
+                                index += 1
+                                launched += 1
+                            if launched and not announced:
+                                announced = True
+                                self.callbacks['on_log'](
+                                    f"[INFO] Перепроверка началась: {launched} из "
+                                    f"{total_pending} адресов созрели сразу, ждать не пришлось.",
+                                    "info")
+                            if index >= total_pending:
+                                break
+                            # Ничего не созрело — ждём ровно до ближайшего срока,
+                            # но шагами по четверти секунды, чтобы «Стоп» был мгновенным
+                            remaining = pending[index][3] - time.monotonic()
+                            if remaining > 0:
+                                if not announced and waited == 0.0:
+                                    self.callbacks['on_log'](
+                                        f"[INFO] Отложено на перепроверку: {total_pending}. "
+                                        f"Ближайший созреет через {int(remaining)}с — ждём только его.",
+                                        "info")
+                                step = min(0.25, remaining)
+                                time.sleep(step)
+                                waited += step
+
+                        for fut in as_completed(futures):
+                            try:
+                                fut.result()
+                            except Exception as e:
+                                self.callbacks['on_log'](
+                                    f"[DEAD] Ошибка перепроверки: {type(e).__name__}: {e}", "dead")
+
+                        # Не дождавшиеся своего срока (нажали «Стоп») возвращаются
+                        # в очередь — ниже их подберёт страховка и отдаст как Unknown
+                        for leftover_entry in pending[index:]:
+                            greylisted_queue.put(leftover_entry)
+
+                    self.callbacks['on_log'](
+                        f"[INFO] Круг перепроверки {retry_round} из {MAX_RETRY_ROUNDS}: "
+                        f"взято {total_pending}, вердикт получили {retry_count} "
+                        "(счёт с начала перепроверки). Простой в ожидании: "
+                        f"{waited:.1f}с.", "info")
+
+        self._phase("", 0)
 
         # Страховка: всё, что осталось в очереди — не перепроверено (нажали «Стоп»,
         # выключен deep_ping, или прогон прервался). Раньше такие адреса молча
@@ -1609,7 +1683,7 @@ class ValidationPipeline:
         while True:
             try:
                 (email, data, is_role, _due,
-                 _proxy, first_reason, _same) = greylisted_queue.get_nowait()
+                 _proxy, first_reason, _same, _tries) = greylisted_queue.get_nowait()
             except Exception:
                 break
             leftover += 1

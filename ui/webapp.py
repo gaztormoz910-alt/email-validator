@@ -83,6 +83,9 @@ class ValidatorApi:
         # Проверка прокси идёт ДО проверки почт и своим счётом: (проверено,
         # прочитано). Второе число — не итог: источник ещё читается.
         self._proxy_progress = (0, 0)
+        # Чем занят конвейер прямо сейчас: "" — обычная проверка,
+        # "retry" — перепроверка отложенных.
+        self._phase = ("", 0)
         # Сколько строк в каждом наборе источников. None означает «ещё считаю»:
         # на гигабайтном файле счёт занимает десятки секунд, и делать его в
         # потоке, который обслуживает страницу, нельзя.
@@ -122,6 +125,7 @@ class ValidatorApi:
         self.pipeline = ValidationPipeline(callbacks={
             "on_log": self._on_log,
             "on_progress": self._on_progress,
+            "on_phase": self._on_phase,
             "on_proxy_progress": self._on_proxy_progress,
             "on_result": self._on_result,
             "on_complete": self._on_complete,
@@ -227,6 +231,23 @@ class ValidatorApi:
             self._history.append(line)
             if len(self._history) > self._history_cap:
                 del self._history[:len(self._history) - self._history_cap]
+
+    def resume_info(self, payload=None):
+        """Есть ли что продолжать по нынешним файлам базы.
+
+        Ноль значит «нечего»: страница тогда прячет предложение вовсе, чтобы
+        не звать нажимать на пустое.
+        """
+        from core.runstate import resumable_count
+
+        try:
+            done = resumable_count(list(self.email_sources))
+        except Exception:
+            done = 0
+        return {"done": int(done)}
+
+    def _on_phase(self, name, count):
+        self._phase = (str(name or ""), int(count or 0))
 
     def _on_progress(self, current, total):
         self._progress = (int(current or 0), int(total or 0))
@@ -538,6 +559,7 @@ class ValidatorApi:
 
         self.store.clear()
         self._progress = (0, 0)
+        self._phase = ("", 0)
         self._state = "running"
         self._proxy_summary = None
 
@@ -586,7 +608,10 @@ class ValidatorApi:
             proxies=StreamLoader(list(self.proxy_sources)).stream_lines(),
             enable_osint=bool(payload.get("osint", True)),
             use_cache=bool(payload.get("cache", True)),
-            resume=False)
+            # Продолжение прерванного прогона. Механика была написана и
+            # покрыта тестами, но сюда приходил жёсткий False: нажал «Стоп»
+            # на миллионе — начинай сначала. Спрашиваем владельца.
+            resume=bool(payload.get("resume", False)))
 
     def pause(self, payload=None):
         self.pipeline.pause()
@@ -632,6 +657,7 @@ class ValidatorApi:
             # читается, целого не существует, и делить не на что.
             "proxyProgress": {"checked": proxy_checked, "seen": proxy_seen,
                               "running": bool(proxy_seen) and not total},
+            "phase": {"name": self._phase[0], "count": self._phase[1]},
             "log": lines,
             "logSeq": self._log_seq,
             "dropped": self.log.dropped,
