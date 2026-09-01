@@ -12,10 +12,12 @@
 2. ПРЕРВАННЫЙ ПРОГОН НАЧИНАЛСЯ ЗАНОВО. Нажатие «Стоп» на 80% базы означало
    выбросить всю работу: ни один адрес не помечался как уже сделанный.
 
-3. ПОВТОРЫ ЖДАЛИ БЛОКИРУЮЩЕЙ ПАУЗОЙ. Отложенные адреса лежали в очереди без
-   срока, а пайплайн спал ровно 90 секунд, ничего в это время не делая.
-   Здесь у каждой записи есть СРОК, и готовность проверяется мгновенно —
-   спать больше незачем.
+3. ПОВТОРЫ ЖДАЛИ БЛОКИРУЮЩЕЙ ПАУЗОЙ. Это решено, но НЕ здесь: очередь
+   отложенных живёт в самом конвейере (core/pipeline.py), у каждой записи
+   есть срок готовности, и спать больше незачем. Здесь такая очередь тоже
+   была — с таблицей в SQLite и пятью методами, — и её не звал никто, кроме
+   собственных тестов. Вычищена: код, который никто не вызывает, всё равно
+   приходится читать и чинить.
 
 Хранилище открывается в режиме WAL и рассчитано на сотни пишущих потоков.
 Любая ошибка БД отключает состояние молча: это ускорение и удобство, а не
@@ -25,7 +27,6 @@
 import os
 import sqlite3
 import threading
-import time
 
 DEFAULT_STATE_PATH = os.path.join("data", "run_state.sqlite")
 
@@ -91,17 +92,6 @@ class RunState:
                        PRIMARY KEY (run_id, key)
                    ) WITHOUT ROWID"""
             )
-            self._conn.execute(
-                """CREATE TABLE IF NOT EXISTS retry (
-                       run_id   TEXT NOT NULL,
-                       key      TEXT NOT NULL,
-                       due_at   REAL NOT NULL,
-                       payload  TEXT,
-                       attempts INTEGER NOT NULL DEFAULT 0,
-                       PRIMARY KEY (run_id, key)
-                   ) WITHOUT ROWID"""
-            )
-            self._conn.execute("CREATE INDEX IF NOT EXISTS retry_due ON retry(run_id, due_at)")
             self._conn.commit()
 
             if not resume:
@@ -222,102 +212,7 @@ class RunState:
                 return 0
         return int(row[0]) if row else 0
 
-    # --- отложенные повторы ------------------------------------------------
-
-    def schedule_retry(self, key, payload="", delay=DEFAULT_RETRY_DELAY, attempts=0):
-        """Кладёт адрес в очередь повтора СО СРОКОМ, а не в общий мешок."""
-        if not key or self._conn is None:
-            return False
-        due = time.monotonic() + max(0.0, float(delay))
-        with self._lock:
-            try:
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO retry (run_id, key, due_at, payload, attempts) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (self.run_id, key, due, payload or "", int(attempts)))
-                self._conn.commit()
-                return True
-            except Exception:
-                self._close_quietly()
-                return False
-
-    def due_retries(self, limit=256, now=None):
-        """Забирает созревшие повторы и удаляет их из очереди.
-
-        Возвращает [(key, payload, attempts)]. Несозревшие не отдаются — на
-        этом и держится отказ от блокирующей паузы: воркер спрашивает, что
-        готово, получает пусто и идёт заниматься основной очередью.
-        """
-        if self._conn is None:
-            return []
-        moment = time.monotonic() if now is None else now
-        with self._lock:
-            try:
-                rows = self._conn.execute(
-                    "SELECT key, payload, attempts FROM retry "
-                    "WHERE run_id = ? AND due_at <= ? ORDER BY due_at LIMIT ?",
-                    (self.run_id, moment, int(limit))).fetchall()
-                if rows:
-                    self._conn.executemany(
-                        "DELETE FROM retry WHERE run_id = ? AND key = ?",
-                        [(self.run_id, row[0]) for row in rows])
-                    self._conn.commit()
-            except Exception:
-                self._close_quietly()
-                return []
-        return [(row[0], row[1] or "", int(row[2])) for row in rows]
-
-    def pending_retries(self):
-        """Сколько повторов ещё ждёт срока."""
-        if self._conn is None:
-            return 0
-        with self._lock:
-            try:
-                row = self._conn.execute(
-                    "SELECT COUNT(*) FROM retry WHERE run_id = ?", (self.run_id,)).fetchone()
-            except Exception:
-                return 0
-        return int(row[0]) if row else 0
-
-    def next_due_in(self):
-        """Через сколько секунд созреет ближайший повтор. None — очередь пуста.
-
-        Нужно, чтобы ждать ровно столько, сколько осталось, а не фиксированные
-        90 секунд независимо от того, что в очереди.
-        """
-        if self._conn is None:
-            return None
-        with self._lock:
-            try:
-                row = self._conn.execute(
-                    "SELECT MIN(due_at) FROM retry WHERE run_id = ?",
-                    (self.run_id,)).fetchone()
-            except Exception:
-                return None
-        if not row or row[0] is None:
-            return None
-        return max(0.0, float(row[0]) - time.monotonic())
-
-    def drain_retries(self):
-        """Забирает ВСЁ, что осталось в очереди, независимо от срока.
-
-        Нужно в самом конце прогона: адрес, за который никто не отвечает,
-        обязан вернуться пользователю как Unknown, а не исчезнуть.
-        """
-        if self._conn is None:
-            return []
-        with self._lock:
-            try:
-                rows = self._conn.execute(
-                    "SELECT key, payload, attempts FROM retry WHERE run_id = ?",
-                    (self.run_id,)).fetchall()
-                self._conn.execute("DELETE FROM retry WHERE run_id = ?", (self.run_id,))
-                self._conn.commit()
-            except Exception:
-                return []
-        return [(row[0], row[1] or "", int(row[2])) for row in rows]
-
-    # --- жизненный цикл ----------------------------------------------------
+    # --- уборка ------------------------------------------------------------
 
     def clear(self):
         """Стирает состояние ЭТОГО прогона. Чужие прогоны не трогает."""
@@ -329,7 +224,7 @@ class RunState:
             self.seen_count = 0
             self.resumed_count = 0
             try:
-                for table in ("seen", "done", "retry"):
+                for table in ("seen", "done"):
                     self._conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (self.run_id,))
                 self._conn.commit()
             except Exception:
@@ -346,6 +241,29 @@ class RunState:
     def __exit__(self, *exc):
         self.close()
         return False
+
+
+def resumable_count(sources, path=DEFAULT_STATE_PATH):
+    """Сколько адресов уже проверено по ЭТИМ источникам в прошлый раз.
+
+    Нужна окну, чтобы предложить продолжить с числом на руках, а не звать
+    вслепую. Ничего не меняет и не чистит: открывает журнал, считает и
+    закрывает. Ноль означает и «нечего продолжать», и «журнал недоступен» —
+    для предложения в интерфейсе разницы нет.
+    """
+    try:
+        state = RunState(run_id_for(sources), path=path, resume=True)
+    except Exception:
+        return 0
+    try:
+        return int(state.resumed_count or 0)
+    except Exception:
+        return 0
+    finally:
+        try:
+            state.close()
+        except Exception:
+            pass
 
 
 def run_id_for(sources):
