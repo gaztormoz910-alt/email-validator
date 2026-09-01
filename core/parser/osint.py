@@ -88,14 +88,6 @@ class OSINTOperator:
             "accounts": accounts,
         }
 
-    def get_name_from_gravatar(self, email):
-        """Только имя — оставлено для обратной совместимости."""
-        return self.get_profile(email).get("name") or None
-
-    def search_name(self, email):
-        """Оркестратор OSINT-методов. Сейчас источник один — Gravatar."""
-        return self.get_name_from_gravatar(email)
-
 
 if __name__ == '__main__':
     operator = OSINTOperator()

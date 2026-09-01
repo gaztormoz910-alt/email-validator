@@ -567,24 +567,6 @@ class ResultStore:
                 found[position] = self._memory_rows[position]
         return [found[p] for p in positions if p in found]
 
-    def _passes_score(self, position, min_score):
-        """Проходит ли одна строка порог по скору. Запасной путь, без БД.
-
-        Медленный по устройству: одна строка — один запрос. Пока скор лежал
-        только внутри JSON, другого способа не было, и именно этим фильтр по
-        скору вешал окно. Теперь по нему есть колонка с индексом, а этот метод
-        остаётся для случая, когда база не открылась и строки лежат в ОЗУ.
-        """
-        if min_score <= 0:
-            return True
-        rows = self._fetch([position])
-        if not rows:
-            return False
-        try:
-            return int(rows[0]["data"].get("engagement_score", 0) or 0) >= min_score
-        except (TypeError, ValueError):
-            return False
-
     def _sql_ready(self, groups):
         """Годится ли быстрый путь через SQL для этого набора групп.
 

@@ -88,9 +88,6 @@ class ProxyManager:
 
 import requests
 import re
-import time
-import random
-import logging
 import urllib3
 from typing import Iterator, Optional, Dict, Any, List
 
