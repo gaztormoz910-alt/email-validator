@@ -111,6 +111,14 @@ def find_dead(extra_source=None):
                 used[node.id] += 1
             elif isinstance(node, ast.Attribute):
                 used[node.attr] += 1
+    # Страница — тоже вызывающий код. Мост в ui/webapp.py зовёт методы API
+    # ПО ИМЕНИ (getattr по строке из запроса), поэтому метод, к которому
+    # обращается только app.js, для питоновского сита выглядит мёртвым. Это
+    # ошибка сита, а не находка: `api("resume_info")` — настоящий вызов.
+    for name in ("app.js", "index.html"):
+        path = os.path.join(ROOT, "ui", "web", name)
+        if os.path.exists(path):
+            blob.append(io.open(path, encoding="utf-8", errors="replace").read())
     text = "\n".join(blob)
 
     dead = []
@@ -129,6 +137,18 @@ def find_dead(extra_source=None):
 
 
 # ═══════════════════════════════ G1: мёртвого кода нет
+
+def test_dead_code_sweep_does_not_trust_the_page_blindly():
+    """Контроль: поблажка для страницы не отключила сито целиком.
+
+    Она добавлена ради методов, которые страница зовёт по имени. Если бы
+    заодно прощалось любое имя, сито перестало бы находить что-либо.
+    """
+    probe = "def " + "проба_" + "поблажки" + "():\n    return 1\n"
+    dead = find_dead(extra_source=probe)
+    assert any("поблажки" in item for item in dead), (
+        "сито перестало находить заведомо мёртвое: %s" % dead)
+
 
 def test_dead_code_is_gone():
     """Ни одного определения без обращений.

@@ -217,7 +217,31 @@ let countPoll = null;
 function showSources(data) {
   renderSources(data);
   armCountPoll(data);
+  askResume();
   return data;
+}
+
+// Есть ли что продолжать по нынешним файлам базы.
+//
+// Спрашиваем при каждой смене источников: журнал сделанного привязан к
+// НАБОРУ файлов, и для другой базы ответ другой. Пока продолжать нечего,
+// строка спрятана вовсе — предлагать нажать на пустое незачем.
+async function askResume() {
+  let done = 0;
+  try {
+    const info = await api("resume_info");
+    done = (info && info.done) || 0;
+  } catch (e) {
+    done = 0;
+  }
+  const row = $("#resumeRow");
+  if (!row) return;
+  row.classList.toggle("is-gone", !done);
+  if (!done) {
+    $("#optResume").checked = false;
+    return;
+  }
+  setText($("#resumeHint"), `уже проверено по этим файлам: ${num(done)}`);
 }
 
 function armCountPoll(data) {
@@ -653,9 +677,15 @@ async function tick() {
     $("#progressBar").style.width = "0%";
     $("#progressWrap").classList.remove("is-done");
   } else {
-    setText($("#progressLabel"), total
-      ? `Проверено адресов: ${num(current)} из ${num(total)}`
-      : "Проверка ещё не запускалась");
+    // Перепроверка отложенных — отдельная фаза, и об этом надо сказать.
+    // Иначе бар стоит на месте у самого конца, и прогон выглядит зависшим.
+    const phase = s.phase || {};
+    setText($("#progressLabel"),
+      phase.name === "retry"
+        ? `Перепроверка отложенных: ${num(phase.count)} — им нужен другой выход или выдержка`
+        : total
+          ? `Проверено адресов: ${num(current)} из ${num(total)}`
+          : "Проверка ещё не запускалась");
     setText($("#progressPct"), `${pct}%`);
     $("#progressBar").style.width = `${pct}%`;
     $("#progressWrap").classList.toggle("is-done", pct === 100 && total > 0);
@@ -864,6 +894,7 @@ $("#btnStart").addEventListener("click", async () => {
     threads: Number(threads.value), timeout: Number(timeout.value),
     ai: $("#optAi").checked, osint: $("#optOsint").checked,
     cache: $("#optCache").checked, country: ui.country,
+    resume: $("#optResume").checked,
   };
   let res = await api("start", payload);
 

@@ -11,6 +11,7 @@ import socket
 import random
 import string
 import socks
+import zlib
 import threading
 import re
 
@@ -217,6 +218,12 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         # что чинить надо прокси, а не базу.
         self._tarpit_domains = set()
 
+        # Какие почтовые серверы уже принимали что угодно, и у каких доменов.
+        # Нужно на случай, когда собственная тройная проба сорвалась: см.
+        # _mx_catchall_suspected. С потолком, а не голым словарём: разных
+        # MX-хостов на базе, собранной дорками, столько же, сколько доменов.
+        self._mx_catchall = BoundedCache(max_keys=20_000)
+
         # Честен ли сервер домена: принимает ли он обязательный по RFC postmaster@.
         # Спрашивается лениво — только перед тем, как похоронить адрес.
         self._postmaster_cache = BoundedCache()
@@ -295,6 +302,11 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         # означают мёртвый сервер, а не мёртвый прокси
         self._proxy_fail_hosts = {}
         self._proxy_banned = set()
+
+        # Кто выбыл с прошлого доклада. Список, а не счётчик: владельцу важно
+        # ИМЯ выбывшего — по нему видно, что чинить. Раньше прокси уходил из
+        # ротации молча, и заметить это можно было, только когда выбывали ВСЕ.
+        self._recent_bans = []
         # Полный профиль прокси: нужен, чтобы при переснятии не потерять
         # то, что заново не измеряли (например реакцию Microsoft)
         self._proxy_profiles = {}
@@ -414,6 +426,29 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         """
         return _classify_smtp_response(code, message)
 
+    def _helo_for(self, proxy):
+        """Имя для HELO/EHLO, привязанное к ВЫХОДНОМУ адресу.
+
+        Раньше имя выбиралось один раз на процесс, и все прокси
+        представлялись почтовику одинаково: для него это подпись прогона —
+        десяток разных IP, называющих себя одним и тем же хостом, выглядит
+        ровно как то, чем является.
+
+        Привязка к выходу, а не к строке подключения: десять входов в один
+        выход — это один отправитель, и назваться он должен одинаково.
+        Стабильность обязательна по той же причине, что и у обратного адреса:
+        серый список ведётся по тройке, и менять представление между
+        попытками значит сбивать её.
+        """
+        if not proxy:
+            return self.helo_name
+        try:
+            exit_ip = self.exit_ip_of(proxy) or str(proxy)
+            index = zlib.crc32(exit_ip.encode("utf-8", "ignore"))
+            return LEGIT_HELO_NAMES[index % len(LEGIT_HELO_NAMES)]
+        except Exception:
+            return self.helo_name
+
     def _do_single_ping(self, email, mx_record, proxy=None, from_email=None,
                         control_probe=False):
         """
@@ -474,12 +509,13 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
 
             # Сначала EHLO, если ошибка - фоллбэк на HELO
             try:
-                ehlo_code, ehlo_msg = server.ehlo(self.helo_name)
+                helo_name = self._helo_for(proxy)
+                ehlo_code, ehlo_msg = server.ehlo(helo_name)
                 if ehlo_code >= 500:
-                    server.helo(self.helo_name)
+                    server.helo(helo_name)
             except Exception:
                 ehlo_msg = b""
-                server.helo(self.helo_name)
+                server.helo(self._helo_for(proxy))
 
             # Проверка STARTTLS
             has_starttls = False
@@ -672,11 +708,12 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             server = self._make_smtp_connection(proxy)
             server.connect(mx_record, 25)
             try:
-                ehlo_code, _ = server.ehlo(self.helo_name)
+                helo_name = self._helo_for(proxy)
+                ehlo_code, _ = server.ehlo(helo_name)
                 if ehlo_code >= 500:
-                    server.helo(self.helo_name)
+                    server.helo(helo_name)
             except Exception:
-                server.helo(self.helo_name)
+                server.helo(self._helo_for(proxy))
 
             mail_code, mail_msg = server.mail(from_addr)
             if mail_code >= 400:
@@ -800,6 +837,17 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             # Проба сорвалась (мёртвый прокси, таймаут) — вывода сделать нельзя.
             # НЕ кэшируем: иначе catch-all домен потом молча выдаст Valid на всё.
             if result["status"] == "unknown":
+                # Но прежде чем сказать «не catch-all», спросим соседей по
+                # почтовому серверу. Ответ «нет» здесь опаснее всего: он
+                # отправляет несуществующие ящики домена прямиком в Valid, и
+                # владелец узнаёт правду по отскокам.
+                #
+                # Подсказка НЕ заменяет пробу: она читается только когда проба
+                # сорвалась, и только если тот же MX-хост уже оказывался
+                # catch-all у ДВУХ разных доменов. Один сосед ничего не
+                # значит — настройка у доменов на общем сервере своя.
+                if self._mx_catchall_suspected(mx_record, domain):
+                    return True
                 return False
             # Хоть один выдуманный адрес отвергнут — домен точно не catch-all
             if result["status"] != "valid":
@@ -811,7 +859,35 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         with self.catchall_lock:
             self.catchall_cache[domain] = True
         self._remember_catchall(domain, True)
+        self._note_mx_catchall(mx_record, domain)
         return True
+
+    def _note_mx_catchall(self, mx_record, domain):
+        """Запоминает, что этот почтовый сервер уже принимал что угодно."""
+        host = (mx_record or "").strip().lower().rstrip(".")
+        if not host or not domain:
+            return
+        with self.catchall_lock:
+            seen = self._mx_catchall.get(host)
+            if seen is None:
+                seen = set()
+                self._mx_catchall[host] = seen
+            seen.add(domain.strip().lower())
+
+    def _mx_catchall_suspected(self, mx_record, domain):
+        """Оказывался ли этот MX-хост catch-all у ДВУХ других доменов.
+
+        Двух, а не одного: у доменов на общем сервере настройки свои, и один
+        сосед — совпадение. Возвращает только подозрение и только там, где
+        собственная проба ничего не дала.
+        """
+        host = (mx_record or "").strip().lower().rstrip(".")
+        if not host:
+            return False
+        with self.catchall_lock:
+            seen = self._mx_catchall.get(host) or set()
+            others = {d for d in seen if d != (domain or "").strip().lower()}
+        return len(others) >= 2
 
     def _remember_catchall(self, domain, is_catchall):
         """Кладёт выясненный ответ в память между запусками.

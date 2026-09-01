@@ -163,54 +163,24 @@ class TestResume(unittest.TestCase):
                 self.assertEqual(st.done_count(), 1)
 
 
-class TestRetrySchedule(unittest.TestCase):
-    """S6: повтор идёт по сроку, а не через глухую паузу."""
+class TestRetryDelays(unittest.TestCase):
+    """Очередь повторов переехала в конвейер, а выдержки остались здесь.
 
-    def test_retry_schedule_hides_immature_entries(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with state_in(tmp) as st:
-                st.schedule_retry("a@x.com", delay=60)
-                self.assertEqual(st.due_retries(), [],
-                                 "несозревший повтор отдан раньше срока")
-                self.assertEqual(st.pending_retries(), 1)
+    Сама очередь (таблица retry и пять методов вокруг неё) из RunState
+    вычищена: её не вызывал никто, кроме этих же тестов, — отложенные адреса
+    живут в очереди самого конвейера (core/pipeline.py). А константы выдержки
+    он берёт отсюда, и они по-прежнему должны быть разными: сбой повторяют
+    быстро, серый список — после его выдержки.
+    """
 
-    def test_retry_schedule_releases_when_due(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with state_in(tmp) as st:
-                st.schedule_retry("a@x.com", payload="{}", delay=0)
-                due = st.due_retries()
-                self.assertEqual([row[0] for row in due], ["a@x.com"])
-                self.assertEqual(st.pending_retries(), 0,
-                                 "выданный повтор остался в очереди и уйдёт дважды")
-
-    def test_retry_schedule_reports_remaining_wait(self):
-        """Ждать надо ровно до ближайшего срока, а не фиксированные 90 секунд."""
-        with tempfile.TemporaryDirectory() as tmp:
-            with state_in(tmp) as st:
-                st.schedule_retry("far@x.com", delay=120)
-                st.schedule_retry("near@x.com", delay=5)
-                remaining = st.next_due_in()
-                self.assertIsNotNone(remaining)
-                self.assertLess(remaining, 10,
-                                "ожидание считается по дальнему сроку вместо ближнего")
-
-    def test_retry_schedule_next_due_is_none_when_empty(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with state_in(tmp) as st:
-                self.assertIsNone(st.next_due_in())
-
-    def test_retry_schedule_drain_returns_everything(self):
-        """В конце прогона ни один отложенный адрес не имеет права исчезнуть."""
-        with tempfile.TemporaryDirectory() as tmp:
-            with state_in(tmp) as st:
-                st.schedule_retry("a@x.com", delay=999)
-                st.schedule_retry("b@x.com", delay=999)
-                drained = st.drain_retries()
-                self.assertEqual(sorted(row[0] for row in drained), ["a@x.com", "b@x.com"])
-                self.assertEqual(st.pending_retries(), 0)
-
-    def test_retry_schedule_default_delay_matches_greylisting(self):
+    def test_retry_default_delay_is_the_quick_one(self):
         self.assertEqual(DEFAULT_RETRY_DELAY, 90)
+
+    def test_retry_greylist_delay_outlasts_postgrey(self):
+        from core.runstate import GREYLIST_RETRY_DELAY
+        self.assertGreaterEqual(GREYLIST_RETRY_DELAY, 300,
+                                "у postgrey выдержка 300 с — повтор раньше "
+                                "получит тот же серый ответ")
 
 
 class TestNoBlockingWaits(unittest.TestCase):

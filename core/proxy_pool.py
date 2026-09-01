@@ -457,6 +457,15 @@ class ProxyPoolMixin:
             return ""
         return (self._proxy_profiles.get(proxy) or {}).get("exit_ip") or ""
 
+    def take_recent_bans(self):
+        """Отдаёт список выбывших с прошлого раза и очищает его.
+
+        Отдаёт, а не показывает: сообщить о выбытии надо ровно один раз.
+        """
+        with self._proxy_score_lock:
+            bans, self._recent_bans = list(self._recent_bans), []
+        return bans
+
     def proxy_still_usable(self, proxy):
         """Тот же прокси, если он ещё в строю, иначе None.
 
@@ -611,7 +620,14 @@ class ProxyPoolMixin:
             # Сбои неизвестно на чём (сам прокси не поднялся) — банить можно.
             # Сбои, все до одного пришедшиеся на один сервер, — вина сервера.
             if not hosts or len(hosts) >= 2:
-                self._proxy_banned.add(proxy)
+                if proxy not in self._proxy_banned:
+                    self._proxy_banned.add(proxy)
+                    # Складываем на видное место. Раньше прокси выбывал молча,
+                    # и владелец узнавал об этом только когда выбывали ВСЕ:
+                    # до того прогон просто тихо замедлялся, а причина —
+                    # закрывшийся порт 25 или сдохший адрес — оставалась
+                    # невидимой.
+                    self._recent_bans.append(proxy)
 
     def _note_latency(self, proxy, millis):
         """Обновляет задержку прокси по живому замеру.
