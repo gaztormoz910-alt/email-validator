@@ -10,7 +10,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core.bounded import BoundedCache
 from core.cache import ResultCache
-from core.runstate import RunState, run_id_for, DEFAULT_RETRY_DELAY
+from core.runstate import (RunState, run_id_for, DEFAULT_RETRY_DELAY,
+                           GREYLIST_RETRY_DELAY)
 from core.cleaner import EmailCleaner, normalize_for_dedup
 from core.filters import SpamFilter
 from core.github_parser import BlacklistDownloader
@@ -1239,9 +1240,11 @@ class ValidationPipeline:
                 raw_status = res["status"]
                 warn_if_proxies_dead()
 
-                # Greylisted — складываем в очередь для повторной проверки (п.2.4)
+                # Greylisted — в очередь на повтор, и ждём столько, сколько
+                # серые списки просят: повтор раньше выдержки получает тот же
+                # серый ответ, то есть тратится впустую. См. core/runstate.py.
                 if raw_status == "greylisted":
-                    defer(email, data, is_role)
+                    defer(email, data, is_role, delay=GREYLIST_RETRY_DELAY)
                     return False  # Вердикта нет: адрес ждёт перепроверки
 
                 # Временный отказ (таймаут, сдохший прокси, лимит скорости, блок по

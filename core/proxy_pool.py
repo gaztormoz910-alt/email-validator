@@ -447,7 +447,18 @@ class ProxyPoolMixin:
         weights = [1.0 / (rank + 1) for rank in range(len(top))]
         return random.choices(top, weights=weights, k=1)[0]
 
-    def _pick_best_proxy(self, need_ptr=False, need_clean=False, want_country=""):
+    def exit_ip_of(self, proxy):
+        """Выходной адрес прокси. Пустая строка — не профилировали.
+
+        Именно ВЫХОДНОЙ, а не строка подключения: десять прокси могут делить
+        один выход, и для почтовика это один и тот же отправитель.
+        """
+        if not proxy:
+            return ""
+        return (self._proxy_profiles.get(proxy) or {}).get("exit_ip") or ""
+
+    def _pick_best_proxy(self, need_ptr=False, need_clean=False, want_country="",
+                         avoid_exit_of=None):
         """Выбирает живой прокси с наивысшим health score (п.8).
 
         need_ptr=True  — только прокси с обратным DNS (для Yahoo/AOL/Verizon).
@@ -464,6 +475,23 @@ class ProxyPoolMixin:
         with self._proxy_score_lock:
             # Забаненные прокси не воскрешаем — они выбыли навсегда
             alive = [p for p in self.proxies if p not in self._proxy_banned]
+
+            # Второе мнение нельзя спрашивать у того же выходного адреса.
+            #
+            # Если почтовик отверг адрес ПО РЕПУТАЦИИ нашего IP, то повтор с
+            # того же IP даст тот же отказ — и приговор «ящика нет»
+            # подтвердит сам себя. Отсекаем по выходному IP, а не по строке
+            # прокси: десять входов в один выход это один отправитель.
+            #
+            # Если после отсева никого не осталось, возвращаем None: честнее
+            # сказать «сверить не с чем», чем спросить у себя же.
+            if avoid_exit_of:
+                banned_ip = self.exit_ip_of(avoid_exit_of)
+                if banned_ip:
+                    alive = [p for p in alive if self.exit_ip_of(p) != banned_ip]
+                else:
+                    alive = [p for p in alive if p != avoid_exit_of]
+
             if not alive:
                 return None
 
