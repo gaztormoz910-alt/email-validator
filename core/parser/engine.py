@@ -20,6 +20,25 @@ except ImportError:
     except ImportError:
         DuckDuckGoSearchException = Exception
 
+
+def _get_verified(session, url, *, proxies, timeout, headers, allow_redirects=True):
+    """GET с проверкой сертификата и запасным путём БЕЗ неё.
+
+    Раньше здесь стояло verify=False всегда. Страницы читаются публичные, и
+    украсть с них нечего, но выключенная проверка означает, что подменённый
+    ответ неотличим от настоящего — а на подменённых страницах мы собираем
+    адреса. Проверка включена; отключается она только на конкретной ошибке
+    сертификата (так ведут себя прокси, подсовывающие свой корень) и только
+    для повторной попытки того же адреса.
+    """
+    try:
+        return session.get(url, proxies=proxies, timeout=timeout, headers=headers,
+                           allow_redirects=allow_redirects, verify=True)
+    except requests.exceptions.SSLError:
+        return session.get(url, proxies=proxies, timeout=timeout, headers=headers,
+                           allow_redirects=allow_redirects, verify=False)
+
+
 class ProxyManager:
     def __init__(self, proxies, timeout=5.0):
         # Expects a list of proxy strings like 'ip:port' or 'user:pass@ip:port'
@@ -201,14 +220,8 @@ class DuckDuckGoEngine:
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.5",
             }
-            res = session.get(
-                target_url, 
-                proxies=proxies, 
-                timeout=12, 
-                headers=scrape_headers,
-                allow_redirects=True, 
-                verify=False
-            )
+            res = _get_verified(session, target_url, proxies=proxies, timeout=12,
+                                headers=scrape_headers)
             
             content_type = res.headers.get('Content-Type', '')
             if 'text' not in content_type and 'html' not in content_type:
@@ -432,7 +445,8 @@ class AOLEngine:
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.5",
             }
-            res = session.get(target_url, proxies=proxies, timeout=5.0, headers=scrape_headers, allow_redirects=True, verify=False)
+            res = _get_verified(session, target_url, proxies=proxies, timeout=5.0,
+                                headers=scrape_headers)
             content_type = res.headers.get('Content-Type', '')
             if 'text' not in content_type and 'html' not in content_type: return None
             if res.status_code == 200: return res.text[:80000]

@@ -12,6 +12,7 @@ from core.bounded import BoundedCache
 from core.cache import ResultCache
 from core.runstate import (RunState, run_id_for, DEFAULT_RETRY_DELAY,
                            GREYLIST_RETRY_DELAY)
+from core.verdict import verdict_confidence
 from core.cleaner import EmailCleaner, normalize_for_dedup
 from core.filters import SpamFilter
 from core.github_parser import BlacklistDownloader
@@ -554,6 +555,22 @@ class ValidationPipeline:
             # Парковка могла быть и на втором MX, и на A-записи без MX
             is_parked_domain=is_parked_domain(res.get("mx_records") or mx_host),
         )
+
+        # Уверенность в ВЕРДИКТЕ — не то же самое, что скор живости.
+        #
+        # Скор отвечает «насколько вероятно, что за адресом живой человек»;
+        # уверенность — «насколько твёрдо доказано то, что написано в колонке
+        # Статус». Подтверждённый ящик на голом домене и адрес на прекрасном
+        # домене, чей вердикт держится на одном неподтверждённом 550, раньше
+        # выглядели одинаково. См. core/verdict.py.
+        confidence, basis = verdict_confidence(
+            original_smtp_status or status_display,
+            res.get("reason", ""),
+            {"control_probe": res.get("control_rcpt") == "rejected",
+             "confirmed": res.get("second_opinion") == "agreed",
+             "postmaster_honored": res.get("postmaster_honored")})
+        data["verdict_confidence"] = confidence
+        data["verdict_basis"] = basis
 
         data["engagement_score"] = score_result["score"]
         data["engagement_grade"] = score_result["grade"]
@@ -1184,6 +1201,13 @@ class ValidationPipeline:
                 data["engagement_score"] = 0
                 data["engagement_grade"] = "Dead"
                 data["provider_type"] = "Disposable"
+                # Вердикт вынесен НАМИ по списку, а не сервером. Уверенность
+                # высокая, но основание должно называть источник: владелец
+                # вправе знать, что сюда сеть не привлекалась.
+                data["verdict_confidence"] = 95
+                data["verdict_basis"] = ("домен из списка одноразовых: ящик "
+                                         "живёт минуты и создан, чтобы его "
+                                         "бросить")
                 data["provider_name"] = "Disposable"
                 data["domain_type"] = "Disposable"
                 self._enrich_offline(email, data, "Trap/Disposable", enable_ai)
@@ -1270,7 +1294,8 @@ class ValidationPipeline:
                         # Данные из ФАЙЛА базы важнее кэша: их не трогаем.
                         computed = ("engagement_score", "engagement_grade",
                                     "provider_type", "provider_name",
-                                    "domain_type", "has_gravatar")
+                                    "domain_type", "has_gravatar",
+                                    "verdict_confidence", "verdict_basis")
                         for key, value in cached_data.items():
                             if key in computed or not data.get(key):
                                 data[key] = value
@@ -1295,6 +1320,20 @@ class ValidationPipeline:
                                                status_display, cached["status"],
                                                is_role, enable_ai)
                         data["enrich_sig"] = want
+                    # Уверенность у адреса из кэша.
+                    #
+                    # Когда настройки обогащения не менялись, весь блок выше
+                    # проходит мимо _enrich_and_score — и адрес приезжал БЕЗ
+                    # уверенности. Пустая колонка ровно там, где вердикт взят
+                    # из прошлого прогона, — это та же ложная уверенность,
+                    # только молчаливая. Считаем по сохранённому статусу и
+                    # причине: сеть для этого не нужна.
+                    if not data.get("verdict_basis"):
+                        confidence, basis = verdict_confidence(
+                            cached["status"], cached.get("reason", ""))
+                        data["verdict_confidence"] = confidence
+                        data["verdict_basis"] = basis
+
                     data["validated_at"] = cached_stamp
 
                     with self._cache_lock:

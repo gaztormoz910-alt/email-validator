@@ -1,24 +1,25 @@
+import binascii
+import json
 import os
-import sys
-import time
-import zipfile
-import urllib.request
 import subprocess
+import sys
 import threading
+import time
+import urllib.request
 from pathlib import Path
-from stem.control import Controller
-from stem import Signal
+
+# stem отсюда убран намеренно: он числился в зависимостях и импортировался,
+# но управляющий порт открывается обычным сокетом — за библиотеку платили
+# установкой, а пользовались ей ноль раз. zipfile убран по той же причине.
 
 class TorInstance:
-    def __init__(self, index, base_dir, tor_exe, log_callback, password, hashed_password):
+    def __init__(self, index, base_dir, tor_exe, log_callback):
         self.index = index
         self.base_dir = base_dir
         self.tor_exe = tor_exe
         self.log_callback = log_callback
         self.tor_port = 9050 + (index * 2)
         self.control_port = 9051 + (index * 2)
-        self.password = password
-        self.hashed_password = hashed_password
         self.data_dir = base_dir / "tor_bin" / "Data" / f"Tor_{index}"
         self.tor_dir = base_dir / "tor_bin"
         self.process = None
@@ -39,7 +40,7 @@ class TorInstance:
         with open(torrc_path, "w", encoding="utf-8") as f:
             f.write(f"SocksPort {self.tor_port}\n")
             f.write(f"ControlPort {self.control_port}\n")
-            f.write(f"HashedControlPassword {self.hashed_password}\n")
+            f.write("CookieAuthentication 1\n")
             f.write(f'DataDirectory "{data_dir_str}"\n')
             f.write("Log notice stdout\n")
             f.write("UseBridges 0\n")
@@ -72,7 +73,7 @@ class TorInstance:
                         if percent != last_progress:
                             self._log(f"[Tor #{self.index}] Bootstrap: {percent}%", "info")
                             last_progress = percent
-                    except: pass
+                    except Exception: pass
                 
         if bootstrapped:
             self._log(f"[Система] Tor #{self.index} успешно запущен (Порт {self.tor_port})", "success")
@@ -81,6 +82,19 @@ class TorInstance:
             self._log(f"[DEAD] Ошибка: Tor #{self.index} не смог подключиться (Таймаут).", "dead")
             self.stop()
             return False
+
+    def _auth_cookie(self):
+        """Cookie управляющего порта в шестнадцатеричном виде.
+
+        Файл tor кладёт в свой каталог данных при CookieAuthentication 1.
+        Пустой ответ означает «не прочитали» — тогда AUTHENTICATE не пройдёт,
+        и смена цепочки честно вернёт False вместо тихого продолжения.
+        """
+        try:
+            raw = (self.data_dir / "control_auth_cookie").read_bytes()
+        except Exception:
+            return b""
+        return binascii.hexlify(raw)
 
     def renew_ip(self):
         if not self.process or self.process.poll() is not None:
@@ -97,7 +111,7 @@ class TorInstance:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.settimeout(5.0)
                     s.connect(('127.0.0.1', self.control_port))
-                    s.sendall(f'AUTHENTICATE "{self.password}"\r\n'.encode('utf-8'))
+                    s.sendall(b"AUTHENTICATE " + self._auth_cookie() + b"\r\n")
                     resp = s.recv(1024).decode('utf-8')
                     if not resp.startswith('250'): raise Exception("Auth Error")
                     
@@ -113,24 +127,38 @@ class TorInstance:
                 self._last_renew_time = time.time()
 
     def stop(self):
-        if self.process:
-            try:
-                # Use taskkill to cleanly kill Tor and its lyrebird child processes
-                subprocess.call(['taskkill', '/F', '/T', '/PID', str(self.process.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except:
-                pass
-            self.process = None
-            
-            try:
-                import psutil
-                parent = psutil.Process(self.process.pid)
-                for child in parent.children(recursive=True):
+        if not self.process:
+            return
+
+        # PID запоминается ДО обнуления. Раньше self.process обнулялся между
+        # двумя способами убийства, и второй падал на AttributeError внутри
+        # голого except — то есть не выполнялся никогда. Молча: дочерние
+        # процессы (lyrebird, snowflake) переживали остановку, держали порт и
+        # мешали следующему запуску.
+        pid = self.process.pid
+
+        try:
+            subprocess.call(["taskkill", "/F", "/T", "/PID", str(pid)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+        # Второй заход — на случай, если taskkill недоступен (не Windows) или
+        # не справился с деревом.
+        try:
+            import psutil
+
+            parent = psutil.Process(pid)
+            for child in parent.children(recursive=True):
+                try:
                     child.kill()
-                parent.kill()
-            except:
-                pass
-                
-            self.process = None
+                except Exception:
+                    pass
+            parent.kill()
+        except Exception:
+            pass
+
+        self.process = None
 
     def is_alive(self):
         return self.process is not None and self.process.poll() is None
@@ -164,8 +192,20 @@ class TorManager:
         self.tor_dir = self.base_dir / "tor_bin"
         self.tor_exe = self.tor_dir / "Tor" / "tor.exe"
         
-        self.password = "parser_secret"
-        self.hashed_password = "16:0276BB60159E2A43607648F746CFC086CE78F225E20C1E526107CDD6E0"
+        # Управляющий порт больше НЕ защищён общим паролем.
+        #
+        # Поля password и hashed_password убраны совсем: держать пустые строки
+        # «на всякий случай» значит оставить дорогу назад к общему секрету.
+        #
+        # Раньше здесь лежала пара «parser_secret» и её готовый хэш —
+        # одинаковая у всех установок. Порт слушает только 127.0.0.1, но
+        # общеизвестный пароль означает, что любой процесс на этой машине мог
+        # сменить нам цепочку или прочитать её состояние.
+        #
+        # Вместо этого — штатный CookieAuthentication: tor кладёт случайный
+        # файл в СВОЙ каталог данных, и знает его только тот, кто может этот
+        # каталог читать. Секрета в исходниках не остаётся вовсе.
+
         
         self.instances = []
         self._initialized = True
@@ -228,7 +268,7 @@ class TorManager:
             self._log(f"[DEAD] Ошибка при загрузке Tor: {e}", "dead")
             if tar_path.exists():
                 try: tar_path.unlink()
-                except: pass
+                except Exception: pass
             return False
 
     def start(self, num_instances=1):
@@ -238,9 +278,14 @@ class TorManager:
         self.stop() # Clean up old instances if any
         self.instances = []
         
-        self._log("[Система] Очистка старых процессов Tor...", "info")
-        if os.name == 'nt':
-            os.system("taskkill /F /IM tor.exe >nul 2>&1")
+        # Чистим ТОЛЬКО своё.
+        #
+        # Раньше здесь стоял `taskkill /F /IM tor.exe` — то есть глушился
+        # каждый tor.exe на машине, включая Tor Browser владельца и чужие
+        # программы. Свои процессы уже остановлены вызовом self.stop() строкой
+        # выше; здесь добиваем осиротевшие от прошлого запуска — по номерам,
+        # которые сами же и записали.
+        self._kill_orphans()
             
         self._log(f"[Система] Запуск {num_instances} процессов Tor (через Snowflake)...", "info")
         
@@ -249,7 +294,8 @@ class TorManager:
             time.sleep(idx * 6.0)
             
             for attempt in range(2): # 2 attempts per instance
-                inst = TorInstance(idx, self.base_dir, self.tor_exe, self.log_callback, self.password, self.hashed_password)
+                inst = TorInstance(idx, self.base_dir, self.tor_exe,
+                                   self.log_callback)
                 if inst.start():
                     with self._lock:
                         self.instances.append(inst)
@@ -261,7 +307,7 @@ class TorManager:
                 
         threads = []
         for i in range(num_instances):
-            t = threading.Thread(target=start_instance, args=(i,))
+            t = threading.Thread(target=start_instance, args=(i,), daemon=True)
             t.start()
             threads.append(t)
             
@@ -269,11 +315,62 @@ class TorManager:
             t.join()
             
         if len(self.instances) > 0:
+            self._remember_pids()
             self._log(f"[Система] {len(self.instances)}/{num_instances} Tor-узлов успешно запущены!", "success")
             return True
         else:
             self._log("[DEAD] Не удалось запустить ни одного процесса Tor.", "dead")
             return False
+
+    def _pid_file(self):
+        return self.tor_dir / "our_tor_pids.json"
+
+    def _remember_pids(self):
+        """Записывает номера ЗАПУЩЕННЫХ НАМИ процессов рядом с ними.
+
+        Нужно ровно для одного: следующий запуск должен уметь добить то, что
+        осталось от прошлого после падения, и при этом не тронуть чужое.
+        """
+        pids = [inst.process.pid for inst in self.instances
+                if getattr(inst, "process", None) is not None]
+        try:
+            self._pid_file().parent.mkdir(parents=True, exist_ok=True)
+            self._pid_file().write_text(json.dumps(pids), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _kill_orphans(self):
+        """Добивает наши же процессы, пережившие прошлый запуск."""
+        try:
+            pids = json.loads(self._pid_file().read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(pids, list):
+            return
+        killed = 0
+        for pid in pids:
+            if not isinstance(pid, int):
+                continue
+            try:
+                import psutil
+
+                proc = psutil.Process(pid)
+                # Имя проверяем обязательно: номер мог достаться чужой
+                # программе после перезагрузки, и убить её было бы хуже, чем
+                # оставить осиротевший tor.
+                if "tor" not in (proc.name() or "").lower():
+                    continue
+                for child in proc.children(recursive=True):
+                    try:
+                        child.kill()
+                    except Exception:
+                        pass
+                proc.kill()
+                killed += 1
+            except Exception:
+                continue
+        if killed:
+            self._log(f"[Система] Добито осиротевших процессов Tor: {killed}", "info")
 
     def renew_ip(self, proxy_url=None):
         alive = [inst for inst in self.instances if inst.is_alive()]
@@ -285,7 +382,7 @@ class TorManager:
                 for inst in alive:
                     if inst.tor_port == port:
                         return inst.renew_ip()
-            except: pass
+            except Exception: pass
             
         # Renew a random alive instance
         import random

@@ -427,8 +427,22 @@ function renderRows(data) {
         const badge = document.createElement("span");
         badge.className = `v v--${row.group}`;
         badge.textContent = VERDICT_TEXT[row.group] || row.status;
-        td.title = `${VERDICT_FULL[row.group] || row.status} (${row.status})`;
         td.appendChild(badge);
+        // Уверенность в вердикте — рядом со словом, а не вместо него.
+        // «Годен» на домене, принимающем что угодно, и «Годен»,
+        // подтверждённый контрольной пробой, — это одно слово и разные
+        // основания; число показывает разницу, подсказка её объясняет.
+        const conf = typeof row.confidence === "number" ? row.confidence : null;
+        if (conf !== null) {
+          const mark = document.createElement("i");
+          mark.className = "conf " + (conf >= 75 ? "conf--high"
+                                    : conf >= 40 ? "conf--mid" : "conf--low");
+          mark.textContent = conf;
+          td.appendChild(mark);
+        }
+        td.title = `${VERDICT_FULL[row.group] || row.status} (${row.status})`
+          + (conf !== null ? `
+Уверенность ${conf}: ${row.basis || ""}` : "");
       } else if (index === 2) {
         const span = document.createElement("span");
         span.className = `score ${scoreClass(row.score)}`;
