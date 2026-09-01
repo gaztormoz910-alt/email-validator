@@ -89,6 +89,7 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
             'on_log': self.safe_log,
             'on_progress': self.safe_update_progress,
             'on_proxy_progress': self.safe_proxy_progress,
+            'on_phase': self.safe_phase,
             'on_result': self.safe_add_result,
             'on_complete': self.on_pipeline_complete,
             'on_unique_count': self.safe_update_unique_count,
@@ -541,6 +542,7 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         self.chk_ai.configure(state=state)
         self.chk_osint_val.configure(state=state)
         self.chk_cache.configure(state=state)
+        self.chk_resume.configure(state=state)
         self.dork_selector.configure(state=state)
         self.parser_proxy_selector.configure(state=state)
         self.parser_threads_slider.configure(state=state)
@@ -660,7 +662,8 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
             enable_ai=self.chk_ai.get() == 1,
             enable_osint=self.chk_osint_val.get() == 1,
             proxies=actual_proxies,
-            use_cache=self.chk_cache.get() == 1
+            use_cache=self.chk_cache.get() == 1,
+            resume=self.chk_resume.get() == 1
         )
 
     def pause_validation(self):
@@ -736,6 +739,21 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         """
         self._ui_call(lambda: self._update_proxy_progress_ui(checked, seen))
 
+    def safe_phase(self, name, count):
+        """Чем занят конвейер: обычная проверка или перепроверка отложенных.
+
+        Без этого бар у самого конца стоит на месте, пока идут повторы, и
+        прогон выглядит зависшим — то же самое было в веб-окне.
+        """
+        self._ui_call(lambda: self._update_phase_ui(name, count))
+
+    def _update_phase_ui(self, name, count):
+        self._phase = (name or "", int(count or 0))
+        if name == "retry":
+            self.progress_lbl.configure(
+                text=f"Перепроверка отложенных: {count} — им нужен другой "
+                     "выход или выдержка")
+
     def _update_proxy_progress_ui(self, checked, seen):
         self.progress_lbl.configure(
             text=f"Проверяю прокси: {checked} (прочитано {seen}, файл ещё читается)")
@@ -745,6 +763,13 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
     def _update_progress_ui(self, current, total):
         pct = int((current / total) * 100) if total > 0 else 0
         status_text = "Завершено" if pct == 100 else "Проверка адресов..."
+        # Во время перепроверки подпись принадлежит ей: адреса в этой фазе
+        # досчитываются, и «Проверка адресов…» затирала бы объяснение того,
+        # почему бар стоит.
+        if getattr(self, "_phase", ("", 0))[0] == "retry":
+            self.percent_lbl.configure(text=f"{pct}%")
+            self.progress_bar.set(pct / 100.0)
+            return
         self.progress_lbl.configure(text=f"{status_text} ({current}/{total})")
         self.percent_lbl.configure(text=f"{pct}%")
         self.progress_bar.set(pct / 100.0)
