@@ -96,7 +96,11 @@ const ui = {
   page: 1,
   groups: ["valid"],
   minScore: 0,
-  country: "coverage",
+  // «Точность» по умолчанию: страна проставляется реже, но не выдумывается.
+  // Замерено на 1600 частых именах: строгий режим даёт 50.1% верных при 8.7%
+  // неверных, «брать лидера всегда» — 66.4% при 33.6% неверных. Плюс
+  // шестнадцать пунктов правды стоят плюс двадцати пяти пунктов вымысла.
+  country: "accuracy",
   running: false,
   mode: "validator",
   lastSig: "",          // отпечаток выборки: по нему решаем, перезапрашивать ли
@@ -236,7 +240,10 @@ async function askResume() {
   }
   const row = $("#resumeRow");
   if (!row) return;
-  row.classList.toggle("is-gone", !done);
+  // is-folded, а НЕ is-gone: второй прячет через visibility и оставляет
+  // дыру в панели. Продолжать бывает нечего почти всегда, и пустой блок
+  // висел бы там постоянно — владелец это и увидел.
+  row.classList.toggle("is-folded", !done);
   if (!done) {
     $("#optResume").checked = false;
     return;
@@ -690,6 +697,8 @@ async function tick() {
     setText($("#progressPct"), "");
     $("#progressBar").style.width = "0%";
     $("#progressWrap").classList.remove("is-done");
+    // Знаменателя нет, но работа идёт — и это надо показать.
+    $("#progressTrack").classList.add("is-running");
   } else {
     // Перепроверка отложенных — отдельная фаза, и об этом надо сказать.
     // Иначе бар стоит на месте у самого конца, и прогон выглядит зависшим.
@@ -701,6 +710,7 @@ async function tick() {
           ? `Проверено адресов: ${num(current)} из ${num(total)}`
           : "Проверка ещё не запускалась");
     setText($("#progressPct"), `${pct}%`);
+    $("#progressTrack").classList.remove("is-running");
     $("#progressBar").style.width = `${pct}%`;
     $("#progressWrap").classList.toggle("is-done", pct === 100 && total > 0);
   }

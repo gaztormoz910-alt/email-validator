@@ -137,7 +137,7 @@
             </span>
           </label>
 
-          <label class="toggle is-gone" id="resumeRow">
+          <label class="toggle is-folded" id="resumeRow">
             <input type="checkbox" id="optResume" data-lock>
             <span class="toggle__text">
               Продолжить прерванный прогон
@@ -156,8 +156,8 @@
           <div class="field">
             <span class="field__label">Колонка «Страна»</span>
             <div class="seg" role="group">
-              <button class="seg__item is-active" data-country="coverage" data-lock>Заполненность</button>
-              <button class="seg__item" data-country="accuracy" data-lock>Точность</button>
+              <button class="seg__item" data-country="coverage" data-lock>Заполненность</button>
+              <button class="seg__item is-active" data-country="accuracy" data-lock>Точность</button>
             </div>
             <small class="field__hint" id="countryHint">заполнено почти всегда, ~треть стран — догадка</small>
           </div>
@@ -203,7 +203,7 @@
         <span id="progressLabel">Проверка ещё не запускалась</span>
         <span id="progressPct">0%</span>
       </div>
-      <div class="progress__track"><div class="progress__bar" id="progressBar"></div></div>
+      <div class="progress__track" id="progressTrack"><div class="progress__bar" id="progressBar"></div></div>
     </div>
 
     <div class="panel">
