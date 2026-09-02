@@ -126,6 +126,7 @@ class ValidatorApi:
             "on_log": self._on_log,
             "on_progress": self._on_progress,
             "on_phase": self._on_phase,
+            "on_revise": self._on_revise,
             "on_proxy_progress": self._on_proxy_progress,
             "on_result": self._on_result,
             "on_complete": self._on_complete,
@@ -245,6 +246,21 @@ class ValidatorApi:
         except Exception:
             done = 0
         return {"done": int(done)}
+
+    def _on_revise(self, domains, new_status, note):
+        """Пересмотр уже показанных строк по разоблачённым доменам.
+
+        Домен раскрывается не сразу: тройная проба могла сорваться, а
+        тарпитинг начинается после сотни проверенных адресов. Их «Годен» уже
+        в таблице — и без этого канала так там и оставался.
+        """
+        moved = 0
+        for domain in domains or []:
+            try:
+                moved += self.store.revise_domain(domain, new_status, note)
+            except Exception:
+                continue
+        return moved
 
     def _on_phase(self, name, count):
         self._phase = (str(name or ""), int(count or 0))
@@ -710,6 +726,8 @@ class ValidatorApi:
                 "group": self._group_of(row["status"]),
                 "reason": row["reason"],
                 "score": data.get("engagement_score", ""),
+                # Исходная строка из файла — рядом с проверенной.
+                "original": data.get("original_email", ""),
                 # Уверенность в ВЕРДИКТЕ и её основание — не скор живости.
                 # Показываются рядом со статусом: без них «Годен» на
                 # catch-all домене выглядит так же твёрдо, как «Годен»,
@@ -789,7 +807,8 @@ class ValidatorApi:
 
             def write_csv(handle, rows):
                 writer = csv.writer(handle)
-                writer.writerow(["Email", "Status", "Reason", "MX", "Name",
+                writer.writerow(["Email", "OriginalEmail", "Status", "Reason",
+                                 "MX", "Name",
                                  "FirstName", "LastName", "Gender", "Country",
                                  "Score", "Confidence", "ConfidenceBasis",
                                  "Provider", "ValidatedAt"])
@@ -799,7 +818,11 @@ class ValidatorApi:
                     # интернете, и ячейка, начинающаяся со знака равенства,
                     # в Excel не показывается, а выполняется.
                     writer.writerow(csv_row([
-                        row["email"], row["status"], row["reason"], row["mx"],
+                        row["email"],
+                        # Что лежало в файле. Пусто, если очистка ничего не
+                        # меняла: тогда это та же строка.
+                        data.get("original_email", ""),
+                        row["status"], row["reason"], row["mx"],
                         data.get("name", ""), data.get("first_name", ""),
                         data.get("last_name", ""), data.get("gender", ""),
                         data.get("country", ""), data.get("engagement_score", ""),

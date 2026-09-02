@@ -783,7 +783,7 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         # отвечает ли этот сервер «получателя нет» вообще всем подряд.
         results = self._probe_recipients([f"postmaster@{domain}",
                                           f"abuse@{domain}"], mx_record,
-                                         proxy=self._pick_best_proxy())
+                                         proxy=self._probe_proxy_for(domain))
         verdict = None
         for result in results or []:
             status = (result or {}).get("status")
@@ -801,6 +801,21 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         with self._postmaster_lock:
             self._postmaster_cache[domain] = verdict
         return verdict
+
+    def _probe_proxy_for(self, domain):
+        """Выход для ПРОБЫ по тому же правилу, что и для основной проверки.
+
+        Раньше пробы (тройная на catch-all и служебные адреса) звали
+        _pick_best_proxy() без единого требования, а основная проверка брала
+        чистый выход или выход с PTR. Для Outlook, iCloud и GMX это значило,
+        что проба уходила с грязного адреса, получала отказ по репутации и
+        читалась как «домен не catch-all» — после чего 250 на реальный адрес
+        становился Valid. Вывод о домене делался с заблокированного адреса.
+        """
+        domain = (domain or "").strip().lower()
+        needs_ptr = domain in YAHOO_DOMAINS or domain in AOL_DOMAINS
+        needs_clean = domain in NEEDS_CLEAN_IP_DOMAINS
+        return self._pick_best_proxy(need_ptr=needs_ptr, need_clean=needs_clean)
 
     def is_catch_all_domain(self, domain, mx_record) -> bool:
         """
@@ -831,7 +846,8 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             f"{_generate_random_local('short')}@{domain}",
             f"{_generate_random_local('uuid')}@{domain}",
         ]
-        results = self._probe_recipients(fakes, mx_record, proxy=self._pick_best_proxy())
+        results = self._probe_recipients(fakes, mx_record,
+                                         proxy=self._probe_proxy_for(domain))
 
         for result in results:
             # Проба сорвалась (мёртвый прокси, таймаут) — вывода сделать нельзя.
@@ -1018,7 +1034,15 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
                         email, mx_record, mx_records, needs_ptr, needs_clean,
                         want_country, deadline, first_proxy=proxy)
                     if confirmed is None:
-                        return result            # сверить не с чем — приговор в силе
+                        # Сверить было НЕ С ЧЕМ: у домена один почтовый сервер
+                        # и в пуле нет второго выходного адреса. Приговор
+                        # остаётся в силе, но владелец обязан знать, что он
+                        # держится на одном ответе.
+                        result["second_opinion"] = "unavailable"
+                        result["reason"] = (
+                            "%s [второго мнения не было: у домена один MX и "
+                            "нет другого выхода]" % result.get("reason", ""))
+                        return result
                     if confirmed:
                         # Отмечаем ЧЕМ подтверждён: уверенность в вердикте
                         # считается по этому признаку, а не по статусу.
@@ -1164,6 +1188,16 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             seen = self._domain_checks.get(domain, 0)
             self._domain_checks[domain] = seen + 1
         return seen == 0 or seen % self.TARPIT_RECHECK_EVERY == 0
+
+    def proven_catchall_domains(self):
+        """Домены, про которые ДОКАЗАНО, что они принимают любой адрес.
+
+        Нужны конвейеру в конце прогона: домен мог раскрыться после того, как
+        по нему уже выдали Valid (тройная проба сорвалась, а контрольный RCPT
+        в середине прогона показал правду).
+        """
+        with self.catchall_lock:
+            return sorted(d for d, yes in self.catchall_cache.items() if yes)
 
     def tarpit_domains(self):
         """Домены, поймавшие нас на переборе. Для отчёта владельцу."""
