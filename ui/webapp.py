@@ -40,6 +40,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from core import input_guard
+from core.crashlog import (crash_log_path, log_crash,  # noqa: F401
+                           recent_crashes)
 from ui.result_store import normalize_filters
 from core.encoding import open_text
 from core.baseops import csv_row, export_encoding
@@ -264,6 +266,10 @@ class ValidatorApi:
             except Exception:
                 continue
         return moved
+
+    # Когда окно в последний раз о себе напомнило. Ноль означает «ещё ни
+    # разу»: до первого запроса судить о тишине не по чему.
+    last_seen_at = 0.0
 
     def _on_phase(self, name, count):
         self._phase = (str(name or ""), int(count or 0))
@@ -789,6 +795,44 @@ class ValidatorApi:
                 "gender": data.get("gender", ""),
                 "country": data.get("country", ""),
                 "when": data.get("validated_at", ""),
+                # Всё, что движок знает про адрес, но в девять колонок не
+                # влезает. Едет в карточку строки — иначе обогащение,
+                # посчитанное на каждом адресе, видно только в выгрузке и в
+                # консоли, то есть для владельца его как бы нет.
+                #
+                # Источники (откуда взято имя, пол, страна) стоят здесь не для
+                # полноты: именно они делают видимым переключатель «Точность /
+                # Заполненность». Без них «Италия» из файла и «Италия»,
+                # угаданная по имени, выглядят одинаково твёрдо, а это разные
+                # вещи — на 1600 частых именах строгий режим даёт 50.1% верных
+                # при 8.7% неверных, а «брать лидера всегда» — 66.4% при 33.6%.
+                "more": {
+                    "domain_type": data.get("domain_type", ""),
+                    "provider_type": data.get("provider_type", ""),
+                    "grade": data.get("engagement_grade", ""),
+                    "company": data.get("company", ""),
+                    "job_role": data.get("job_role", ""),
+                    "birth_year": data.get("birth_year", ""),
+                    "first_name": data.get("first_name", ""),
+                    "last_name": data.get("last_name", ""),
+                    "social": data.get("social_accounts", ""),
+                    "name_source": data.get("name_source", ""),
+                    "gender_source": data.get("gender_source", ""),
+                    "country_source": data.get("country_source", ""),
+                    "company_source": data.get("company_source", ""),
+                    "job_role_source": data.get("job_role_source", ""),
+                    "ai_note": data.get("ai_note", ""),
+                    # Адрес, который в итоге ушёл на сервер. Совпадает с
+                    # колонкой «Адрес» и заполнен только когда сработало
+                    # исправление опечатки, — но показать его надо: это и
+                    # есть вторая половина пары «загружено / проверено».
+                    "checked_as": data.get("checked_as", ""),
+                    # Вердикт взят из прошлого прогона, а не спрошен сейчас.
+                    # Владельцу это важно знать: дата в колонке «Когда» у
+                    # такой строки исходная, а не сегодняшняя.
+                    "from_cache": bool(data.get("from_cache")),
+                    "mx": row.get("mx", ""),
+                },
                 # Насколько вердикту можно верить сегодня. Ящик могли удалить
                 # через день после проверки, и «Годен» месячной давности —
                 # уже не то же самое, что «Годен» сегодняшний.
@@ -857,11 +901,26 @@ class ValidatorApi:
 
             def write_csv(handle, rows):
                 writer = csv.writer(handle)
+                # Набор полей ТОТ ЖЕ, что у командной строки (cli.EXPORT_FIELDS).
+                #
+                # Раньше окно отдавало пятнадцать полей против двадцати пяти в
+                # консоли, и получалось наоборот здравому смыслу: чем удобнее
+                # поверхность, тем меньше она отдаёт. Владелец, работающий
+                # окном, терял компанию, должность, год рождения, тип домена,
+                # грейд и все источники — то есть ровно то новое, ради чего
+                # обогащение и считается на каждом адресе.
+                #
+                # Тест рядом сверяет два списка: разойдутся — набор упадёт.
                 writer.writerow(["Email", "OriginalEmail", "Status", "Reason",
                                  "MX", "Name",
                                  "FirstName", "LastName", "Gender", "Country",
-                                 "Score", "Confidence", "ConfidenceBasis",
-                                 "Provider", "ValidatedAt"])
+                                 "BirthYear", "Company", "JobRole",
+                                 "Score", "Grade",
+                                 "Confidence", "ConfidenceBasis",
+                                 "Provider", "DomainType",
+                                 "NameSource", "GenderSource", "CountrySource",
+                                 "CompanySource", "JobRoleSource",
+                                 "SocialAccounts", "ValidatedAt"])
                 for row in rows:
                     data = row.get("data") or {}
                     # csv_row, а не голый список: база собрана со страниц в
@@ -875,10 +934,21 @@ class ValidatorApi:
                         row["status"], row["reason"], row["mx"],
                         data.get("name", ""), data.get("first_name", ""),
                         data.get("last_name", ""), data.get("gender", ""),
-                        data.get("country", ""), data.get("engagement_score", ""),
+                        data.get("country", ""),
+                        data.get("birth_year", ""), data.get("company", ""),
+                        data.get("job_role", ""),
+                        data.get("engagement_score", ""),
+                        data.get("engagement_grade", ""),
                         data.get("verdict_confidence", ""),
                         data.get("verdict_basis", ""),
-                        data.get("provider_name", ""), data.get("validated_at", ""),
+                        data.get("provider_name", ""),
+                        data.get("domain_type", ""),
+                        data.get("name_source", ""), data.get("gender_source", ""),
+                        data.get("country_source", ""),
+                        data.get("company_source", ""),
+                        data.get("job_role_source", ""),
+                        data.get("social_accounts", ""),
+                        data.get("validated_at", ""),
                     ]))
 
             skipped = {"n": 0}
@@ -1076,6 +1146,31 @@ class ValidatorApi:
         return {"rows": [{"email": e, "dork": d} for e, d in chunk],
                 "page": number, "pages": pages, "total": total}
 
+    def client_error(self, payload=None):
+        """Сбой в САМОМ окне: ошибка JS или неперехваченный отказ обещания.
+
+        Половина случаев «программа наебнулась» приходится сюда, а не на
+        питон: журнал событий Windows краха процесса не показывал, то есть
+        ломалось окно, а не движок. Без этого канала такой сбой не оставлял
+        следа нигде — консоль WebView2 владельцу не видна.
+
+        Возвращает путь к журналу, чтобы окно могло назвать его владельцу.
+        """
+        payload = payload if isinstance(payload, dict) else {}
+        message = str(payload.get("message") or "Ошибка в окне")[:500]
+        where = str(payload.get("where") or "")[:300]
+        stack = str(payload.get("stack") or "")[:4000]
+
+        # Текст приходит ИЗ ОКНА, то есть из места, где выполняется наш же
+        # JavaScript. Обрезаем длины и кладём как данные, ничего не исполняя.
+        body = message
+        if stack:
+            body += "\n" + stack
+        log_crash("окно", body, context=where or None)
+        self._on_log("[DEAD] Сбой в окне: %s. Записано в %s"
+                     % (message, crash_log_path()), "dead")
+        return {"ok": True, "path": crash_log_path()}
+
     def parser_copy(self, payload=None):
         limit = 200_000
         with self._lock:
@@ -1268,6 +1363,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, json.dumps({"error": "not found"}))
             return
 
+        # Отметка «окно живо». Ставится на запросах, которые идут и так,
+        # поэтому не стоит ни одного лишнего обращения. По ней сторож
+        # отличает работу от тишины — а тишина и есть зависание.
+        try:
+            self.api.last_seen_at = time.time()
+        except Exception:
+            pass
+
         method = path[len("/api/"):]
         handler = getattr(self.api, method, None)
         if handler is None or method.startswith("_") or not callable(handler):
@@ -1283,6 +1386,11 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             result = handler(payload)
         except Exception as exc:
+            # Раньше здесь ошибка ИСЧЕЗАЛА: окно получало 500, показывало
+            # пустоту и выглядело зависшим, а причина не попадала никуда —
+            # ни в файл, ни на экран. Разбирать такой сбой было нечем.
+            log_crash("мост", "Обработчик метода не выполнился",
+                      exc, context="метод %s" % method)
             self._send(500, json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
             return
         self._send(200, json.dumps(result, ensure_ascii=False, default=str))
@@ -1352,6 +1460,98 @@ def _storage_path():
     return path
 
 
+class WindowWatchdog:
+    """Замечает, что окно ЗАМОЛЧАЛО, и записывает это в журнал сбоев.
+
+    Зачем нужен отдельно от перехватчиков ошибок. Зависание — это не
+    исключение: окно не падает, а перестаёт отвечать, и `window.onerror` в
+    нём не срабатывает никогда. Владелец видит замерший интерфейс, а в
+    журнале при этом пусто, потому что ловить было нечего.
+
+    Живое окно спрашивает состояние четыре раза в секунду — этого хватает,
+    чтобы отличить работу от тишины, и не нужно ни одного лишнего запроса:
+    отметка ставится на тех, что и так идут.
+
+    Записывается ОДИН раз на период тишины: окно, замолчавшее на час, должно
+    дать одну запись, а не четырнадцать тысяч.
+    """
+
+    def __init__(self, api, silence_seconds=20.0, check_every=5.0):
+        self.api = api
+        self.silence = float(silence_seconds)
+        self.check_every = float(check_every)
+        self._stop = threading.Event()
+        self._reported = False
+
+    def check_once(self, now=None):
+        """Одна проверка. Возвращает True, если тишина только что записана.
+
+        Отдельным методом, а не только внутри цикла: иначе проверить сторожа
+        можно было бы лишь ожиданием в двадцать секунд.
+        """
+        now = time.time() if now is None else now
+        seen = getattr(self.api, "last_seen_at", 0.0) or 0.0
+        if not seen:
+            return False                      # окно ещё ни разу не спрашивало
+        quiet = now - seen
+        if quiet < self.silence:
+            self._reported = False            # окно ожило — сторож взводится
+            return False
+        if self._reported:
+            return False
+        self._reported = True
+        log_crash("окно",
+                  "Окно перестало отвечать: за %.0f секунд ни одного запроса. "
+                  "Питон при этом жив — значит замер сам интерфейс."
+                  % quiet,
+                  context="последний раз окно отвечало в %s"
+                          % time.strftime("%H:%M:%S", time.localtime(seen)))
+        self.api._on_log(
+            "[DEAD] Окно молчит %.0f с. Запись в %s" % (quiet, crash_log_path()),
+            "dead")
+        return True
+
+    def start(self):
+        def loop():
+            while not self._stop.wait(self.check_every):
+                try:
+                    self.check_once()
+                except Exception:
+                    # Сторож не имеет права уронить программу: он про разбор
+                    # аварий, а не про проверку почты.
+                    pass
+
+        threading.Thread(target=loop, daemon=True, name="сторож-окна").start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+
+
+def _announce_past_crashes(api, within_hours=24):
+    """Говорит в лог окна, что за последние сутки был сбой, и где он записан.
+
+    Отдельной функцией, а не строкой внутри run(): её надо проверять тестом,
+    а run() открывает настоящее окно и в тесте не вызывается.
+
+    Возвращает число объявленных записей — по нему тест отличает «сказали»
+    от «промолчали».
+    """
+    try:
+        found = recent_crashes(within_hours=within_hours)
+    except Exception:
+        return 0
+    if not found:
+        return 0
+    api._on_log(
+        "[DEAD] В прошлый раз программа сломалась. Записей за сутки: %d. "
+        "Подробности с трассировкой: %s" % (len(found), crash_log_path()),
+        "dead")
+    for head in found:
+        api._on_log("[DEAD]    %s" % head, "dead")
+    return len(found)
+
+
 def run():
     """Поднимает мост и открывает окно."""
     import webview
@@ -1368,6 +1568,13 @@ def run():
     api.window = window
     api._on_log("[INFO] Валидатор готов к работе.", "info")
     api._on_log("[INFO] Выберите базу адресов и список прокси.", "info")
+
+    # Про вчерашнюю аварию владелец должен УЗНАТЬ, а не наткнуться на файл
+    # случайно. Раньше сбой не оставлял следа вовсе, и разбирать его
+    # приходилось по журналу событий Windows — который про поломку ВНУТРИ
+    # процесса не знает ничего.
+    _announce_past_crashes(api)
+    WindowWatchdog(api).start()
 
     webview.start(storage_path=_storage_path(), private_mode=False)
 
