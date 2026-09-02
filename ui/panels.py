@@ -492,11 +492,26 @@ class PanelsMixin:
         self.table_frame.grid_rowconfigure(0, weight=1)
         self.table_frame.grid_columnconfigure(0, weight=1)
 
-        columns = ("email", "status", "score", "provider", "domain_type", "reason", "mx",
+        # «loaded» и «confidence» добавлены к прежним тринадцати.
+        #
+        # Обе величины движок считает давно, и обе были видны только в
+        # веб-окне: здесь «Годен», подтверждённый контрольной пробой, и
+        # «Годен» на домене, принимающем что угодно, выглядели одинаково, а
+        # подменённый очисткой адрес нельзя было отличить от загруженного.
+        columns = ("email", "loaded", "status", "confidence", "score",
+                   "provider", "domain_type", "reason", "mx",
                    "name", "gender", "country", "birth_year", "source", "validated")
         self.tree = ttk.Treeview(self.table_frame, columns=columns, show="headings")
         self.tree.heading("email", text="Адрес", anchor="w")
+        # Что лежало в файле. Пусто — значит очистка ничего не меняла и это
+        # та же строка; заполнено — значит проверен адрес из колонки слева,
+        # а загружен был этот.
+        self.tree.heading("loaded", text="Загружено как", anchor="w")
         self.tree.heading("status", text="Вердикт", anchor="center")
+        # Уверенность в ВЕРДИКТЕ, 0-100 — не то же, что качество адреса.
+        # Качество отвечает «похоже ли, что за адресом живой человек»,
+        # уверенность — «насколько твёрдо доказано то, что в колонке Вердикт».
+        self.tree.heading("confidence", text="Уверен.", anchor="center")
         self.tree.heading("score", text="Качество", anchor="center")
         self.tree.heading("provider", text="Почтовик", anchor="w")
         self.tree.heading("domain_type", text="Тип домена", anchor="w")
@@ -512,7 +527,9 @@ class PanelsMixin:
         self.tree.heading("validated", text="Проверено", anchor="w")
         
         self.tree.column("email", width=210, minwidth=150, stretch=True, anchor="w")
+        self.tree.column("loaded", width=150, minwidth=90, stretch=False, anchor="w")
         self.tree.column("status", width=95, minwidth=80, stretch=False, anchor="center")
+        self.tree.column("confidence", width=60, minwidth=48, stretch=False, anchor="center")
         self.tree.column("score", width=55, minwidth=45, stretch=False, anchor="center")
         self.tree.column("provider", width=115, minwidth=80, stretch=False, anchor="w")
         self.tree.column("domain_type", width=95, minwidth=70, stretch=False, anchor="w")
