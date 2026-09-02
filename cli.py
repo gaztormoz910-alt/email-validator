@@ -31,7 +31,8 @@ from core.provider import format_base_scan, scan_base_providers
 from core.encoding import open_text
 
 EXPORT_FIELDS = [
-    "email", "status", "reason", "mx", "name", "first_name", "last_name",
+    "email", "original_email",
+    "status", "reason", "mx", "name", "first_name", "last_name",
     "gender", "country",
     "birth_year", "company", "job_role", "score", "grade",
     # Уверенность в ВЕРДИКТЕ и её основание — отдельно от скора живости.
@@ -56,6 +57,7 @@ def _row(entry):
         "birth_year": data.get("birth_year", ""),
         "company": data.get("company", ""),
         "job_role": data.get("job_role", ""),
+        "original_email": data.get("original_email", ""),
         "score": data.get("engagement_score", ""),
         "grade": data.get("engagement_grade", ""),
         # Уверенность в вердикте и её основание: без них колонки в заголовке
@@ -130,6 +132,27 @@ def cmd_validate(args):
             results.append({"email": email, "status": status, "reason": reason,
                             "mx": mx, "data": dict(data)})
 
+    def on_revise(domains, new_status, note):
+        """Пересмотр уже собранных строк по разоблачённым доменам.
+
+        Командная строка держит результаты в памяти и пишет их в конце —
+        значит пересмотр обязан дойти и сюда, иначе в файле останется
+        «Годен» по домену, который принимает что угодно.
+        """
+        wanted = {"@" + str(d).strip().lower().lstrip("@") for d in domains or []}
+        moved = 0
+        with lock:
+            for row in results:
+                if row["status"] != "Valid":
+                    continue
+                if not any(row["email"].lower().endswith(suffix) for suffix in wanted):
+                    continue
+                row["reason"] = ("%s | %s" % (row["reason"], note)).strip(" |")
+                if new_status:
+                    row["status"] = new_status
+                moved += 1
+        return moved
+
     def on_log(message, tag="info"):
         if not args.quiet:
             print(message, file=sys.stderr)
@@ -144,6 +167,7 @@ def cmd_validate(args):
         "on_log": on_log,
         "on_result": on_result,
         "on_progress": on_progress,
+        "on_revise": on_revise,
         "on_complete": done.set,
     })
 

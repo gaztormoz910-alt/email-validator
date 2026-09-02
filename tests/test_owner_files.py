@@ -154,9 +154,21 @@ class TestVerdicts(unittest.TestCase):
         """Контроль: заведомый мусор из файлов всё-таки распознаётся."""
         self.assertTrue(is_disposable("hacker@tempmail.com"),
                         "одноразовый домен из test.txt не распознан")
-        self.assertEqual(EmailCleaner().clean_email("user@gamil.com"),
+        # ТРЕБОВАНИЕ ИЗМЕНЕНО ВЛАДЕЛЬЦЕМ: «какие почты загрузил, такие
+        # валидатор и должен проверять». Молчаливое исправление опечатки
+        # выносило вердикт про ДРУГОЙ ящик — и «Годен» про чужого человека, и
+        # «нет такого» про настоящий адрес, который никто не спрашивал.
+        #
+        # Теперь домен остаётся собой, а исправление существует отдельно как
+        # предложение и применяется только тогда, когда DNS сказал, что
+        # загруженного домена нет вовсе (см. tests/test_trust.py).
+        cleaner = EmailCleaner()
+        self.assertEqual(cleaner.clean_email("user@gamil.com"),
+                         "user@gamil.com",
+                         "домен подменён молча — вердикт будет про чужой ящик")
+        self.assertEqual(cleaner.suggest_domain_fix("user@gamil.com"),
                          "user@gmail.com",
-                         "опечатка домена из test.txt не исправлена")
+                         "предложение об исправлении потерялось")
 
 
 class TestPipeline(unittest.TestCase):

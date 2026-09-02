@@ -513,6 +513,76 @@ class ResultStore:
                 except Exception:
                     pass
 
+    def revise_domain(self, domain, new_status, note):
+        """Переводит уже показанные Valid по домену в другой статус.
+
+        Зачем. Домен объявляет себя catch-all не сразу: тройная проба могла
+        сорваться, а тарпитинг у гиганта начинается ПОСЛЕ того, как мы успели
+        проверить сотню адресов. К этому моменту их «Годен» уже в таблице и в
+        выгрузке — и раньше там и оставались, потому что программа писала
+        предупреждение в лог, а лог владелец не экспортирует.
+
+        Возвращает число пересмотренных строк.
+        """
+        domain = str(domain or "").strip().lower().lstrip("@")
+        if not domain:
+            return 0
+        suffix = "@" + domain
+        # new_status=None означает «только приписать оговорку».
+        #
+        # Разница принципиальная. Тарпитинг и подтверждённый catch-all —
+        # ДОКАЗАННЫЕ вещи, и Valid по таким доменам обязан перестать быть
+        # Valid. А «у домена все пять адресов ответили 250» — всего лишь
+        # подозрение: у честного корпоративного домена так и бывает, и
+        # снимать с него Valid значило бы выбрасывать живые контакты.
+        # Подозрению место в тексте причины, а не в статусе.
+        new_group = group_of(new_status) if new_status else None
+        moved = 0
+        with self._lock:
+            self._flush_locked()
+            if self._conn is None:
+                return 0
+            try:
+                rows = self._conn.execute(
+                    "SELECT pos, grp, reason FROM rows "
+                    "WHERE status = 'Valid' AND email_lc LIKE ?",
+                    ("%" + suffix,)).fetchall()
+            except Exception:
+                return 0
+            for position, old_group, reason in rows:
+                fresh = ("%s | %s" % (reason or "", note)).strip(" |")
+                try:
+                    if new_group is None:
+                        self._conn.execute(
+                            "UPDATE rows SET reason = ? WHERE pos = ?",
+                            (fresh, position))
+                        moved += 1
+                        continue
+                    self._conn.execute(
+                        "UPDATE rows SET status = ?, grp = ?, reason = ? WHERE pos = ?",
+                        (new_status, new_group, fresh, position))
+                except Exception:
+                    continue
+                # Индекс в памяти держит позиции по группам: без переноса
+                # строка осталась бы в фильтре «Годен», сколько её ни правь.
+                try:
+                    old_positions = self._index.get(old_group)
+                    if old_positions is not None:
+                        index = old_positions.index(position)
+                        del old_positions[index]
+                        self._counts[old_group] -= 1
+                except (ValueError, KeyError):
+                    pass
+                self._index[new_group].append(position)
+                self._counts[new_group] += 1
+                moved += 1
+            if moved:
+                try:
+                    self._conn.commit()
+                except Exception:
+                    pass
+        return moved
+
     # --- чтение ---------------------------------------------------------
 
     def __len__(self):
