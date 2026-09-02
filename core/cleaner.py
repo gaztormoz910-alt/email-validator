@@ -271,9 +271,18 @@ class EmailCleaner:
         # Убираем случайные точки в конце
         domain = domain.rstrip('.')
         
-        # 2. Проверка на опечатки в известных доменах
-        if domain in self._typo_map:
-            domain = self._typo_map[domain]
+        # 2. ОПЕЧАТКИ БОЛЬШЕ НЕ ИСПРАВЛЯЮТСЯ ЗДЕСЬ.
+        #
+        # Раньше `gmial.com` молча превращался в `gmail.com`, и вердикт
+        # выносился про ДРУГОЙ ящик: и «Годен» (о чужом человеке), и «Нет
+        # такого» (о настоящем, который никто не проверял). Владелец при этом
+        # видел в таблице подменённую строку и не знал, что загружал другую.
+        #
+        # Теперь исправление — это ПРЕДЛОЖЕНИЕ (см. suggest_domain_fix), и
+        # применяется оно только там, где загруженный домен доказано мёртв:
+        # в core/pipeline.py, после ответа DNS. Склейка мусора выше — другое
+        # дело: `gmail.comtelefoon` не домен вовсе, там мы восстанавливаем
+        # адрес, а не подменяем его.
         
         # 3. Точное совпадение с известным доменом — сразу пропускаем
         if domain in self.popular_domains:
@@ -289,6 +298,26 @@ class EmailCleaner:
             return f"{local_part}@{domain}"
         
         # Совсем битый домен (без точки, слишком короткий) — мусор
+        return None
+
+    def suggest_domain_fix(self, email: str):
+        """Похоже ли, что в домене опечатка. Возвращает адрес-предложение.
+
+        None означает «предложить нечего». Ничего не меняет и никуда не
+        применяется сама: решение принимает конвейер, и только после того,
+        как DNS сказал, что загруженный домен мёртв. Это и есть разница
+        между «исправить опечатку» и «подменить ящик».
+        """
+        if not isinstance(email, str) or email.count("@") != 1:
+            return None
+        local_part, domain = email.rsplit("@", 1)
+        domain = domain.strip().lower().rstrip(".")
+        if not local_part or not domain:
+            return None
+
+        fixed = self._typo_map.get(domain)
+        if fixed and fixed != domain:
+            return "%s@%s" % (local_part, fixed)
         return None
 
     # Алиас для обратной совместимости (pipeline.py вызывает clean_email)

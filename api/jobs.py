@@ -174,7 +174,13 @@ def _run_job(job, emails, proxies, threads, timeout):
             with job.lock:
                 job.results.append({
                     "email": email,
+                    "original_email": payload.get("original_email", ""),
                     "status": status,
+                    # Уверенность в вердикте и её основание: без них
+                    # интегратор не отличит подтверждённый Valid от
+                    # принятого catch-all доменом.
+                    "confidence": payload.get("verdict_confidence"),
+                    "confidence_basis": payload.get("verdict_basis", ""),
                     "reason": reason,
                     "mx": mx,
                     "score": payload.get("engagement_score"),
@@ -184,8 +190,26 @@ def _run_job(job, emails, proxies, threads, timeout):
                     "country": payload.get("country"),
                 })
 
+        def on_revise(domains, new_status, note):
+            """Пересмотр собранных результатов задачи по разоблачённым доменам."""
+            wanted = {"@" + str(d).strip().lower().lstrip("@") for d in domains or []}
+            moved = 0
+            with job.lock:
+                for row in job.results:
+                    if row.get("status") != "Valid":
+                        continue
+                    if not any(str(row.get("email", "")).lower().endswith(sfx)
+                               for sfx in wanted):
+                        continue
+                    row["reason"] = ("%s | %s" % (row.get("reason", ""), note)).strip(" |")
+                    if new_status:
+                        row["status"] = new_status
+                    moved += 1
+            return moved
+
         pipeline = ValidationPipeline(callbacks={
             "on_log": lambda *a, **k: None,
+            "on_revise": on_revise,
             "on_progress": lambda *a, **k: None,
             "on_proxy_progress": lambda *a, **k: None,
             "on_result": on_result,
