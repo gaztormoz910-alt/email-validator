@@ -90,6 +90,13 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
             'on_progress': self.safe_update_progress,
             'on_proxy_progress': self.safe_proxy_progress,
             'on_phase': self.safe_phase,
+            # Пересмотр вердикта по разоблачённому домену. Канал был у
+            # веб-окна, командной строки и API, а здесь — нет, и конвейер
+            # молча получал ноль пересмотренных строк: домен, уличённый в
+            # конце прогона как catch-all или тарпитящий, оставлял свои
+            # «Годен» на экране и в выгрузке. Хранилище результатов у обоих
+            # окон общее, так что чинится это одной подпиской.
+            'on_revise': self.safe_revise,
             'on_result': self.safe_add_result,
             'on_complete': self.on_pipeline_complete,
             'on_unique_count': self.safe_update_unique_count,
@@ -885,6 +892,28 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
             self.log_note_lbl.configure(
                 text=f"строк лога пропущено: {dropped} (потолок буфера)")
 
+    def safe_revise(self, domains, new_status, note):
+        """Переводит уже показанные строки разоблачённого домена.
+
+        Зовётся из рабочего потока конвейера, поэтому в само хранилище пишем
+        здесь же (оно потокобезопасно), а перерисовку таблицы просим у
+        главного потока: трогать виджеты Tk из чужого потока нельзя.
+
+        Возвращает число пересмотренных строк — конвейер печатает его в лог.
+        """
+        moved = 0
+        for domain in domains or []:
+            try:
+                moved += self.result_store.revise_domain(domain, new_status, note)
+            except Exception:
+                continue
+        if moved:
+            # Таблица перерисовывается принудительно: набор адресов на
+            # странице не изменился, и обычная проверка «показывать ли
+            # заново» сочла бы, что делать нечего.
+            self._ui_call(lambda: self.refresh_validator_tree(force=True))
+        return moved
+
     def safe_add_result(self, email, status, reason, mx, data=None):
         if data is None:
             data = {}
@@ -1017,9 +1046,18 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
             score = data.get("engagement_score", "")
             grade = data.get("engagement_grade", "")
             score_display = f"{score} {grade}".strip() if score != "" else ""
+            # Уверенность показываем числом, а пустую — прочерком: пустая
+            # ячейка читается как «ноль», а это разные вещи. Ноль означает
+            # «адрес по сети не проверялся», и сказать это надо словом.
+            confidence = data.get("verdict_confidence", "")
+            confidence_display = "—" if confidence == "" else str(confidence)
             self.tree.insert("", "end", values=(
                 email,
+                # Пусто, если очистка ничего не меняла: тогда загруженная
+                # строка и есть проверенная, и повторять её незачем.
+                data.get("original_email", ""),
                 status_display,
+                confidence_display,
                 score_display,
                 data.get("provider_name", ""),
                 data.get("domain_type", ""),

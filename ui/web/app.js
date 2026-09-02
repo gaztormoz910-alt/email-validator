@@ -23,6 +23,90 @@ async function api(method, payload = {}) {
   return res.json();
 }
 
+/* ── сбой в самом окне ─────────────────────────────────────────
+   Половина случаев «программа сломалась» приходится сюда, а не на питон:
+   журнал событий Windows краха процесса не показывал, то есть ломалось
+   окно. Консоль WebView2 владельцу не видна, поэтому без этого канала
+   такой сбой не оставлял следа вообще нигде.
+
+   Отправка идёт напрямую через fetch, а не через api(): если сломан сам
+   api(), сообщение об этом им же и не уедет. И тихо — сбой отчёта о сбое
+   не должен порождать второй отчёт, иначе получится вечная петля. */
+let crashReports = 0;
+
+function reportClientCrash(message, where, stack) {
+  // Потолок на прогон: ошибка в тике повторяется дважды в секунду, и без
+  // него журнал за ночь вырастет до гигабайта, а разбирать всё равно будут
+  // первую запись.
+  if (crashReports >= 20) return;
+  crashReports += 1;
+  try {
+    fetch("/api/client_error", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Token": TOKEN },
+      body: JSON.stringify({
+        message: String(message || "").slice(0, 500),
+        where: String(where || "").slice(0, 300),
+        stack: String(stack || "").slice(0, 4000),
+      }),
+    }).catch(() => {});
+  } catch {
+    /* отчёт о сбое не имеет права стать вторым сбоем */
+  }
+}
+
+/* Описать что угодно, ничего не уронив.
+
+   Первая версия этого перехватчика поймала у владельца десять сбоев и
+   записала все десять ПУСТЫМИ: она верила, что у события есть message, а у
+   причины отказа — понятный вид. Пустая запись стоит ровно столько же,
+   сколько её отсутствие, поэтому теперь описывается всё, что удалось
+   разглядеть, и всегда остаётся хотя бы вид события. */
+function describe(value) {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  try {
+    if (typeof value === "string") return value || "(пустая строка)";
+    if (value instanceof Error) {
+      return `${value.name}: ${value.message || "(без текста)"}`;
+    }
+    const text = String(value);
+    // "[object Object]" не говорит ничего — тогда показываем поля.
+    if (text === "[object Object]") {
+      return JSON.stringify(value).slice(0, 400);
+    }
+    return text || `(пусто, тип ${typeof value})`;
+  } catch {
+    return `(не удалось описать, тип ${typeof value})`;
+  }
+}
+
+window.addEventListener("error", (event) => {
+  // Ошибка ЗАГРУЗКИ ресурса приходит сюда же, но у неё нет ни message, ни
+  // filename — зато есть target. Именно такой случай и записывался пустым.
+  const target = event.target;
+  const isResource = target && target !== window && target.tagName;
+  const what = isResource
+    ? `не загрузился ресурс <${String(target.tagName).toLowerCase()}> `
+      + `${target.src || target.href || "(без адреса)"}`
+    : describe(event.message);
+
+  reportClientCrash(
+    `[ошибка JS] ${what}`,
+    `${event.filename || "источник не назван"}:${event.lineno || 0}`,
+    event.error && event.error.stack);
+}, true);   // true — иначе ошибки загрузки ресурсов сюда не всплывают
+
+// Отказ обещания, который никто не перехватил, — самый частый вид поломки в
+// этом окне: почти вся работа идёт через async-функции.
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason;
+  reportClientCrash(
+    `[отказ обещания] ${describe(reason)}`,
+    "необработанный отказ обещания",
+    reason && reason.stack);
+});
+
 /* ── мелкие помощники ─────────────────────────────────────── */
 
 let toastTimer = null;
@@ -104,6 +188,10 @@ const ui = {
   running: false,
   mode: "validator",
   lastSig: "",          // отпечаток выборки: по нему решаем, перезапрашивать ли
+  // Адреса с раскрытой карточкой. Множество, а не флаг на строке: строки
+  // пересоздаются при каждой перерисовке, а во время прогона она идёт раз
+  // в секунду — без этого карточка захлопывалась бы сама собой.
+  opened: new Set(),
   // Грани отбора и поиск. Выбранное хранится множествами: порядок значений в
   // списке меняется по мере прогона (сортировка по количеству), а выбор от
   // этого зависеть не должен.
@@ -376,7 +464,117 @@ function avatarCell(row) {
   mail.textContent = email;
 
   box.append(ava, mail);
+
+  // Что лежало в файле, если очистка адрес изменила.
+  //
+  // Поле приезжало с сервера и молча выбрасывалось: главное требование
+  // владельца — «какие почты загрузил, такие и проверяй» — в окне видно
+  // не было вовсе. Показываем ТОЛЬКО когда строки разошлись: подпись под
+  // каждым адресом перестала бы что-либо значить.
+  if (row.original && row.original !== email) {
+    const was = document.createElement("span");
+    was.className = "who__was";
+    was.textContent = `загружено как ${row.original}`;
+    was.title = "Очистка изменила строку. Проверен адрес сверху.";
+    box.appendChild(was);
+  }
   return box;
+}
+
+/* ── карточка адреса ──────────────────────────────────────────
+   Движок считает на каждом адресе компанию, должность, тип домена, год
+   рождения, грейд и ИСТОЧНИК каждой догадки. В девять колонок это не
+   влезает, и раньше всё перечисленное было видно только в выгрузке и в
+   консоли — то есть для того, кто работает окном, его как бы не было.
+
+   Карточка раскрывается по клику на строку. Ничего не запрашивает: все
+   данные уже приехали вместе со страницей. */
+
+const SOURCE_TEXT = {
+  "файл": "из файла — факт",
+  "домен": "по домену — факт",
+  "адрес": "из самого адреса — факт",
+  "Gravatar": "из профиля Gravatar",
+  "имя": "угадано по имени — догадка",
+};
+
+function sourceNote(value) {
+  if (!value) return "";
+  return SOURCE_TEXT[value] || value;
+}
+
+function detailRow(row, columns) {
+  const tr = document.createElement("tr");
+  tr.className = "detail";
+  const td = document.createElement("td");
+  td.colSpan = columns;
+
+  const more = row.more || {};
+  const grid = document.createElement("div");
+  grid.className = "detail__grid";
+
+  const pairs = [
+    ["Загружено как", row.original],
+    ["Проверен как", more.checked_as],
+    ["Почтовый сервер", more.mx],
+    ["Тип домена", more.domain_type],
+    ["Провайдер", more.provider_type],
+    ["Грейд", more.grade],
+    ["Компания", more.company, more.company_source],
+    ["Должность", more.job_role, more.job_role_source],
+    ["Имя", [more.first_name, more.last_name].filter(Boolean).join(" ") || row.name,
+     more.name_source],
+    ["Пол", row.gender, more.gender_source],
+    ["Страна", row.country, more.country_source],
+    ["Год рождения", more.birth_year],
+    ["Соцсети", more.social],
+    ["Основание вердикта", row.basis],
+  ];
+
+  for (const [label, value, source] of pairs) {
+    if (!value && value !== 0) continue;
+    const cell = document.createElement("div");
+    cell.className = "detail__item";
+    const dt = document.createElement("b");
+    dt.textContent = label;
+    const dd = document.createElement("span");
+    dd.textContent = String(value);
+    cell.append(dt, dd);
+    const note = sourceNote(source);
+    if (note) {
+      const src = document.createElement("i");
+      // Догадку помечаем отдельно: «Италия» из файла и «Италия», угаданная
+      // по имени, — разные вещи, и выглядеть одинаково они не должны.
+      src.className = "detail__src" + (source === "имя" ? " detail__src--guess" : "");
+      src.textContent = note;
+      cell.appendChild(src);
+    }
+    grid.appendChild(cell);
+  }
+
+  if (more.ai_note) {
+    const note = document.createElement("p");
+    note.className = "detail__note";
+    note.textContent = `Замечание модели: ${more.ai_note}`;
+    grid.appendChild(note);
+  }
+  if (more.from_cache) {
+    const note = document.createElement("p");
+    note.className = "detail__note";
+    note.textContent = "Вердикт взят из прошлого прогона — сервер сейчас не "
+      + "спрашивали. Дата в колонке «Когда» исходная.";
+    grid.appendChild(note);
+  }
+  if (!grid.childElementCount) {
+    const note = document.createElement("p");
+    note.className = "detail__note";
+    note.textContent = "Про этот адрес ничего сверх таблицы не известно.";
+    grid.appendChild(note);
+  }
+
+  td.appendChild(grid);
+  tr.appendChild(td);
+  return tr;
 }
 
 /* Две буквы из адреса: по ним кружок отличается от соседнего. */
@@ -462,7 +660,43 @@ function renderRows(data) {
       }
       tr.appendChild(td);
     });
+
+    // Клик раскрывает карточку под строкой. Вторая строка таблицы, а не
+    // всплывающее окно: так видно сразу несколько адресов рядом, и ничего
+    // не перекрывает таблицу.
+    tr.classList.add("is-openable");
+    tr.tabIndex = 0;
+    tr.title = "Нажмите, чтобы увидеть всё, что известно об адресе";
+    const toggle = () => {
+      const open = tr.nextElementSibling
+        && tr.nextElementSibling.classList.contains("detail");
+      if (open) {
+        tr.nextElementSibling.remove();
+        tr.classList.remove("is-open");
+        ui.opened.delete(row.email);
+      } else {
+        tr.after(detailRow(row, cells.length));
+        tr.classList.add("is-open");
+        // Запоминаем раскрытые. Во время прогона таблица перерисовывается
+        // раз в секунду, и без этого карточка захлопывалась бы ровно тогда,
+        // когда за ней и следят.
+        ui.opened.add(row.email);
+      }
+    };
+    tr.addEventListener("click", toggle);
+    tr.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggle();
+      }
+    });
+
     frag.appendChild(tr);
+    // Карточка, раскрытая до перерисовки, остаётся раскрытой.
+    if (ui.opened.has(row.email)) {
+      tr.classList.add("is-open");
+      frag.appendChild(detailRow(row, cells.length));
+    }
   }
   body.replaceChildren(frag);
 
@@ -1116,7 +1350,19 @@ function renderFound(data) {
 }
 
 async function refreshFound(force = false) {
-  const data = await api("parser_page", { page: parser.page });
+  // Перехват тут обязателен: это единственный вызов в тике сбора, который
+  // его не имел, — соседний parser_state обёрнут с самого начала. Отказ
+  // уходил в неперехваченное обещание, а окно после этого выглядело
+  // сломанным, не сказав ни слова.
+  let data;
+  try {
+    data = await api("parser_page", { page: parser.page });
+  } catch (err) {
+    reportClientCrash(err && err.message ? err.message : String(err),
+      "refreshFound: не удалось получить страницу найденных адресов",
+      err && err.stack);
+    return;
+  }
   if (force || data.total !== parser.total) {
     parser.total = data.total;
     renderFound(data);

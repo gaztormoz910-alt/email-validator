@@ -37,6 +37,22 @@ class StderrFilter:
 sys.stderr = StderrFilter(sys.stderr)
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# Перехватчики аварий ставятся ПЕРВЫМ делом — до импорта интерфейсов и до
+# создания окна. Сбой при самой загрузке модулей тоже должен оставить след:
+# именно он выглядит как «программа мигнула и закрылась», и именно про него
+# рассказать сложнее всего.
+#
+# Рабочий каталог у окна и у консоли один и тот же (папка проекта), поэтому
+# журнал всегда оказывается в data/crash.log рядом с кэшем.
+try:
+    from core.crashlog import install_hooks as _install_crash_hooks
+
+    _install_crash_hooks()
+except Exception:
+    # Программа обязана запуститься даже без журнала: он про разбор аварий,
+    # а не про проверку почты.
+    pass
+
 
 def run_classic():
     """Прежнее окно на CustomTkinter."""
