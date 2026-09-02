@@ -48,8 +48,16 @@ class TestHandlerLogic(unittest.TestCase):
         self.assertEqual(body["local_rule"], "unlikely")
 
     def test_validate_single_flags_disposable(self):
+        """Одноразовый домен называется своим именем, а не «invalid».
+
+        Требование изменено намеренно. «invalid» означает «ящика не
+        существует», и интегратор по такому ответу УДАЛЯЕТ контакт — тогда
+        как окно всего лишь помечает адрес мусорным (Trap/Disposable).
+        Одно и то же слово должно значить на всех поверхностях одно и то же.
+        """
         _code, body = handle("/api/validate-single", {"email": "a@mailinator.com"})
-        self.assertEqual(body["status"], "invalid")
+        self.assertEqual(body["status"], "disposable")
+        self.assertTrue(body["disposable"])
         self.assertTrue(body["disposable"])
 
     def test_validate_single_flags_role(self):

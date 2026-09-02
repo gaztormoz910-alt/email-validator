@@ -16,12 +16,56 @@ NON_BLACKLIST_FILES = frozenset({"free_providers.txt"})
 # почтовиков. Если содержит — список либо испорчен, либо это вообще не тот
 # файл. Такой список безопаснее не грузить целиком, чем выяснять это по
 # результатам прогона на живой базе.
-BLACKLIST_SENTINELS = frozenset({
-    "gmail.com", "googlemail.com", "yahoo.com", "outlook.com", "hotmail.com",
-    "live.com", "aol.com", "icloud.com", "me.com", "mail.ru", "yandex.ru",
-    "protonmail.com", "proton.me", "gmx.com", "gmx.de", "web.de", "qq.com",
-    "163.com", "naver.com", "orange.fr", "libero.it", "comcast.net",
-})
+def _known_live_domains():
+    """Все домены, о которых программа знает, что они живые почтовики.
+
+    Раньше здесь стоял список из двадцати четырёх имён, набранный руками. Он
+    защищал гигантов — и пропускал всё остальное: одна строка `seznam.cz` или
+    `t-online.de` в скачанном чужом списке хоронила весь домен целиком (и его
+    поддомены) без единого запроса к серверу.
+
+    Теперь страж собирается из тех же таблиц, которыми пользуется сам
+    валидатор: если программа знает провайдера настолько, чтобы подбирать под
+    него прокси, — она обязана знать и то, что его нельзя объявлять
+    одноразовым.
+    """
+    names = set()
+    try:
+        from core.mail_constants import (AOL_DOMAINS, MICROSOFT_DOMAINS,
+                                         NEEDS_CLEAN_IP_DOMAINS,
+                                         NICHE_FREE_DOMAINS, YAHOO_DOMAINS)
+        for table in (AOL_DOMAINS, MICROSOFT_DOMAINS, NEEDS_CLEAN_IP_DOMAINS,
+                      NICHE_FREE_DOMAINS, YAHOO_DOMAINS):
+            names |= {str(d).strip().lower() for d in table}
+    except Exception:
+        pass
+    try:
+        from core.cleaner import EmailCleaner
+
+        names |= {str(d).strip().lower() for d in EmailCleaner().popular_domains}
+    except Exception:
+        pass
+    try:
+        # Самая широкая таблица бесплатных почтовиков в программе: почти две
+        # сотни имён, включая seznam.cz, bk.ru, wp.pl и прочие, которых в
+        # ручном списке гигантов не было и быть не могло.
+        from core.provider import _FREE_MAIL_EXTRA, _ISP_DOMAINS, _PROVIDER_DOMAINS
+
+        for table in (_FREE_MAIL_EXTRA, _ISP_DOMAINS, _PROVIDER_DOMAINS):
+            names |= {str(d).strip().lower() for d in table}
+    except Exception:
+        pass
+    # Минимум на случай, если таблицы не прочитались: без него страж мог бы
+    # оказаться пустым, и контракт перестал бы что-либо проверять.
+    names |= {"gmail.com", "googlemail.com", "yahoo.com", "outlook.com",
+              "hotmail.com", "live.com", "aol.com", "icloud.com", "me.com",
+              "mail.ru", "yandex.ru", "protonmail.com", "proton.me",
+              "gmx.com", "gmx.de", "web.de", "qq.com", "163.com",
+              "naver.com", "orange.fr", "libero.it", "comcast.net"}
+    return frozenset(n for n in names if n and "." in n)
+
+
+BLACKLIST_SENTINELS = _known_live_domains()
 
 
 class SpamFilter:

@@ -414,8 +414,15 @@ class DnsChecksMixin:
                 return result
         except DNSUnavailable:
             dns_failed = True
-        except self._ANSWERED_NOTHING:
-            pass                      # это ОТВЕТ: таких записей у домена нет
+        except dns.resolver.NXDOMAIN:
+            # Домена НЕ СУЩЕСТВУЕТ вовсе. Спрашивать у него A и AAAA незачем:
+            # ответ будет тот же, а через прокси это два лишних запроса на
+            # каждый мёртвый домен базы.
+            with self.mx_lock:
+                self.mx_cache[domain] = []
+            return []
+        except dns.resolver.NoAnswer:
+            pass                      # домен есть, MX-записей у него нет
         except Exception:
             dns_failed = True         # всё прочее — мы не спросили
 

@@ -1002,6 +1002,22 @@ class ValidationPipeline:
             self.ai.train_models()
             self.callbacks['on_log']("[INFO] ИИ успешно обучен и готов к бою!", "info")
 
+    def _revise(self, domains, new_status, note):
+        """Просит поверхность пересмотреть уже показанные строки по домену.
+
+        Канал необязательный: командная строка и API держат свои списки, и
+        каждый пересматривает их сам. Отсутствие обработчика не должно ронять
+        прогон — но и молчать об этом нельзя, поэтому строка в логе остаётся
+        в любом случае (её пишет вызывающий).
+        """
+        handler = self.callbacks.get('on_revise')
+        if handler is None or not domains:
+            return 0
+        try:
+            return int(handler(list(domains), str(new_status), str(note)) or 0)
+        except Exception:
+            return 0
+
     def _phase(self, name, count=0):
         """Сообщает окну, чем конвейер занят сейчас. Необязательный канал.
 
@@ -1351,6 +1367,33 @@ class ValidationPipeline:
                 raw_status = res["status"]
                 warn_if_proxies_dead()
 
+                # Опечатка в домене — ЗАПАСНОЙ путь, а не подмена.
+                #
+                # Проверяется ровно то, что загружено. И только если DNS
+                # ответил, что такого домена нет вовсе, мы пробуем похожий
+                # известный: `user@gmial.com` -> `user@gmail.com`. Обе строки
+                # остаются в выдаче, и в причине сказано, что произошло.
+                #
+                # Раньше подмена шла молча и ДО проверки: вердикт получался
+                # настоящий, но про другой ящик.
+                if (raw_status == "invalid"
+                        and "No MX" in res.get("reason", "")
+                        and fix_typos):
+                    suggestion = self.cleaner.suggest_domain_fix(email)
+                    if suggestion and suggestion != email:
+                        fixed_res = self.network.check_email(suggestion)
+                        if fixed_res.get("status") in ("valid", "catchall"):
+                            data["original_email"] = email
+                            data["checked_as"] = suggestion
+                            fixed_res["reason"] = (
+                                "Домен исправлен: %s -> %s. %s"
+                                % (email.rsplit("@", 1)[1],
+                                   suggestion.rsplit("@", 1)[1],
+                                   fixed_res.get("reason", "")))
+                            res = fixed_res
+                            raw_status = res["status"]
+                            email = suggestion
+
                 # Greylisted — в очередь на повтор, и ждём столько, сколько
                 # серые списки просят: повтор раньше выдержки получает тот же
                 # серый ответ, то есть тратится впустую. См. core/runstate.py.
@@ -1445,11 +1488,18 @@ class ValidationPipeline:
                 if not self.is_running:
                     break
 
+                # Что именно лежало в файле. Запоминается ДО очистки и едет
+                # с адресом до самой выгрузки: владелец обязан видеть, что он
+                # загрузил, даже если мы восстановили склеенный домен.
+                loaded_as = email
                 if fix_typos:
                     email = self.cleaner.clean_email(email)
 
                 if not email:
                     continue
+
+                if isinstance(data, dict) and loaded_as != email:
+                    data["original_email"] = loaded_as
 
                 # Дедуп по КАНОНИЧЕСКОМУ виду: john.doe@gmail.com и johndoe@gmail.com —
                 # один и тот же ящик, и слать туда дважды нельзя (жалобы на спам).
@@ -1757,7 +1807,26 @@ class ValidationPipeline:
             trapped = self.network.tarpit_domains() if self.network else []
         except Exception:
             trapped = []
+
+        # Домены, ДОКАЗАННО принимающие что угодно. Их Valid ничего не значит,
+        # и оставлять его в выгрузке нельзя: владелец решает по колонке.
+        try:
+            proven = self.network.proven_catchall_domains() if self.network else []
+        except Exception:
+            proven = []
+        if proven:
+            revised = self._revise(
+                proven, "Unknown",
+                "домен принимает любой адрес (catch-all) — существование "
+                "ящика по SMTP не проверяется")
+            if revised:
+                self.callbacks['on_log'](
+                    f"[INFO] Пересмотрено строк по catch-all доменам: {revised}. "
+                    "Их «Годен» ничего не доказывал.", "info")
         if trapped:
+            self._revise(trapped, "Unknown",
+                         "домен перестал отвечать честно (тарпитинг) — «Годен» "
+                         "по нему недоказуем")
             self.callbacks['on_log'](
                 "[DEAD] ВНИМАНИЕ: %s перестал отвечать честно — принимает любые "
                 "адреса, защищаясь от перебора с нашего IP. Все «Годен» по этим "
@@ -1782,6 +1851,12 @@ class ValidationPipeline:
                     "ящика — сегментируйте отдельно:", "dead")
                 for dom, cnt in suspicious[:15]:
                     self.callbacks['on_log'](f"[DEAD]    {dom} — {cnt} из {cnt} valid", "dead")
+                # Подозрение приписывается К ПРИЧИНЕ, но статус не трогает:
+                # у честного корпоративного домена все адреса тоже бывают
+                # живыми, и снимать с них Valid значило бы терять контакты.
+                self._revise([dom for dom, _ in suspicious], None,
+                             "домен под подозрением на catch-all: все "
+                             "проверенные адреса ответили 250")
         except Exception:
             pass
 

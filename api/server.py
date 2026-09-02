@@ -84,7 +84,11 @@ def describe(email):
     elif rule_verdict == "impossible":
         status, reason = "invalid", rule_reason
     elif is_disposable(cleaned):
-        status, reason = "invalid", "Одноразовый почтовый домен"
+        # НЕ «invalid». Одноразовый домен означает «писать не стоит», а не
+        # «ящика не существует» — и окно называет это Trap/Disposable. Пока
+        # здесь стояло invalid, интегратор через API удалял контакты, которые
+        # окно всего лишь пометило бы как мусорные.
+        status, reason = "disposable", "Одноразовый почтовый домен"
     elif rule_verdict == "unlikely":
         status, reason = "risky", rule_reason
     elif is_role_based(cleaned):
