@@ -401,6 +401,19 @@ input[type="range"]:disabled { cursor: not-allowed; opacity: .55; }
 .progress__text { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-2); }
 .progress__text span:last-child { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
 .progress__track { height: 6px; border-radius: var(--r-pill); background: var(--surface-2); overflow: hidden; }
+
+/* Проверка прокси идёт без знаменателя: сколько их всего, пока неизвестно —
+   файл ещё читается. Полоса на нуле в это время выглядит сломанной, и
+   владелец справедливо спрашивает, где прогресс. Бегущая заливка отвечает
+   на другой вопрос — «работа идёт», — и не притворяется процентом. */
+.progress__track.is-running .progress__bar {
+  width: 35% !important;
+  animation: progress-sweep 1.4s ease-in-out infinite;
+}
+@keyframes progress-sweep {
+  0%   { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
 .progress__bar {
   height: 100%; width: 0;
   border-radius: var(--r-pill);
@@ -673,14 +686,30 @@ input[type="number"], textarea {
   .side { max-height: none; min-height: auto; overflow: visible; }
   .side__scroll { height: auto; overflow-y: visible; }
   .tiles--mini { grid-template-columns: minmax(0, 1fr); }
+
+  /* Прокрутку области надо было не только объявить в комментарии, но и
+     ДАТЬ. Корень её запрещает (html, body: height 100vh, overflow hidden),
+     панель разворачивается целиком — и всё, что ниже неё, оказывалось за
+     нижним краем окна без единого способа туда добраться. Ни лога, ни
+     таблицы владелец не видел, сколько ни крути. */
+  .layout {
+    height: 100%;
+    max-height: 100%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  /* Таблица и лог внутри общей прокрутки должны иметь СВОЮ высоту, иначе
+     flex:1 отдаёт им ноль и они схлопываются в полоску. */
+  .work { min-height: 520px; }
 }
 
 /* Низкое окно. Двух колонок ширина позволяет, а высоты уже не хватает:
    без этого таблица и лог схлопываются в полоску. */
 @media (max-height: 620px) {
-  .layout { align-content: start; }
+  .layout { align-content: start; height: 100%; max-height: 100%; overflow-y: auto; }
   .side { max-height: none; min-height: auto; overflow: visible; }
   .side__scroll { height: auto; overflow-y: visible; }
+  .work { min-height: 420px; }
 }
 
 /* ── Второй экран: сбор адресов ────────────────────────────────
@@ -728,6 +757,14 @@ input[type="number"], textarea {
 .is-gone {
   visibility: hidden !important;
   pointer-events: none !important;
+}
+
+/* А это — «спрятать И убрать место».
+   is-gone нужен там, где элемент вернётся через секунду и раскладка не
+   должна прыгать. Для строки, которой чаще всего нет вовсе (продолжение
+   прерванного прогона), он оставлял в панели пустую дыру. */
+.is-folded {
+  display: none !important;
 }
 
 /* Подпись под кнопкой запуска меняет длину («Не хватает: адреса и прокси» ->
