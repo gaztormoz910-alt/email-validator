@@ -158,8 +158,11 @@ class BlacklistDownloader:
                 from core.filters import BLACKLIST_SENTINELS
                 bad = BLACKLIST_SENTINELS & new_domains
                 if bad:
-                    log(f"[DEAD] {filename}: источник испорчен — внутри "
-                        f"{', '.join(sorted(bad)[:3])}. Оставляю старый список.", "dead")
+                    # Не «испорчен» и не красным: обновление просто не
+                    # взято. Прежний список остался, проверка идёт как шла.
+                    log(f"[INFO] {filename}: обновление не взято — внутри живые "
+                        f"почтовики ({', '.join(sorted(bad)[:3])}). "
+                        "Работаем на прежнем списке, база не тронута.", "info")
                     continue
 
             old_count = 0

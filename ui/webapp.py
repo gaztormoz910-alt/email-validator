@@ -105,6 +105,9 @@ class ValidatorApi:
         # хотя прогон идёт и позади сотни строк.
         self._history = []
         self._history_cap = 1500
+        # Отпечаток файлов (размер + время правки) на момент подсчёта строк.
+        # Нужен, чтобы заметить правку базы в редакторе и пересчитать.
+        self._file_stamps = {}
         self._export_busy = False
 
         # Сбор адресов: свой конвейер, свой лог, свои счётчики.
@@ -408,6 +411,14 @@ class ValidatorApi:
         self._recount(payload.get("kind"))
         return self.sources()
 
+    @staticmethod
+    def _stat_of(path, field):
+        try:
+            info = os.stat(path)
+            return int(getattr(info, field))
+        except OSError:
+            return -1
+
     def _recount(self, kind):
         """Пересчитывает строки в источниках вида kind — в фоне.
 
@@ -439,11 +450,50 @@ class ValidatorApi:
                 # бы число от прошлого набора.
                 if self._count_jobs.get(kind) == job:
                     self._line_counts[kind] = int(total)
+                    # Отпечаток берётся ПОСЛЕ счёта: иначе правка, случившаяся
+                    # во время чтения, осталась бы незамеченной.
+                    self._file_stamps[kind] = [
+                        (item.get("path") or "",
+                         self._stat_of(item.get("path"), "st_size"),
+                         self._stat_of(item.get("path"), "st_mtime"))
+                        for item in snapshot if item.get("type") == "file"]
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _files_changed_on_disk(self, kind):
+        """Изменились ли файлы этого набора с момента подсчёта.
+
+        Владелец правит базу в текстовом редакторе и удивляется, что счётчик
+        не меняется: строки посчитаны один раз при загрузке, и о правке файла
+        программа узнать неоткуда. Сравнение размера и времени правки стоит
+        одного системного вызова на файл — это не чтение, окно не подвиснет
+        даже на гигабайтном списке.
+        """
+        stamp = []
+        for source in self._sources.get(kind) or []:
+            if source.get("type") != "file":
+                continue
+            path = source.get("path") or ""
+            try:
+                info = os.stat(path)
+                stamp.append((path, int(info.st_size), int(info.st_mtime)))
+            except OSError:
+                stamp.append((path, -1, -1))
+        with self._count_lock:
+            known = self._file_stamps.get(kind)
+            self._file_stamps[kind] = stamp
+        return known is not None and known != stamp
+
     def sources(self, payload=None):
         """Что сейчас подключено. Считается лениво — файл не читается."""
+        # Файл мог измениться на диске после загрузки. Проверяем это на
+        # каждом опросе панели: один stat на файл, зато число на экране
+        # перестаёт врать.
+        for kind in ("emails", "proxies", "dorks", "pproxy"):
+            if self._files_changed_on_disk(kind):
+                self._on_log(
+                    "[INFO] Файл изменился на диске — пересчитываю строки.", "info")
+                self._recount(kind)
         def describe(sources, kind):
             if not sources:
                 return {"count": 0, "title": "Выберите файл", "detail": "",
