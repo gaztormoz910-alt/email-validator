@@ -32,19 +32,21 @@ GLOBAL_VERIFIED_DOMAINS = {
 }
 
 
-# Названия движков-сборщиков. Префикс общий, чтобы окно и конвейер узнавали
-# их одинаково и без списка в двух местах.
-API_ENGINE_PREFIX = "API: "
+# Движки сбора. ОДИН список на весь проект: окно берёт его отсюда же.
+#
+# Сбор через открытые API (GitHub, npm, PyPI, Hacker News, Reddit, Stack
+# Overflow, GitLab) удалён по прямому требованию владельца вместе с пакетом
+# api/ и core/collectors.py. Здесь остались только поисковики — то, с чего
+# парсер начинался.
+SEARCH_ENGINES = (
+    "DuckDuckGo Lite",
+    "AOL (Tor)",
+    "Yahoo (Tor)",
+    "AOL (Proxies)",
+    "Yahoo (Proxies)",
+)
 
-API_ENGINES = {
-    API_ENGINE_PREFIX + "GitHub": "github",
-    API_ENGINE_PREFIX + "npm": "npm",
-    API_ENGINE_PREFIX + "PyPI": "pypi",
-    API_ENGINE_PREFIX + "Hacker News": "hackernews",
-    API_ENGINE_PREFIX + "Reddit": "reddit",
-    API_ENGINE_PREFIX + "Stack Overflow": "stackexchange",
-    API_ENGINE_PREFIX + "GitLab": "gitlab",
-}
+DEFAULT_ENGINE = SEARCH_ENGINES[0]
 
 
 class ParserPipeline(threading.Thread):
@@ -151,72 +153,6 @@ class ParserPipeline(threading.Thread):
     def resume(self):
         self._pause_event.clear()
 
-    def _run_collectors(self):
-        """Сбор через открытый API. Строка поля дорков = запрос к источнику.
-
-        Прокси не проверяются: у этих источников нет капчи и нет бана по IP в
-        том смысле, в каком он есть у поисковиков. Если прокси заданы, они
-        используются как есть — HTTP-прокси для обычного запроса.
-        """
-        from core.cleaner import normalize_for_dedup
-        from core.collectors import collect
-        from core.streamer import StreamLoader
-
-        source = API_ENGINES.get(self.engine_name)
-        if source is None:
-            self.log("[Ошибка] Неизвестный источник: %s" % self.engine_name)
-            if self.on_complete:
-                self.on_complete(aborted=True)
-            return
-
-        proxy_url = None
-        if self.proxies:
-            proxy_url = self.proxy_manager.get_proxy()
-        http_proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-
-        queries = [q.strip() for q in StreamLoader(self.dork_sources).stream_lines()
-                   if q and q.strip()]
-        if not queries:
-            self.log("[Ошибка] Ни одного запроса: поле «Поисковые запросы» пусто.")
-            if self.on_complete:
-                self.on_complete(aborted=True)
-            return
-
-        self.log("[Система] Источник %s, запросов: %d. Капчи и дорков тут нет — "
-                 "данные отдаются как есть." % (self.engine_name, len(queries)))
-        self.total_dorks = len(queries)
-
-        done = 0
-        for query in queries:
-            if self._stop_event.is_set():
-                break
-            while self._pause_event.is_set() and not self._stop_event.is_set():
-                time.sleep(0.3)
-
-            kwargs = {"packages": [query]} if source == "pypi" else {"query": query}
-            found, errors = collect(source, proxies=http_proxies, **kwargs)
-            for message in errors:
-                self.log("[Ошибка] " + message)
-
-            # Дедуп тем же ключом и тем же журналом, что и у поисковиков: один
-            # человек, попавший и в коммиты, и в npm, не должен приехать дважды.
-            fresh = [e for e in found
-                     if self._seen.add_if_new(normalize_for_dedup(e))]
-            if fresh:
-                self._update_stats(emails=len(fresh))
-                if self.on_result_found:
-                    for email in fresh:
-                        self.on_result_found(email, query)
-
-            done += 1
-            self._update_stats(dork_done=True)
-            self.log("[Найдено] %s: %d новых адресов по запросу «%s» (всего %d)"
-                     % (self.engine_name, len(fresh), query[:60], self.total_emails))
-
-        self.log("[Система] Сбор закончен. Всего адресов: %d" % self.total_emails)
-        if self.on_complete:
-            self.on_complete(aborted=self._stop_event.is_set())
-
     def run(self):
         self.ml_predictor = MLPredictor()
         if self.name_extractor is None:
@@ -228,16 +164,17 @@ class ParserPipeline(threading.Thread):
         # он стоит доли секунды, но на холодном диске может занять и больше,
         # а прогон к тому времени уже идёт.
         self.total_dorks = StreamLoader(self.dork_sources).estimate_total_lines()
+        # Имя движка могло остаться в настройках от удалённого сбора через
+        # API. Молча подставить другой — значит собирать не тем, что выбрано,
+        # и не сказать об этом ни слова.
+        if self.engine_name not in SEARCH_ENGINES:
+            self.log("[Система] Движок «%s» больше не поддерживается — сбор "
+                     "через открытые API удалён. Беру %s."
+                     % (self.engine_name, DEFAULT_ENGINE))
+            self.engine_name = DEFAULT_ENGINE
+
         self.log(f"[Система] Инициализация парсера. Поисковик: {self.engine_name}. "
                  f"Дорков примерно: {self.total_dorks}")
-
-        # Открытые API идут своим путём: у них нет ни капчи, ни разметки, ни
-        # выдачи, которую надо парсить. Строки из поля дорков там становятся
-        # ЗАПРОСАМИ к источнику — то же поле, другой смысл, и об этом сказано
-        # в подписи движка.
-        if self.engine_name.startswith(API_ENGINE_PREFIX):
-            self._run_collectors()
-            return
 
         def refine_total():
             try:

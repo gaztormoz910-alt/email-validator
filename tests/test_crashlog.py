@@ -291,9 +291,12 @@ def test_client_error_treats_the_payload_as_data(log):
     text = read(log)
     assert "A" * 5000 not in text, "длина сообщения не ограничена"
     assert len(text) < 12000, "одна запись из окна раздула журнал"
-    # Мусор вместо словаря не должен ронять метод.
-    assert api.client_error("не словарь")["ok"] is True
-    assert api.client_error(None)["ok"] is True
+    # Мусор вместо словаря не должен РОНЯТЬ метод — но и записывать нечего,
+    # поэтому теперь он получает честный отказ, а не молчаливое согласие.
+    # Раньше здесь подставлялось «Ошибка в окне», и в журнале владельца
+    # скопилось двадцать таких записей без единого слова содержания.
+    assert api.client_error("не словарь")["ok"] is False
+    assert api.client_error(None)["ok"] is False
 
 
 def test_client_error_is_wired_in_the_window():
@@ -355,8 +358,14 @@ def test_announce_tells_about_a_recent_crash(log):
     assert said >= 1
 
     lines = " ".join(row["text"] for row in api.log_tail()["log"])
-    assert "сломалась" in lines
+    # Формулировка сменилась намеренно: прежняя кричала «[DEAD] программа
+    # сломалась» и перечисляла каждую запись красной строкой. У владельца
+    # это дало красное полотно сразу после запуска — на месте, где ничего
+    # не сломалось ПРЯМО СЕЙЧАС. Сообщение о прошлой аварии не должно
+    # выглядеть как авария текущая.
+    assert "сбо" in lines.lower(), "о сбое не сказано вовсе"
     assert crashlog.crash_log_path() in lines, "не сказано, ГДЕ смотреть"
+    assert "[DEAD]" not in lines, "прошлая авария снова помечена как текущая"
 
 
 def test_announce_stays_silent_when_all_is_well(log):

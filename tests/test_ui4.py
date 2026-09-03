@@ -226,7 +226,7 @@ def test_classic_revise_is_subscribed():
     уличённый в конце прогона как catch-all или тарпитящий, оставляет свои
     «Годен» на экране и в выгрузке.
     """
-    for surface in ("ui/webapp.py", "ui/gui.py", "cli.py", "api/jobs.py"):
+    for surface in ("ui/webapp.py", "ui/gui.py", "cli.py"):
         assert "on_revise" in read(surface), "%s не слушает пересмотр" % surface
 
 
@@ -346,7 +346,7 @@ def test_nothing_hidden_from_every_surface():
 
     surfaces = [read(p) for p in ("ui/web/app.js", "ui/web/index.html",
                                  "ui/webapp.py", "ui/gui.py", "ui/panels.py",
-                                 "cli.py", "api/jobs.py")]
+                                 "cli.py")]
     hidden = [k for k in sorted(keys)
               if k not in INTERNAL_ONLY and not any(k in s for s in surfaces)]
     assert not hidden, "движок считает, а показать негде: %s" % ", ".join(hidden)
@@ -421,18 +421,3 @@ def test_detail_card_is_discoverable():
     assert ".hint--rows" in read("ui/web/style.css")
 
 
-def test_api_shows_the_same_enrichment():
-    """REST API отдаёт то же обогащение, что и окно.
-
-    API — тоже интерфейс, и он отставал от консоли ровно на то же самое:
-    интегратор получал вердикт без компании, должности, типа домена и без
-    источника догадок.
-    """
-    jobs = read("api/jobs.py")
-    for field in ('"grade"', '"domain_type"', '"birth_year"', '"company"',
-                  '"job_role"', '"sources"', '"validated_at"'):
-        assert field in jobs, "API не отдаёт %s" % field
-    block = jobs[jobs.index('"sources": {'):]
-    block = block[:block.index("},")]
-    for key in ("name", "gender", "country", "company", "job_role"):
-        assert '"%s"' % key in block, "в источниках API нет %s" % key

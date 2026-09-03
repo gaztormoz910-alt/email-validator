@@ -165,9 +165,7 @@ def test_original_email_reaches_every_surface():
     cli = read("cli.py")
     assert '"original_email"' in cli and "EXPORT_FIELDS" in cli
 
-    jobs = read("api/jobs.py")
-    assert '"original_email"' in jobs
-    assert '"confidence"' in jobs, "уверенность так и не доехала до API"
+    # REST API удалён по требованию владельца — поверхностей стало три.
 
 
 def test_original_email_is_absent_when_nothing_changed(monkeypatch):
@@ -300,7 +298,7 @@ def test_revision_reaches_every_surface():
     """Канал пересмотра подключён к окну, командной строке и API."""
     assert "on_revise" in read("ui/webapp.py")
     assert "on_revise" in read("cli.py")
-    assert "on_revise" in read("api/jobs.py")
+    # REST API удалён: пересмотр слушают окно, запасное окно и консоль.
     assert "def _revise" in read("core/pipeline.py")
     assert "proven_catchall_domains" in read("core/network.py")
 
@@ -339,25 +337,8 @@ def test_second_opinion_silent_when_it_did_happen():
 
 # ══════════════════════════ T9: согласованность поверхностей
 
-def test_surfaces_agree_on_disposable():
-    """Одноразовый домен не может быть «invalid» в API и «Trap» в окне.
-
-    Интегратор, читающий invalid, удаляет контакт; окно всего лишь помечает
-    его мусорным. Одно и то же слово должно значить одно и то же.
-    """
-    from api.server import describe
-
-    answer = describe("user@mailinator.com")
-    assert answer["status"] == "disposable", answer
-    assert answer["disposable"] is True
 
 
-def test_surfaces_still_call_a_dead_domain_invalid():
-    """Контроль: настоящий приговор в API остался приговором."""
-    from api.server import describe
-
-    assert describe("нет-собаки")["status"] == "invalid"
-    assert describe("a b@example.com")["status"] == "invalid"
 
 
 # ══════════════════════════ T10: страж чёрных списков
