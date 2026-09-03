@@ -98,7 +98,9 @@ def test_before_start_env_is_set_before_webview_import():
     """
     with io.open(os.path.join(ROOT, "ui", "webapp.py"), encoding="utf-8") as h:
         source = h.read()
-    body = source[source.index("def run():"):]
+    # Ищем по "def run(", а не по "def run():": у функции появился
+    # параметр самопроверки, и точное совпадение перестало находиться.
+    body = source[source.index("def run("):]
     body = body[:body.index("webview.start(")]
     assert "apply_no_throttle()" in body, "ключи не применяются при запуске"
     assert body.index("apply_no_throttle()") < body.index("import webview"), (
@@ -107,33 +109,62 @@ def test_before_start_env_is_set_before_webview_import():
 
 # ══════════════════════════ T3: подавление названо вслух
 
-def test_reports_throttling_from_the_window():
-    """Окно докладывает о подавлении, а не молчит.
+def test_reports_throttling_from_the_watchdog():
+    """О подавлении докладывает СТОРОЖ, сравнивая частоту запросов.
 
     Это единственный случай, который не ловит ничто другое: ошибки нет,
     запросы идут, программа исправна — а владелец видит замерший экран.
+
+    Раньше доклад стоял в обработчике `visibilitychange` в app.js, и это
+    была ложная тревога чистой воды: `hidden` наступает, когда окно свёрнуто
+    или владелец переключился на другую программу. Замерено в
+    data/crash.log — три записи за сутки, все три об этом, настоящих сбоев
+    ноль; при следующем запуске они же давали красную строку «сбои за
+    сутки». Признак подавления не в видимости, а в ЧАСТОТЕ: подавленная
+    страница продолжает спрашивать, просто вчетверо реже.
     """
-    with io.open(os.path.join(ROOT, "ui", "web", "app.js"), encoding="utf-8") as h:
-        app = h.read()
-    assert 'addEventListener("visibilitychange"' in app
-    block = app[app.index("function onVisibilityChange"):]
-    block = block[:block.index("\n}")]
-    assert "[подавление]" in block, "по записи не отличить подавление от ошибки"
-    assert "visibilityState" in block
+    with io.open(os.path.join(ROOT, "ui", "webapp.py"), encoding="utf-8") as h:
+        источник = h.read()
+    assert "SLOW_RATE" in источник, "нет порога частоты"
+    assert "def check_rate" in источник, "нет проверки частоты"
+    блок = источник[источник.index("def check_rate"):]
+    блок = блок[:блок.index("\n    def ", 10)]
+    assert "подавлен" in блок, "по записи не отличить подавление от ошибки"
+    assert "rate" in блок
 
 
 def test_reports_control_says_it_once(log):
-    """Контроль: доклад идёт ОДИН раз, а не на каждое переключение.
+    """Контроль: доклад идёт ОДИН раз, а не на каждую проверку частоты.
 
-    Владелец сворачивает и разворачивает окно десятки раз за прогон;
-    запись на каждое означала бы журнал из одних докладов.
+    Сторож смотрит темп постоянно; запись на каждый замер означала бы
+    журнал из одних докладов.
+    """
+    with io.open(os.path.join(ROOT, "ui", "webapp.py"), encoding="utf-8") as h:
+        источник = h.read()
+    блок = источник[источник.index("def check_rate"):]
+    блок = блок[:блок.index("\n    def ", 10)]
+    assert "_throttle_said" in блок or "reported" in блок.lower(), (
+        "нет защиты от повтора: доклад пойдёт на каждый замер")
+
+
+def test_control_visibility_change_writes_nothing_to_the_log():
+    """Контроль: сворачивание окна НЕ пишет в журнал ничего.
+
+    Обратная сторона той же правки. Если сюда вернут запись, вернётся и
+    красная строка при следующем запуске — та самая, на которую владелец
+    жаловался трижды.
     """
     with io.open(os.path.join(ROOT, "ui", "web", "app.js"), encoding="utf-8") as h:
         app = h.read()
-    assert "throttleReported" in app, "нет защиты от повтора"
-    block = app[app.index("function onVisibilityChange"):]
-    block = block[:block.index("\n}")]
-    assert "if (!throttleReported)" in block
+    блок = app[app.index("function onVisibilityChange"):]
+    блок = блок[:блок.index("\n}")]
+    ветка = блок[:блок.index("return;")]
+    # Ищем ВЫЗОВ, а не слово: в комментарии рядом объяснено, почему вызова
+    # здесь больше нет, и наивный поиск по имени падал на этом объяснении.
+    # Проверка, срабатывающая на собственный комментарий, ничего не охраняет.
+    assert "reportClientCrash(" not in ветка, (
+        "сворачивание окна снова пишется как сбой")
+    assert "visibilityState" in блок
 
 
 # ══════════════════════════ T4: возврат видимости догоняет состояние
