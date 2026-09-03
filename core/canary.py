@@ -152,10 +152,6 @@ class CanaryWatch(object):
         with self._lock:
             return sorted({домен for _выход, домен in self._врут})
 
-    def compromised_pairs(self):
-        with self._lock:
-            return sorted(self._врут)
-
     def summary(self):
         """Короткий отчёт для лога владельца."""
         with self._lock:
