@@ -212,6 +212,7 @@ def test_numbers_in_the_doc_match_the_code(doc):
     домен в правила имени — упадёт здесь, а не на живой базе.
     """
     import core.mail_constants as MC
+    from core.heuristics import ROLE_EXACT
     from core.local_rules import _RULES
     from core.proxy_profile import PROVIDER_FITNESS
     from core.scoring import DEFAULT_WEIGHTS
@@ -224,7 +225,13 @@ def test_numbers_in_the_doc_match_the_code(doc):
         "шлюзов": (len(MC.SECURITY_GATEWAY_MX), r"\*\*(\d+) известных\*\*"),
         "одноразовых": (builtin_disposable_count(), r"\*\*(\d+) домен"),
         "строк пригодности": (len(PROVIDER_FITNESS), r"(\d+) строки"),
-        "ролевых имён": (41, r"\*\*(\d+) точное имя\*\*"),
+        # Число берётся ИЗ КОДА. Литерал 41 стоял здесь и в проверке
+        # ниже, и при расширении списка падали обе — хотя расходились
+        # они не с кодом, а со своей же прошлой копией. Образец
+        # принимает и «точное имя», и «точных имён»: число меняет форму
+        # слова.
+        "ролевых имён": (len(ROLE_EXACT),
+                         r"\*\*(\d+) точн\w+ им\w+\*\*"),
         "селекторов DKIM": (len(MC._DKIM_BY_MX), r"\*\*(\d+) известных связок\*\*"),
         "запасных селекторов": (len(MC._DKIM_FALLBACK), r"\*\*(\d+)\s*\n?\s*запасных селектора\*\*"),
         "MAIL FROM": (len(MC.MAIL_FROM_POOL), r"\*\*Ротация `MAIL FROM`\*\* — (\d+) адрес"),
@@ -240,11 +247,19 @@ def test_numbers_in_the_doc_match_the_code(doc):
     assert wrong == [], wrong
 
 
-def test_numbers_role_count_matches_the_code():
-    """41 ролевое имя — не константа из документа, а длина списка в коде."""
+def test_numbers_role_count_matches_the_code(doc):
+    """Число ролевых имён в документе равно длине списка в коде.
+
+    Раньше здесь стояло `len(ROLE_EXACT) == 41` — код сверялся с литералом, а
+    не документ с кодом, хотя докстринг обещал обратное. Разойтись 41 могло
+    только сама с собой, зато расширить список эта проверка запрещала.
+    """
     from core.heuristics import ROLE_EXACT
 
-    assert len(ROLE_EXACT) == 41, len(ROLE_EXACT)
+    m = re.search(r"\*\*(\d+) точн\w+ им\w+\*\*", doc)
+    assert m, "в критериях нет числа ролевых имён"
+    assert int(m.group(1)) == len(ROLE_EXACT), (
+        "в документе %s, в коде %d" % (m.group(1), len(ROLE_EXACT)))
 
 
 # ═══════════════════════════════ G6: 500-504 не выносит приговор

@@ -75,7 +75,17 @@ def run_web():
         raise SystemExit(1)
 
     from ui.webapp import run
-    run()
+
+    # --selftest-close N: открыть окно и закрыть его через N секунд. Нужен
+    # проверке про осиротевшие процессы движка, см. .unlazy/round2.
+    закрыть = None
+    for i, arg in enumerate(sys.argv):
+        if arg == "--selftest-close" and i + 1 < len(sys.argv):
+            try:
+                закрыть = float(sys.argv[i + 1])
+            except ValueError:
+                закрыть = None
+    run(selftest_close=закрыть)
 
 
 def main():

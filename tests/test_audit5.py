@@ -68,7 +68,9 @@ def test_quoted_local_part_survives_cleaning(address):
 @pytest.mark.parametrize("raw,expected", [
     ("`hjohnuc@gmail.com", "hjohnuc@gmail.com"),
     ("Ivan Petrov <ivan@corp.com>", "ivan@corp.com"),
-    ("mailto:John.Doe@Gmail.com,", "john.doe@gmail.com"),
+    # Регистр ИМЕНИ ЯЩИКА сохраняется: по RFC 5321 §2.4 он значащий, и толковать его вправе только сервер назначения. Домен приводится к нижнему — DNS регистр не различает. Прежнее ожидание закрепляло общий .lower(), из-за которого наружу уезжал переписанный адрес.
+    # Задача проверки цела: `mailto:` и запятая по-прежнему счищены.
+    ("mailto:John.Doe@Gmail.com,", "John.Doe@gmail.com"),
     ("«ivan@corp.com»", "ivan@corp.com"),
 ])
 def test_quoted_fix_did_not_break_ordinary_cleaning(raw, expected):

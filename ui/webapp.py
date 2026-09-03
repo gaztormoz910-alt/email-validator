@@ -41,6 +41,8 @@ from urllib.parse import urlparse, parse_qs
 
 from core import input_guard
 from core.parser_pipeline import SEARCH_ENGINES
+from core.winnoise import (install_webview_noise_filter,
+                           quiet_chromium, WebViewReaper)
 from core.crashlog import (crash_log_path, log_crash,  # noqa: F401
                            recent_crashes)
 from ui.result_store import normalize_filters
@@ -923,7 +925,15 @@ class ValidatorApi:
                                  "Provider", "DomainType",
                                  "NameSource", "GenderSource", "CountrySource",
                                  "CompanySource", "JobRoleSource",
-                                 "SocialAccounts", "ValidatedAt"])
+                                 "SocialAccounts", "ValidatedAt",
+                                 # Доля Valid по домену: 1.0 при пяти и более
+                                 # проверенных — подпись catch-all.
+                                 "DomainValidRatio", "DomainChecked",
+                                 # Вердикт взят из прошлого прогона и в этом
+                                 # не перепроверялся. Дата рядом исходная, но
+                                 # 29-дневный «Годен» выглядит как свежий,
+                                 # если на неё не смотреть.
+                                 "FromCache"])
                 for row in rows:
                     data = row.get("data") or {}
                     # csv_row, а не голый список: база собрана со страниц в
@@ -952,6 +962,9 @@ class ValidatorApi:
                         data.get("job_role_source", ""),
                         data.get("social_accounts", ""),
                         data.get("validated_at", ""),
+                        data.get("domain_valid_ratio", ""),
+                        data.get("domain_checked", ""),
+                        "да" if data.get("from_cache") else "",
                     ]))
 
             skipped = {"n": 0}
@@ -1716,11 +1729,20 @@ def apply_no_throttle(environ=None):
     return environ[key]
 
 
-def run():
-    """Поднимает мост и открывает окно."""
+def run(selftest_close=None):
+    """Поднимает мост и открывает окно.
+
+    selftest_close — секунды, через которые окно закроется само. Нужен
+    проверке про осиротевшие процессы движка: она обязана пройти настоящий
+    путь вместе с `finally`, а снятие процесса по таймауту до `finally` не
+    доходит — то есть проверяло бы ровно не то, что чинили.
+    """
     # ДО импорта webview: WebView2 читает переменную окружения в момент
     # создания движка, и выставленная позже она уже ни на что не влияет.
     apply_no_throttle()
+    # Туда же — уровень логов Chromium. Он пишет в stderr сам, мимо logging
+    # Python, и через фильтр его не поймать.
+    quiet_chromium()
 
     import webview
 
@@ -1734,6 +1756,14 @@ def run():
         background_color="#0A0E14",
     )
     api.window = window
+
+    # Красная стена при старте — это одно сообщение pywebview с трассировкой
+    # .NET на девять строк. Показываем вместо неё одну строку по-русски и
+    # уводим её в лог ОКНА, где владелец её и прочтёт. Всё прочее pywebview
+    # печатает как раньше: фильтр трогает ровно это сообщение.
+    install_webview_noise_filter(
+        on_hint=lambda текст: api._on_log("[WARN] " + текст, "trap"))
+
     api._on_log("[INFO] Валидатор готов к работе.", "info")
     api._on_log("[INFO] Выберите базу адресов и список прокси.", "info")
 
@@ -1744,7 +1774,30 @@ def run():
     _announce_past_crashes(api)
     WindowWatchdog(api).start()
 
-    webview.start(storage_path=_storage_path(), private_mode=False)
+    # Кого не трогать при уборке: всё, что уже крутилось до нас. Снимок
+    # обязан быть СЕЙЧАС — после старта наши и чужие процессы неразличимы.
+    reaper = WebViewReaper()
+    reaper.snapshot()
+
+    if selftest_close:
+        # Закрываем окно из отдельного потока: webview.start() владеет
+        # главным, и попросить его изнутри неоткуда.
+        def _закрыть_потом():
+            time.sleep(float(selftest_close))
+            try:
+                window.destroy()
+            except Exception:
+                pass
+
+        threading.Thread(target=_закрыть_потом, daemon=True).start()
+
+    try:
+        webview.start(storage_path=_storage_path(), private_mode=False)
+    finally:
+        # Не убрав за собой, следующий запуск получит «ресурс занят» и ту
+        # самую красную стену: папку профиля держат наши же сироты. Замерено
+        # запуском: шесть штук после закрытия окна.
+        reaper.reap()
 
 
 if __name__ == "__main__":
