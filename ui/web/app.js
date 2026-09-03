@@ -1212,6 +1212,11 @@ $("#btnStart").addEventListener("click", async () => {
     threads: Number(threads.value), timeout: Number(timeout.value),
     ai: $("#optAi").checked, osint: $("#optOsint").checked,
     cache: $("#optCache").checked, country: ui.country,
+    // Второе мнение для «Годен»: адрес переспрашивается с ДРУГОГО
+    // выхода. Выключено по умолчанию — это лишняя сессия на КАЖДЫЙ
+    // подтверждённый адрес, и платить ею стоит перед тем прогоном,
+    // после которого идёт рассылка.
+    confirm: $("#optConfirm").checked,
     resume: $("#optResume").checked,
   };
   let res = await api("start", payload);
