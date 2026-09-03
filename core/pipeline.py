@@ -1596,6 +1596,17 @@ class ValidationPipeline:
                 except Exception:
                     pass
 
+                # Что именно ушло в RCPT TO. Показывается в карточке адреса
+                # строкой «Проверен как». Поле читалось окном и не
+                # записывалось нигде — строка была всегда пустой, то есть
+                # владелец не мог убедиться СВОИМИ ГЛАЗАМИ, что проверяют
+                # его адрес. Он спрашивал об этом дважды.
+                try:
+                    data["checked_as"] = (self.network.probe_form(email)
+                                          if self.network is not None else email)
+                except Exception:
+                    data["checked_as"] = email
+
                 # Сохраняем оригинальный SMTP-статус для скоринга (фикс бага Role-based)
                 original_smtp_status = status_display
                 
@@ -1817,6 +1828,17 @@ class ValidationPipeline:
                     else:
                         status_display = "Invalid/Bounce"
                     
+                    # Что именно ушло в RCPT TO. Показывается в карточке
+                    # адреса строкой «Проверен как». Поле читалось окном и не
+                    # записывалось нигде — строка была всегда пустой, то есть
+                    # владелец не мог убедиться СВОИМИ ГЛАЗАМИ, что проверяют
+                    # его адрес. Он спрашивал об этом дважды.
+                    try:
+                        data["checked_as"] = (self.network.probe_form(email)
+                                              if self.network is not None else email)
+                    except Exception:
+                        data["checked_as"] = email
+
                     # Сохраняем оригинальный SMTP-статус для скоринга (фикс бага Role-based)
                     original_smtp_status = status_display
                     
@@ -2089,7 +2111,12 @@ class ValidationPipeline:
         self.callbacks['on_complete']()
 
     def start(self, email_sources, threads, timeout, fix_typos, check_spam, deep_ping, enable_ai, proxies=None, enable_osint=False, use_cache=True,
-              resume=False):
+              resume=False,
+              # Второе мнение о каждом «Годен» с другого
+              # выходного адреса. По умолчанию выключено: это лишняя
+              # сессия на каждый подтверждённый адрес.
+              confirm_valid=False):
+        self.confirm_valid = bool(confirm_valid)
         # Новый прогон отменяет прошлую команду остановки.
         self._stop_requested = False
 

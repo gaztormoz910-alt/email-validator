@@ -18,6 +18,7 @@
 
 import argparse
 import csv
+import io
 import json
 import os
 import sys
@@ -225,6 +226,70 @@ def cmd_validate(args):
     return 0 if done.is_set() else 2
 
 
+def cmd_bounces(args):
+    """Кладёт адреса из отчёта об отскоках в кэш как доказанный Invalid.
+
+    ЗАЧЕМ ЭТО СИЛЬНЕЕ SMTP-ПРОБЫ. `RCPT TO` спрашивает сервер о НАМЕРЕНИИ
+    принять письмо. Отскок означает, что письмо приняли, донесли до почтового
+    ящика и отвергли ТАМ. Между этими двумя событиями стоит вся внутренняя
+    маршрутизация получателя, о которой снаружи не знает никто. Поэтому
+    запись идёт поверх всего, даже поверх свежего «Годен».
+
+    ТОЛЬКО ЖЁСТКИЕ ОТСКОКИ. Мягкий (ящик переполнен, сервер занят, серый
+    список) доказывает ОБРАТНОЕ — что адрес существует и им пользуются, — и
+    записав его как Invalid, владелец выбросил бы лучшие свои контакты.
+    Разделить их за него нельзя: формат отчёта у каждого рассыльщика свой.
+    Поэтому фильтр по строке отдаётся ему (`--hard-only`), а по умолчанию
+    берётся весь файл — с явным предупреждением в выводе.
+    """
+    from core.cache import ResultCache
+    from core.email_syntax import harvest_pattern
+
+    образец = harvest_pattern()
+    адреса, пропущено = [], 0
+    with io.open(args.report, encoding="utf-8", errors="replace") as handle:
+        for строка in handle:
+            if args.hard_only and args.hard_only.lower() not in строка.lower():
+                пропущено += 1
+                continue
+            найдено = образец.findall(строка)
+            адреса.extend(найдено)
+
+    if not адреса:
+        print("В файле не нашлось ни одного адреса — проверьте формат.")
+        return 1
+
+    уникальные = sorted(set(a.lower() for a in адреса))
+    if args.dry_run:
+        print("Нашлось адресов: %d (уникальных %d). Ничего не записано — "
+              "это пробный прогон." % (len(адреса), len(уникальные)))
+        for адрес in уникальные[:10]:
+            print("   " + адрес)
+        return 0
+
+    cache = ResultCache()
+    try:
+        записано = cache.import_bounces(уникальные, detail=args.note or "")
+        подозрительные = cache.bounced_domains(min_count=args.domain_min)
+    finally:
+        cache.close()
+
+    print("Записано отскоков: %d из %d уникальных адресов." % (записано, len(уникальные)))
+    if пропущено:
+        print("Пропущено строк без метки %r: %d" % (args.hard_only, пропущено))
+    if not args.hard_only:
+        print("ВНИМАНИЕ: фильтра по жёсткости не было. Если в файле есть "
+              "мягкие отскоки (переполнен, занят, серый список), они записаны "
+              "как Invalid ошибочно — такой адрес живой. Задайте --hard-only.")
+    if подозрительные:
+        print()
+        print("Домены с %d и более отскоками — кандидаты в catch-all:"
+              % args.domain_min)
+        for домен in подозрительные:
+            print("   " + домен)
+    return 0
+
+
 def cmd_baseop(args):
     left = baseops.read_emails(args.left)
     right = baseops.read_emails(args.right) if args.right else []
@@ -266,12 +331,30 @@ def build_parser():
     v.add_argument("--ai", action="store_true", help="включить ML-обогащение")
     v.add_argument("--osint", action="store_true", help="искать имя в Gravatar")
     v.add_argument("--no-cache", action="store_true", help="не брать вердикты из кэша")
+    v.add_argument("--confirm-valid", action="store_true",
+                   help="перепроверять каждый «Годен» вторым прокси "
+                        "(вдвое дольше, ловит почтовик, который врёт "
+                        "только нашему выходу)")
     v.add_argument("--scan-only", action="store_true",
                    help="только показать состав базы, без единого запроса")
     v.add_argument("--allow-direct", action="store_true",
                    help="разрешить работу без прокси (реальный IP будет виден)")
     v.add_argument("--quiet", action="store_true")
     v.set_defaults(func=cmd_validate)
+
+    b = sub.add_parser("bounces",
+                       help="загрузить отчёт об отскоках в кэш вердиктов")
+    b.add_argument("report", help="файл отчёта рассыльщика (любой текст)")
+    b.add_argument("--hard-only", metavar="СЛОВО",
+                   help="брать только строки с этим словом — так отделяются "
+                        "жёсткие отскоки от мягких, например --hard-only 5.1.1")
+    b.add_argument("--note", default="",
+                   help="пометка, которая ляжет в причину вердикта")
+    b.add_argument("--domain-min", type=int, default=3,
+                   help="со скольких отскоков домен считается подозрительным")
+    b.add_argument("--dry-run", action="store_true",
+                   help="показать, что нашлось, и ничего не записывать")
+    b.set_defaults(func=cmd_bounces)
 
     for name, help_text in (("merge", "объединить два списка"),
                             ("subtract", "вычесть второй список из первого"),
