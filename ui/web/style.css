@@ -568,6 +568,27 @@ input[type="number"], textarea {
 }
 
 /* ── Пустые состояния. Дефект №4 ── */
+/* Область таблицы найденных адресов.
+
+   ЗДЕСЬ БЫЛА ГЛАВНАЯ ПОЛОМКА ОКНА, и стоила она одной строки.
+
+   Заглушка «Адреса появятся здесь» имеет position: absolute; inset: 0 и
+   обязана цепляться за свой контейнер. У результатов валидатора контейнер
+   .tablewrap объявлен relative — там всё работало. А у .grid-wrap правила
+   не было вовсе, то есть static: цепляться не за что, и абсолютный блок
+   растягивался НА ВСЁ ОКНО — замерено 1440x900 от точки (0, 0).
+
+   Получалась прозрачная плёнка поверх всего интерфейса: ничего не рисует,
+   но перехватывает каждый клик. Владелец переходил на «Найденные адреса» и
+   больше не мог нажать ни на что. Ни ошибки, ни падения, ни зависания —
+   программа исправна, просто до неё было не достучаться. */
+.grid-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 200px;
+  overflow: auto;
+}
+
 .empty {
   position: absolute; inset: 0;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -580,7 +601,12 @@ input[type="number"], textarea {
 .tabpane[data-pane="proxy"] .empty { position: static; flex: 1; }
 
 /* ── Прокси ── */
-.proxy { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s-4); display: flex; flex-direction: column; gap: var(--s-3); }
+/* position: relative здесь не для красоты, а ради одного правила на все
+   области: КАЖДЫЙ контейнер, внутри которого лежит заглушка, обязан быть
+   точкой отсчёта. Здесь заглушка и так сделана статической отдельным
+   правилом ниже, но держать два разных механизма для одной задачи — способ
+   однажды забыть оба. Тест рядом требует именно этого инварианта. */
+.proxy { position: relative; flex: 1; min-height: 0; overflow-y: auto; padding: var(--s-4); display: flex; flex-direction: column; gap: var(--s-3); }
 .pblock { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: var(--s-4); }
 .pblock h4 { margin: 0 0 2px; font-size: 13px; }
 .pblock .phint { color: var(--text-3); font-size: 11px; margin-bottom: var(--s-3); display: block; line-height: 1.5; }
