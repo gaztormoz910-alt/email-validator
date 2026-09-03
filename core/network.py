@@ -631,7 +631,17 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
                         self.catchall_cache[domain] = True
                     # Такой же факт, как и от тройной пробы, — и помнить его
                     # надо так же: иначе следующий запуск выяснит его заново.
-                    self._remember_catchall(domain, True)
+                    #
+                    # НО не у гигантов. gmail.com, принявший выдуманный адрес,
+                    # не стал catch-all — он перестал отвечать честно, потому
+                    # что с нашего выхода идёт перебор. Вызывающий распознает
+                    # это как тарпитинг несколькими строками ниже, а запись в
+                    # память делалась ДО того и на тридцать суток. Итог:
+                    # каждый следующий запуск отдавал Unknown по ВСЕЙ почте
+                    # gmail, не сходив в сеть, — то есть худшая потеря базы
+                    # из всех возможных, и молча.
+                    if not self._is_never_catchall(domain):
+                        self._remember_catchall(domain, True)
                 elif ctl_code is not None and ctl_code >= 500:
                     # Выдуманный адрес отвергнут — сервер отвечает честно, и
                     # 250 на реальный адрес это подтверждённый живой ящик.
@@ -905,12 +915,41 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             others = {d for d in seen if d != (domain or "").strip().lower()}
         return len(others) >= 2
 
+    # Домены, у которых catch-all невозможен по устройству. Список ОДИН на
+    # весь модуль: пока он был набран прямо в ветке проверки, долгая память о
+    # нём не знала — и записывала в себя ровно то, что эта ветка через
+    # несколько строк переименовывала в тарпитинг.
+    NEVER_CATCHALL = frozenset({
+        "gmail.com", "googlemail.com", "yandex.ru", "ya.ru",
+        "icloud.com", "me.com", "mac.com",
+    })
+
+    def _is_never_catchall(self, domain):
+        """Гигант, у которого catch-all не бывает: приём выдуманного адреса
+        у него означает тарпитинг, а не настройку домена."""
+        low = str(domain or "").lower()
+        return (low in self.NEVER_CATCHALL or low in YAHOO_DOMAINS
+                or low in MICROSOFT_DOMAINS or low in AOL_DOMAINS)
+
     def _remember_catchall(self, domain, is_catchall):
         """Кладёт выясненный ответ в память между запусками.
 
         Тихо: сбой памяти не имеет права влиять на проверку почты.
+
+        У гигантов catch-all не бывает: приняв выдуманный адрес, gmail.com не
+        стал принимать всё подряд — он перестал отвечать честно, потому что с
+        нашего выхода идёт перебор. Это тарпитинг, и лечится он сменой прокси.
+
+        Раньше запись делалась ДО того, как вызывающий распознавал тарпитинг,
+        и в долгой памяти оседало «gmail.com — catch-all» на тридцать суток.
+        После этого КАЖДЫЙ адрес на gmail.com в каждом следующем запуске
+        получал Unknown, не доходя до сервера, — и владелец терял на этом
+        самую большую часть любой базы, ничего не замечая: строка в логе о
+        тарпитинге была разовой, а последствие — месячным.
         """
         if self.memory is None:
+            return
+        if is_catchall and self._is_never_catchall(domain):
             return
         try:
             self.memory.catchall_put(domain, is_catchall)
@@ -950,7 +989,15 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         # большей части базы.
         want_country = self.country_for_domain(
             domain, mx_records[0] if mx_records else "")
-        if needs_ptr and self.proxies and self._ptr_proxies and not self.has_ptr_proxies():
+        # `self._profiled`, а не `self._ptr_proxies`. Разница решает всё:
+        # если профилирование прошло и PTR не нашлось НИ У КОГО, множество
+        # _ptr_proxies пусто — и старое условие молча выключало сам
+        # предохранитель. Yahoo/AOL после этого проверялись прокси с
+        # заведомо отсутствующим PTR: пятнадцать гарантированно холостых
+        # попыток на адрес, а в конце ложный диагноз «все прокси мертвы»
+        # вместо честного «нечем проверять Yahoo». Владелец шёл чинить
+        # живой пул прокси вместо того, чтобы достать PTR.
+        if needs_ptr and self.proxies and self._profiled and not self.has_ptr_proxies():
             return {
                 "status": "unknown",
                 "reason": ("Нет прокси с обратным DNS (PTR) — Yahoo/AOL проверить нечем. "
@@ -1018,6 +1065,24 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
 
                 # Живой ящик подтверждён — дальше искать нечего
                 if result["status"] == "valid":
+                    return result
+
+                # Домен уличён в приёме чего угодно — тоже дальше искать
+                # нечего, и по той же причине: ответ уже получен.
+                #
+                # Раньше этой ветки не было, и catchall проваливался в конец
+                # цикла к `last_result = result; continue`. То есть домен,
+                # только что доказавший, что принимает выдуманный адрес,
+                # переспрашивался следующим прокси — а там контрольная проба
+                # могла не сработать (сорвалась, попала на другой MX), и
+                # адрес возвращался как VALID. Разоблачение перекрывалось
+                # повтором, и владелец получал «Годен» на домене, про который
+                # программа за секунду до этого выяснила обратное.
+                #
+                # Catch-all — свойство ДОМЕНА, а не попытки. Выяснив его один
+                # раз, повторять нельзя: любой следующий ответ будет только
+                # менее правдивым.
+                if result["status"] == "catchall":
                     return result
 
                 # А вот приговор «ящика нет» перед возвратом СВЕРЯЕТСЯ со
@@ -1171,6 +1236,59 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         # выдавать его молчание за несогласие нельзя.
         return None
 
+    def confirm_valid_from_other_exit(self, email, mx_records,
+                                      first_proxy=None, deadline=None):
+        """Второе мнение о ПОДТВЕРЖДЕНИИ. Зеркало проверки приговора.
+
+        True  — второй выход тоже принял адрес;
+        False — второй выход адрес ОТВЕРГ, «Годен» недоказуем;
+        None  — сверить не с чем: другого выходного адреса в пуле нет.
+
+        ЗАЧЕМ. Приговор «ящика нет» сверяется со вторым сервером и вторым
+        выходом — цена ошибки высока, живой контакт теряется навсегда. У
+        `Valid` второго мнения не было вообще: он держался на одной сессии с
+        одного выхода. А цена ошибки здесь тоже высокая, просто она приходит
+        позже — письмом на несуществующий ящик и отскоком.
+
+        Что это ловит и чего не ловит контрольная проба. Контрольная проба
+        спрашивает выдуманный адрес в той же сессии и ловит catch-all. Она
+        НЕ видит случая, когда почтовик принимает всё подряд именно с нашего
+        выхода — а с другого отвечает честно. Тогда контрольная проба тоже
+        получит `250` на выдуманный, и статус станет `catchall`... но только
+        если она в этой сессии была: у гигантов она идёт раз в 25 адресов.
+
+        ПОЧЕМУ ОТКАЗ ВТОРОГО ВЫХОДА НЕ ДЕЛАЕТ АДРЕС INVALID. Отвергнуть могли
+        по репутации второго прокси, а не по отсутствию ящика. Два выхода
+        разошлись — значит доказательства нет ни у одной стороны, и честный
+        ответ здесь `Unknown`, а не приговор.
+        """
+        if deadline is not None and time.monotonic() > deadline:
+            return None
+        domain = email.split("@")[1].lower() if "@" in email else ""
+        needs_ptr = domain in YAHOO_DOMAINS or domain in AOL_DOMAINS
+        needs_clean = domain in NEEDS_CLEAN_IP_DOMAINS
+
+        proxy = self._pick_best_proxy(need_ptr=needs_ptr,
+                                      need_clean=needs_clean,
+                                      avoid_exit_of=first_proxy)
+        if first_proxy and proxy is None:
+            return None            # другого выхода нет — сверять нечем
+        if not first_proxy and not self.proxies:
+            return None            # прямое соединение: выход всего один
+
+        target = (mx_records or [None])[0]
+        if not target:
+            return None
+        second = self._do_single_ping(email, target, proxy=proxy)
+        status = second.get("status")
+        if status == "valid":
+            return True
+        if status in ("invalid", "catchall"):
+            return False
+        # unknown/greylisted/risky — второй выход промолчал. Молчание не
+        # опровержение: возвращаем «сверить не удалось».
+        return None
+
     # Через сколько проверок домена повторять контрольную пробу у гигантов.
     # Двадцать пять — компромисс: лишних RCPT четыре процента, а тарпитинг
     # обнаруживается на первых же десятках адресов, задолго до конца прогона.
@@ -1299,16 +1417,17 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             return result
 
         # Шаг 3: Catch-All проверка (не для гигантов — они точно не Catch-All)
-        skip_catchall = (
-            domain in YAHOO_DOMAINS or
-            domain in MICROSOFT_DOMAINS or
-            domain in AOL_DOMAINS or
-            # ВАЖНО: mail.ru/bk.ru/inbox.ru/list.ru отсюда УБРАНЫ. Проверено вживую:
-            # они отвечают 250 на любой случайный адрес, то есть являются catch-all.
-            # Пока они были в этом списке, их несуществующие ящики шли как Valid.
-            domain in {"gmail.com", "googlemail.com", "yandex.ru", "ya.ru",
-                       "icloud.com", "me.com", "mac.com"}
-        )
+        # ОДИН список на весь модуль — см. NEVER_CATCHALL и _is_never_catchall.
+        # Пока он был набран здесь отдельно, долгая память о нём не знала и
+        # записывала в себя ровно то, что эта ветка переименовывала в
+        # тарпитинг несколькими строками ниже. Это и был дефект Б4: две копии
+        # одного знания расходятся молча.
+        #
+        # mail.ru/bk.ru/inbox.ru/list.ru в списке НЕТ намеренно. Проверено
+        # вживую: они отвечают 250 на любой случайный адрес, то есть являются
+        # настоящим catch-all. Пока они там были, их несуществующие ящики
+        # уходили в Valid.
+        skip_catchall = self._is_never_catchall(domain)
 
         if not skip_catchall:
             is_catchall = self.is_catch_all_domain(domain, primary_mx)
