@@ -1322,6 +1322,24 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         with self.catchall_lock:
             return sorted(self._tarpit_domains)
 
+    @staticmethod
+    def probe_form(email):
+        """Адрес в том виде, в котором он уйдёт в команду `RCPT TO`.
+
+        Отличается от загруженного ровно одним: домен переведён в punycode.
+        На проводе это одна и та же строка — `ivan@почта.рф` и
+        `ivan@xn--80a1acny.xn--p1ai` адресуют один ящик, просто SMTP не умеет
+        не-ASCII в домене без расширения.
+
+        Отдельной функцией, потому что это значение показывается владельцу в
+        строке «Проверен как». Он дважды спрашивал, тот ли адрес проверяется;
+        отвечать на это должна программа, а не переписка. Две копии правила
+        разошлись бы молча, и строка показывала бы не то, что ушло.
+        """
+        local, _, raw = str(email or "").rpartition("@")
+        domain = to_ascii_domain(raw.lower())
+        return "%s@%s" % (local, domain) if domain else ""
+
     def check_email(self, email: str, avoid_exit_of=None,
                     prefer_exit_of=None) -> dict:
         """Полная сетевая проверка почты с RFC-валидацией, Catch-All детектором и DNS-здоровьем."""
@@ -1351,7 +1369,9 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             return {"status": "invalid", "reason": "Invalid Domain (IDNA Error)", "mx_record": "N/A"}
 
         # На проводе домен всегда в punycode: ivan@почта.рф -> ivan@xn--80a1acny.xn--p1ai
-        probe_email = f"{local_part}@{domain}"
+        # Собирается ТОЙ ЖЕ функцией, что показывает окно в строке «Проверен
+        # как»: два способа собрать одну строку разошлись бы молча.
+        probe_email = self.probe_form(email)
 
         # Шаг 0.5: правила имени пользователя у самого провайдера.
         #

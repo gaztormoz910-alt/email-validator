@@ -685,6 +685,11 @@ class ValidatorApi:
             proxies=StreamLoader(list(self.proxy_sources)).stream_lines(),
             enable_osint=bool(payload.get("osint", True)),
             use_cache=bool(payload.get("cache", True)),
+            # Второе мнение о подтверждении: адрес переспрашивается с
+            # ДРУГОГО выходного адреса. Без этой строки настройка из
+            # окна терялась бы по дороге, и тумблер был бы обманом —
+            # владелец щёлкает, а поведение не меняется.
+            confirm_valid=bool(payload.get("confirm", False)),
             # Продолжение прерванного прогона. Механика была написана и
             # покрыта тестами, но сюда приходил жёсткий False: нажал «Стоп»
             # на миллионе — начинай сначала. Спрашиваем владельца.
