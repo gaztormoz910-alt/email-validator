@@ -206,17 +206,18 @@ def test_audit_mailru_family_is_not_exempt_from_catch_all():
     Попади он в список «проверять на catch-all не нужно», все его
     несуществующие ящики уехали бы в Valid.
     """
-    import io as _io
+    # Спрашиваем ПОВЕДЕНИЕ, а не текст исходника. Раньше проверка читала
+    # символы вокруг строки `skip_catchall = (`, и когда список гигантов
+    # переехал в одно место на модуль, она упала — при целом инварианте.
+    # Поведенческая проверка вдобавок ловит случай, которого текстовая не
+    # видит вовсе: список на месте, а условие перестало им пользоваться.
+    from core.network import NetworkValidator
 
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "core", "network.py")
-    with _io.open(path, encoding="utf-8") as handle:
-        source = handle.read()
-
-    start = source.index("skip_catchall = (")
-    block = source[start:start + 700]
+    nv = NetworkValidator(proxies=[])
     for domain in ("mail.ru", "bk.ru", "inbox.ru", "list.ru"):
-        assert '"%s"' % domain not in block, \
+        assert nv._is_never_catchall(domain) is False, \
             "%s снова освобождён от проверки на catch-all" % domain
     # Положительный контроль: у настоящих гигантов освобождение на месте.
-    assert '"gmail.com"' in block
+    for domain in ("gmail.com", "yandex.ru", "icloud.com",
+                   "yahoo.com", "outlook.com", "aol.com"):
+        assert nv._is_never_catchall(domain) is True, domain

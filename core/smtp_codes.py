@@ -284,6 +284,16 @@ def classify_smtp_response(code: object, message: object) -> Verdict:
         return result("valid", "250 OK")
     if numeric == 251:
         return result("valid", "251 User Not Local, Will Forward")
+    # 252 — «не берусь проверить получателя, но письмо приму и попробую
+    # доставить» (RFC 5321 §3.5.3). Это ПРЯМОЙ отказ отвечать о ящике, и
+    # засчитывать его как доказательство существования нельзя: письмо уйдёт,
+    # а получателя может не быть — отскок придёт потом, когда база уже
+    # разослана. Для VRFY это отсекалось отдельно (core/network._ask_vrfy), а
+    # тот же код на RCPT проваливался сюда и становился Valid.
+    if numeric == 252:
+        return result("unknown",
+                      "252 Сервер не берётся подтвердить получателя "
+                      "(RFC 5321 §3.5.3) — о существовании ящика не сказано")
     if 200 <= numeric < 300:
         return result("valid", f"{numeric} Accepted")
 

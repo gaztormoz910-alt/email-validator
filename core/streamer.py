@@ -1,7 +1,7 @@
 import os
 import re
 
-from core.email_syntax import harvest_pattern
+from core.email_syntax import harvest_pattern, _lower_domain_only
 
 from core.encoding import open_text
 
@@ -443,9 +443,22 @@ class StreamLoader:
 
                     email, data = _parse_line_smart(line, delimiter, col_map)
 
-                    # Базовая очистка email
+                    # Базовая очистка email.
+                    #
+                    # К нижнему регистру приводится ТОЛЬКО домен. Имя ящика по
+                    # RFC 5321 §2.4 регистрозависимо, и толковать его вправе
+                    # только сервер назначения. Пока здесь стоял общий
+                    # .lower(), исходная строка владельца переписывалась ещё
+                    # на загрузке — до того, как её сохраняли в OriginalEmail,
+                    # — и наружу, в выгрузку и в рассылку, уезжал НЕ ТОТ
+                    # адрес, который он загрузил.
+                    #
+                    # Сравнение (дедуп, вычитание отписок, ключ кэша) считает
+                    # свой ключ в нижнем регистре отдельно: там это сравнение,
+                    # а не данные.
                     if email:
-                        email = clean_input_line_fast(email).strip().lower()
+                        email = _lower_domain_only(
+                            clean_input_line_fast(email).strip())
 
                     if email and '@' in email:
                         yield email, data

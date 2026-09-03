@@ -222,6 +222,117 @@ class ResultCache:
         except Exception:
             return False
 
+    # Основание, по которому вердикт отличается от любого SMTP-ответа.
+    # Хранится строкой в поле reason: отдельная колонка потребовала бы
+    # переезда схемы, а искать по подстроке здесь достаточно.
+    BOUNCE_REASON = "Отскок при рассылке: письмо ушло и вернулось"
+
+    def record_bounce(self, email, detail=""):
+        """Кладёт адрес как Invalid по факту ОТСКОКА. True, если записано.
+
+        Это доказательство сильнее любого SMTP-ответа, и вот почему. Проба
+        `RCPT TO` спрашивает сервер о намерении; отскок означает, что письмо
+        было реально принято, доставлено до почтового ящика и отвергнуто там.
+        Между этими двумя событиями стоит вся внутренняя маршрутизация
+        получателя, о которой снаружи не знает никто.
+
+        Поэтому запись идёт поверх всего: даже если в кэше лежит свежий
+        `Valid`, отскок его перекрывает. Обратное — оставить `Valid` при
+        известном отскоке — означало бы отправить второе письмо туда же.
+
+        ТОЛЬКО ЖЁСТКИЙ ОТСКОК. Мягкий (ящик переполнен, сервер занят, серый
+        список) доказывает ОБРАТНОЕ — что ящик существует, — и звать эту
+        функцию для него нельзя. Разделение делает вызывающий: у разных
+        рассыльщиков форматы отчётов разные, и разбирать их здесь значило бы
+        привязаться к одному.
+        """
+        key = self._key(email)
+        if not key or not self.enabled:
+            return False
+        причина = self.BOUNCE_REASON
+        if detail:
+            причина = "%s (%s)" % (причина, str(detail)[:200])
+        try:
+            with self._lock:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO results "
+                    "(email, status, reason, mx, payload, checked_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (key, "Invalid/Bounce", причина, "N/A", "{}",
+                     _utc_now().isoformat()))
+                self._conn.commit()
+                self.writes += 1
+            return True
+        except Exception:
+            return False
+
+    def import_bounces(self, emails, detail=""):
+        """Пачкой. Возвращает, сколько записано."""
+        записано = 0
+        for адрес in emails or []:
+            if self.record_bounce(адрес, detail):
+                записано += 1
+        return записано
+
+    def bounced_domains(self, min_count=3):
+        """Домены, по которым отскоков набралось столько-то.
+
+        Домен, дающий много отскоков при высокой доле `Valid`, — это подпись
+        catch-all или тарпитинга: сервер принимал всех подряд, а на доставке
+        выяснялось, что ящиков нет. Список идёт в подозрение на catch-all
+        наравне с замерами прогона.
+        """
+        try:
+            min_count = max(1, int(min_count))
+        except Exception:
+            min_count = 3
+        if not self.enabled:
+            return []
+        try:
+            with self._lock:
+                cur = self._conn.execute(
+                    "SELECT substr(email, instr(email, \'@\') + 1) AS dom, "
+                    "COUNT(*) FROM results WHERE status = ? AND reason LIKE ? "
+                    "GROUP BY dom HAVING COUNT(*) >= ?",
+                    ("Invalid/Bounce", self.BOUNCE_REASON + "%", min_count))
+                return sorted(строка[0] for строка in cur.fetchall() if строка[0])
+        except Exception:
+            return []
+
+    def forget_domain(self, domain):
+        """Стирает все вердикты по домену. Возвращает, сколько удалено.
+
+        Нужен ровно в одном случае, и случай этот дорогой. Домен уличают в
+        том, что он принимает ЛЮБОЙ адрес (или что почтовик перестал отвечать
+        честно), и программа тут же пересматривает уже выданные по нему Valid
+        — в таблице и в выгрузке. Но в кэше эти Valid оставались лежать со
+        сроком в тридцать суток, и СЛЕДУЮЩИЙ запуск доставал их оттуда, не
+        сходив в сеть вовсе. Разоблачение действовало один прогон, а ложный
+        «Годен» возвращался на месяц.
+
+        Поэтому забывать надо там же, где разоблачили.
+        """
+        key = str(domain or "").strip().lower()
+        if not key or not self.enabled:
+            return 0
+        # В LIKE символы `%` и `_` — подстановочные. Домен с подчёркиванием
+        # (в именах хостов оно незаконно, но в кэш попадает то, что подали)
+        # без экранирования стёр бы заодно чужие домены: `my_corp.test` съел
+        # бы и `myXcorp.test`. Забывчивость, стирающая лишнее, — это не
+        # исправление, а потеря работы всего прогона.
+        экранированный = (key.replace("\\", "\\\\")
+                             .replace("%", "\\%")
+                             .replace("_", "\\_"))
+        try:
+            with self._lock:
+                cur = self._conn.execute(
+                    "DELETE FROM results WHERE email LIKE ? ESCAPE '\\'",
+                    ("%@" + экранированный,))
+                self._conn.commit()
+                return int(cur.rowcount or 0)
+        except Exception:
+            return 0
+
     def purge_expired(self):
         """Убирает протухшие записи. Возвращает, сколько удалено."""
         if not self.enabled:

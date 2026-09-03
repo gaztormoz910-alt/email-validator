@@ -246,6 +246,25 @@ ROLE_EXACT = {
     "postmaster", "privacy", "registrar", "root", "sales", "security", "spam",
     "staff", "subscribe", "support", "sysadmin", "tech", "unsubscribe",
     "webmaster", "www", "hello", "press", "legal", "feedback",
+    # Полные формы там, где раньше стояло только сокращение: ящик заводят и
+    # так и так, а опознавался лишь один из двух (admin был, administrator —
+    # нет). Список намеренно узкий: лишний «Role-based» отнимает у владельца
+    # живой лид ровно так же, как ложный Invalid, поэтому имена, которые
+    # бывают и личными ящиками (mail, it, dev, order, account, ceo, manager),
+    # сюда НЕ внесены.
+    "administrator", "administration", "webadmin", "sysadmin",
+    "moderator", "operator", "sysop", "helpdesk",
+    "enquiry", "enquiries", "inquiry", "inquiries",
+    "customerservice", "customercare",
+    "accounting", "invoice", "invoices",
+    "career", "careers", "recruitment", "recruiting", "vacancy", "vacancies",
+    "newsletter", "notification", "notifications", "notify",
+    "alert", "alerts", "bounce", "bounces",
+    "mailerdaemon", "mailer-daemon", "daemon",
+    "autoreply", "auto-reply", "donotreply", "do-not-reply",
+    # RFC 2142 §2-§5 — имена, которые обязан иметь оператор услуги.
+    "usenet", "uucp", "news",
+    "partners", "partnership", "affiliate", "affiliates", "advertising",
 }
 
 # Основы, от которых ролевые адреса образуются с суффиксами и разделителями:
