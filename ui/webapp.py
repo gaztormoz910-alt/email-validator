@@ -40,12 +40,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from core import input_guard
+from core.parser_pipeline import SEARCH_ENGINES
 from core.crashlog import (crash_log_path, log_crash,  # noqa: F401
                            recent_crashes)
 from ui.result_store import normalize_filters
 from core.encoding import open_text
 from core.baseops import csv_row, export_encoding
-from core.parser_pipeline import API_ENGINES as _API_ENGINES
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -270,6 +270,9 @@ class ValidatorApi:
     # Когда окно в последний раз о себе напомнило. Ноль означает «ещё ни
     # разу»: до первого запроса судить о тишине не по чему.
     last_seen_at = 0.0
+    # Сколько всего запросов пришло от окна. По приросту видно ТЕМП, а темп
+    # отличает работающее окно от подавленного.
+    request_count = 0
 
     def _on_phase(self, name, count):
         self._phase = (str(name or ""), int(count or 0))
@@ -987,8 +990,10 @@ class ValidatorApi:
     # Список движков собирается из ОДНОГО места. Раньше имена API-источников
     # были переписаны сюда руками, и добавленный в конвейер источник в окне не
     # появлялся: список в двух местах расходится всегда, вопрос лишь когда.
-    PARSER_ENGINES = ["DuckDuckGo Lite", "AOL (Tor)", "Yahoo (Tor)",
-                      "AOL (Proxies)", "Yahoo (Proxies)"] + sorted(_API_ENGINES)
+    # Список берётся из конвейера, а не переписывается здесь. Две копии
+    # одного списка расходятся молча: окно предлагает движок, которого
+    # конвейер уже не знает.
+    PARSER_ENGINES = list(SEARCH_ENGINES)
 
     def _parser_log(self, message, tag="info"):
         line = {"text": str(message), "tag": tag}
@@ -1157,9 +1162,18 @@ class ValidatorApi:
         Возвращает путь к журналу, чтобы окно могло назвать его владельцу.
         """
         payload = payload if isinstance(payload, dict) else {}
-        message = str(payload.get("message") or "Ошибка в окне")[:500]
+        message = str(payload.get("message") or "")[:500]
         where = str(payload.get("where") or "")[:300]
         stack = str(payload.get("stack") or "")[:4000]
+
+        # Ни слова описания — записывать нечего.
+        #
+        # Раньше здесь стояла подстановка «Ошибка в окне», и в журнале
+        # владельца скопилось двадцать таких записей: место занято, разобрать
+        # нельзя, а программа при запуске о них ещё и докладывала. Пустая
+        # улика хуже отсутствия улики.
+        if not (message.strip() or where.strip() or stack.strip()):
+            return {"ok": False, "error": "пустое сообщение — записывать нечего"}
 
         # Текст приходит ИЗ ОКНА, то есть из места, где выполняется наш же
         # JavaScript. Обрезаем длины и кладём как данные, ничего не исполняя.
@@ -1300,8 +1314,43 @@ class _Handler(BaseHTTPRequestHandler):
     api: ValidatorApi = None
     token: str = ""
 
+    # HTTP/1.1 — то есть ОДНО соединение на много запросов.
+    #
+    # По умолчанию BaseHTTPRequestHandler говорит HTTP/1.0, а это новое
+    # TCP-соединение на КАЖДЫЙ запрос. Окно опрашивает состояние четыре раза
+    # в секунду плюс два раза от сбора адресов — то есть шесть соединений в
+    # секунду, и каждое Windows держит в TIME_WAIT ещё четыре минуты после
+    # закрытия. Замерено на машине владельца: 923 занятых порта на 127.0.0.1
+    # при динамическом диапазоне в 16384. Тысяча портов, сожжённых ни за что,
+    # и постоянная нагрузка на сетевой стек там, где хватает одного
+    # соединения.
+    #
+    # Включать безопасно: keep-alive требует, чтобы у каждого ответа была
+    # длина, а весь вывод идёт через _send, и он Content-Length ставит
+    # всегда. Тест рядом считает РЕАЛЬНО открытые соединения, а не наличие
+    # этой строки.
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, *args):          # тишина в консоли
         pass
+
+    def handle_one_request(self):
+        """То же, что у родителя, но без крика при обрыве со стороны браузера.
+
+        Браузер обрывает незавершённый запрос всякий раз, когда уходит со
+        страницы, перезагружается или отменяет опрос, — это его нормальное
+        поведение, а не авария сервера. Родительский класс на такой обрыв
+        печатает в консоль полную трассировку `ConnectionAbortedError
+        [WinError 10053]`, и владелец видит красное полотно там, где ничего
+        не сломалось.
+
+        Глушится ТОЛЬКО обрыв связи. Любая другая ошибка проходит наверх как
+        раньше и попадает в журнал сбоев.
+        """
+        try:
+            BaseHTTPRequestHandler.handle_one_request(self)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
 
     def _authorised(self):
         header = self.headers.get("X-Token")
@@ -1311,12 +1360,17 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         raw = body if isinstance(body, bytes) else str(body).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(raw)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(raw)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            # Браузер ушёл, не дочитав ответ. Писать некому — и это не повод
+            # печатать трассировку: отменённый запрос штатное дело.
+            self.close_connection = True
 
     # Оформление отдаётся без токена, всё остальное — только с ним.
     #
@@ -1368,6 +1422,10 @@ class _Handler(BaseHTTPRequestHandler):
         # отличает работу от тишины — а тишина и есть зависание.
         try:
             self.api.last_seen_at = time.time()
+            # Считаем ЧИСЛО запросов, а не только время последнего: окно,
+            # подавленное браузером, продолжает спрашивать — просто вчетверо
+            # реже. Тишины не наступает, и сторож по паузе такое пропускает.
+            self.api.request_count += 1
         except Exception:
             pass
 
@@ -1476,12 +1534,28 @@ class WindowWatchdog:
     дать одну запись, а не четырнадцать тысяч.
     """
 
+    # Ниже скольких запросов в секунду окно считается подавленным.
+    #
+    # Живое окно спрашивает шесть раз в секунду: четыре тика валидатора и два
+    # тика сбора. Браузер, признавший страницу невидимой, зажимает таймеры и
+    # даёт один-два запроса в секунду — замерено дважды: 1.1/с в одном опыте
+    # и ровно 2.0/с в другом.
+    #
+    # Порог 3.0, а не 2.0. Двойка стояла ВПРИТЫК к измеренному значению:
+    # живой замер дал 2.0 при пороге 2.0, и срабатывание оказалось делом
+    # округления. Тройка разводит случаи с запасом в обе стороны — подавленное
+    # окно не даёт больше двух, а занятая машина не роняет живое ниже трёх.
+    SLOW_RATE = 3.0
+
     def __init__(self, api, silence_seconds=20.0, check_every=5.0):
         self.api = api
         self.silence = float(silence_seconds)
         self.check_every = float(check_every)
         self._stop = threading.Event()
         self._reported = False
+        self._slow_reported = False
+        self._last_count = 0
+        self._last_rate_at = 0.0
 
     def check_once(self, now=None):
         """Одна проверка. Возвращает True, если тишина только что записана.
@@ -1511,11 +1585,54 @@ class WindowWatchdog:
             "dead")
         return True
 
+    def check_rate(self, now=None):
+        """Не подавлено ли окно. Возвращает True, если подавление записано.
+
+        Отдельно от проверки тишины, потому что случай ДРУГОЙ: подавленное
+        окно не молчит, оно отвечает — просто вшестеро реже. Тишины не
+        наступает никогда, и проверка по паузе такое пропускает полностью.
+
+        Именно этот случай владелец показывал четыре раза подряд: интерфейс
+        замирает, питон жив, ошибок нет, журнал пуст.
+        """
+        now = time.time() if now is None else now
+        count = int(getattr(self.api, "request_count", 0) or 0)
+        if not self._last_rate_at:
+            self._last_rate_at, self._last_count = now, count
+            return False
+
+        elapsed = now - self._last_rate_at
+        if elapsed < self.check_every:
+            return False
+        rate = (count - self._last_count) / elapsed
+        self._last_rate_at, self._last_count = now, count
+
+        # Ноль запросов — это тишина, у неё своя проверка. Здесь нас
+        # интересует именно «отвечает, но еле-еле».
+        if rate <= 0 or rate >= self.SLOW_RATE:
+            self._slow_reported = False
+            return False
+        if self._slow_reported:
+            return False
+        self._slow_reported = True
+        log_crash("окно",
+                  "Окно отвечает намного реже обычного: %.1f запроса в "
+                  "секунду вместо шести. Так выглядит страница, которую "
+                  "браузер счёл невидимой: таймеры зажаты, отрисовка "
+                  "остановлена. Программа при этом исправна." % rate,
+                  context="темп ниже порога %.1f/с" % self.SLOW_RATE)
+        self.api._on_log(
+            "[DEAD] Окно подавлено браузером (%.1f запр/с вместо 6): картинка "
+            "не обновляется, хотя программа работает. Запись в %s"
+            % (rate, crash_log_path()), "dead")
+        return True
+
     def start(self):
         def loop():
             while not self._stop.wait(self.check_every):
                 try:
                     self.check_once()
+                    self.check_rate()
                 except Exception:
                     # Сторож не имеет права уронить программу: он про разбор
                     # аварий, а не про проверку почты.
@@ -1543,17 +1660,68 @@ def _announce_past_crashes(api, within_hours=24):
         return 0
     if not found:
         return 0
+    # Одна строка и метка INFO, а не красное полотно.
+    #
+    # Первая версия кричала «[DEAD]» и перечисляла каждую запись отдельной
+    # красной строкой. У владельца это дало три красные строки без единого
+    # слова содержания сразу после запуска — на месте, где ничего не
+    # сломалось прямо сейчас. Сообщение о ПРОШЛОЙ аварии не должно выглядеть
+    # как авария текущая, а перечислять нечитаемое незачем.
     api._on_log(
-        "[DEAD] В прошлый раз программа сломалась. Записей за сутки: %d. "
-        "Подробности с трассировкой: %s" % (len(found), crash_log_path()),
-        "dead")
-    for head in found:
-        api._on_log("[DEAD]    %s" % head, "dead")
+        "[INFO] Прошлый запуск оставил записи о сбоях: %d за сутки. "
+        "Смотреть здесь: %s" % (len(found), crash_log_path()),
+        "info")
     return len(found)
+
+
+# Ключи, которыми WebView2 просят не душить «фоновую» страницу.
+#
+# Зачем. Замерено на живой странице: когда браузер считает её невидимой, он
+# зажимает setInterval до ОДНОГО раза в секунду (вместо четырёх) и полностью
+# останавливает requestAnimationFrame — то есть перестаёт перерисовывать
+# окно. Клики при этом доходят и обработчики срабатывают, но картинка не
+# меняется, и со стороны это неотличимо от «зависло намертво».
+#
+# Ни перехватчик ошибок, ни сторож тишины такого не ловят: ошибки нет, а
+# запросы идут — просто вчетверо реже.
+#
+# WebView2 включает это подавление, когда считает окно перекрытым или
+# свёрнутым, и ошибается в этом известным образом. Три ключа ниже выключают
+# ровно три части этого поведения и ничего больше.
+WEBVIEW_NO_THROTTLE = (
+    "--disable-background-timer-throttling "
+    "--disable-renderer-backgrounding "
+    "--disable-backgrounding-occluded-windows"
+)
+
+
+def apply_no_throttle(environ=None):
+    """Дописывает ключи в WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS.
+
+    Дописывает, а не перезаписывает: владелец мог задать свои ключи, и
+    затирать их значит молча отменять его настройку. Уже добавленное второй
+    раз не добавляется — иначе при каждом запуске строка росла бы.
+
+    Отдельной функцией, потому что run() открывает настоящее окно и в тесте
+    не вызывается, а проверить это надо.
+    """
+    environ = os.environ if environ is None else environ
+    key = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+    current = environ.get(key, "")
+    missing = [flag for flag in WEBVIEW_NO_THROTTLE.split()
+               if flag not in current]
+    if not missing:
+        return current
+    environ[key] = (current + " " + " ".join(missing)).strip()
+    return environ[key]
 
 
 def run():
     """Поднимает мост и открывает окно."""
+    # ДО импорта webview: WebView2 читает переменную окружения в момент
+    # создания движка, и выставленная позже она уже ни на что не влияет.
+    apply_no_throttle()
+
     import webview
 
     api = ValidatorApi()

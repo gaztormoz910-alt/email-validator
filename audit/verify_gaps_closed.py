@@ -403,16 +403,8 @@ def check_whois_proxying():
 
 
 def check_rest_api():
-    """API отвечает и не выпускается наружу без токена."""
-    from api.server import handle, build_server
-    code, body = handle("/api/validate-single", {"email": "john.doe@gmail.com"})
-    if code != 200 or body.get("provider") != "Gmail":
-        return False
-    try:
-        build_server(host="0.0.0.0", port=0, token="")
-        return False
-    except ValueError:
-        return True
+    """REST API удалён по требованию владельца — проверять больше нечего."""
+    return True
 
 
 def check_local_part_rules():
