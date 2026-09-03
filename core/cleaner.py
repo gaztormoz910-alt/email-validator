@@ -3,7 +3,7 @@
 import re
 
 from .parser_pipeline import GLOBAL_VERIFIED_DOMAINS
-from core.email_syntax import to_ascii_domain
+from core.email_syntax import to_ascii_domain, _lower_domain_only
 
 # --- Нормализация адресов для дедупликации (п.28 чек-листа) ---
 #
@@ -78,9 +78,9 @@ def strip_wrapping_junk(raw: str) -> str:
         inner = value[value.rfind("<") + 1:value.rfind(">")]
         if "@" in inner:
             value = inner
-    stripped = value.strip(_JUNK_EDGES).lower()
+    stripped = _lower_domain_only(value.strip(_JUNK_EDGES))
     if quoted_before and not has_quoted_local(stripped):
-        return value.strip(_JUNK_EDGES.replace('"', "")).lower()
+        return _lower_domain_only(value.strip(_JUNK_EDGES.replace('"', "")))
     return stripped
 
 
@@ -136,6 +136,22 @@ class EmailCleaner:
         "kr", "in", "br", "mx", "ar", "cl", "co", "io", "me", "info", "biz",
         "edu", "gov", "mil", "int", "tv", "cc", "xyz", "online", "site", "shop",
         "app", "dev", "tech", "store", "pro", "name", "email", "cloud",
+        # Настоящие зоны, которые НАЧИНАЮТСЯ с более короткой зоны из этого же
+        # списка. Они здесь не ради починки склеек, а ради предохранителя в
+        # _strip_tld_tail: пока зоны нет в списке, её домен выглядит как
+        # «короткая зона плюс мусор», и адрес молча уезжает на чужой домен
+        # (`geometrixx.info` -> `geometrixx.in`). Список неполон и полным не
+        # будет — это уменьшение риска, а не его устранение; настоящее решение
+        # — брать зоны из реестра IANA.
+        "institute", "international", "industries", "ink", "insure",
+        "company", "consulting", "construction", "community", "codes",
+        "coffee", "cool", "coupons", "courses", "credit", "coop",
+        "media", "menu", "memorial",
+        "design", "delivery", "dental", "deals",
+        "network", "organic", "shopping", "technology",
+        "productions", "properties", "property",
+        "cafe", "camera", "capital", "care", "careers", "cash", "casino",
+        "chat", "church", "estate", "auction", "audio", "auto",
     )
 
     def __init__(self):
@@ -199,6 +215,56 @@ class EmailCleaner:
             'live.co': 'live.com', 'live.con': 'live.com', 'lve.com': 'live.com',
         }
 
+    # ── Предохранитель против подмены домена ────────────────────────────
+    #
+    # Починка склеек существует для строк, которых как домена не бывает:
+    # `gmail.comtelefoon`, `mail.ruXXX`, `corp.com-jobs`. Но её правила —
+    # «начинается с известного домена» и «после известной зоны идут буквы» —
+    # срабатывали и на ЗАКОННЫХ доменах:
+    #
+    #     user@sky.company.co.uk  ->  user@sky.com     (начинается с sky.com)
+    #     b@aol.company.com       ->  b@aol.com        (начинается с aol.com)
+    #     a@web.de.hosting.net    ->  a@web.de         (начинается с web.de)
+    #     d@list.ru-company.com   ->  d@list.ru        (хвост после .ru)
+    #
+    # Все четыре — работающие домены. «Годен» по ним означает письмо человеку,
+    # которого владелец в базу не клал; «нет такого» хоронит настоящий адрес,
+    # который никто не спрашивал. Обе стороны — ровно тот ложный вердикт,
+    # ради которого этот предохранитель и написан.
+    #
+    # Разделяющий признак — ТОЧКА В ОСТАТКЕ. Замерено на всех восьми известных
+    # случаях, разделение полное:
+    #
+    #     законные:  pany.co.uk   pany.com   .hosting.net   -company.com  есть
+    #     склейки:   telefoon     xxx        -jobs          blahblah      нет
+    #
+    # И это не совпадение выборки, а свойство: точка порождает новую метку
+    # домена. Мусор от копирования метку не образует — образуй он её, строка
+    # была бы законным доменом, и чинить в ней было бы нечего.
+    #
+    # Правило намеренно осторожное: сомнительный случай остаётся нетронутым, и
+    # тогда DNS сам скажет, что домена нет. Пропущенная починка стоит одного
+    # честного «мёртвый домен»; лишняя — молча подменяет ящик.
+
+    _APPENDIX_RE = re.compile(
+        r"^(.+?\.(?:com|org|net|ru|edu|gov|io|me|info|biz))([-_].*)$")
+
+    @staticmethod
+    def _junk_tail(tail):
+        """Похож ли остаток на приклеенный мусор, а не на продолжение домена."""
+        return bool(tail) and "." not in tail
+
+    def _cut_tld_appendix(self, domain):
+        """Отрезает приписку после известной зоны: corp.com-jobs -> corp.com.
+
+        Отрезает ТОЛЬКО бесточечный хвост — см. предохранитель выше.
+        """
+        m = self._APPENDIX_RE.match(domain)
+        if m and self._junk_tail(m.group(2)):
+            return m.group(1)
+        return domain
+
+
     def _strip_tld_tail(self, domain: str) -> str:
         """Отрезает мусор, приклеенный к известному TLD.
 
@@ -206,9 +272,30 @@ class EmailCleaner:
         Работает для любого домена, а не только для списка популярных.
         Если после TLD идёт ещё одна точка (реальный поддомен вроде co.uk) —
         не трогаем, чтобы не сломать составные зоны.
+
+        ВТОРОЙ ПРЕДОХРАНИТЕЛЬ: зона целиком — не мусор.
+
+        Короткая зона бывает НАЧАЛОМ длинной: `in` начинает `info`, `co` —
+        `company`, `me` — `menu`. Правило искало зону как префикс последней
+        метки, поэтому `geometrixx.info` превращался в `geometrixx.in` —
+        существующий чужой домен в зоне Индии. Замерено на живой базе
+        владельца: 2 адреса из 5000, то есть примерно 80 000 подменённых
+        контактов на базе в 200 миллионов, и все они выглядят как обычные
+        проверенные адреса.
+
+        Поэтому сначала спрашиваем: а не является ли последняя метка сама по
+        себе известной зоной? Если да, чинить нечего — это домен, а не склейка.
+        Признак, а не список исключений: пополняя _KNOWN_TLDS настоящими
+        зонами, мы одновременно расширяем и защиту.
+
+        Зоны перебираются от ДЛИННОЙ к короткой: при прочих равных выигрывает
+        более точное совпадение, а не то, что раньше стоит в таблице.
         """
         import re
-        for tld in self._KNOWN_TLDS:
+        last_label = domain.rsplit(".", 1)[-1]
+        if last_label in self._KNOWN_TLDS:
+            return domain
+        for tld in sorted(self._KNOWN_TLDS, key=len, reverse=True):
             m = re.match(rf'^(.+\.{tld})([a-z]{{2,}})$', domain)
             if m and m.group(2) not in self._KNOWN_TLDS:
                 return m.group(1)
@@ -241,7 +328,13 @@ class EmailCleaner:
         # 1. Жесткая зачистка "хвостов" от копипаста в домене
 
         # Приписки после известного TLD через дефис/подчёркивание: corp.com-jobs
-        domain = re.sub(r'(\.(com|org|net|ru|edu|gov|io|me|info|biz))[-_].*$', r'\1', domain)
+        #
+        # ПРЕДОХРАНИТЕЛЬ: хвост отрезается, только если в нём НЕТ точки.
+        # Точка означает, что это не приклеенный мусор, а ещё одна метка
+        # домена, то есть строка — законный домен, и трогать его нельзя.
+        # Без этого условия `list.ru-company.com` превращался в `list.ru`,
+        # и вердикт выносился про ЧУЖОЙ ящик. Подробнее — у _junk_tail.
+        domain = self._cut_tld_appendix(domain)
 
         # Слипшийся мусор после известного домена: gmail.comtelefoon -> gmail.com.
         # ВАЖНО: перебираем ОТСОРТИРОВАННЫЙ список, а не set. Раньше порядок обхода
@@ -249,7 +342,8 @@ class EmailCleaner:
         # (замерено: bob@x.gmail.com.y.yahoo.com.z -> 7 раз gmail.com, 5 раз yahoo.com).
         # Самое длинное совпадение выигрывает, поэтому результат однозначен.
         matches = [pop for pop in self._sorted_domains
-                   if domain.startswith(pop) and len(domain) > len(pop)]
+                   if domain.startswith(pop) and len(domain) > len(pop)
+                   and self._junk_tail(domain[len(pop):])]
         if matches:
             domain = matches[0]
 

@@ -12,6 +12,7 @@ from core.bounded import BoundedCache
 from core.cache import ResultCache
 from core.runstate import (RunState, run_id_for, DEFAULT_RETRY_DELAY,
                            GREYLIST_RETRY_DELAY)
+from core.canary import CanaryWatch, canary_address
 from core.verdict import verdict_confidence
 from core.cleaner import EmailCleaner, normalize_for_dedup
 from core.filters import SpamFilter
@@ -1002,6 +1003,103 @@ class ValidationPipeline:
             self.ai.train_models()
             self.callbacks['on_log']("[INFO] ИИ успешно обучен и готов к бою!", "info")
 
+    def _second_opinion_on_valid(self, email, res):
+        """Спрашивает адрес вторым выходом. True/False/None — см. сеть.
+
+        Тихо: сбой второго мнения не должен ронять вердикт, полученный
+        первым. None здесь означает «сверить не удалось», и первый ответ
+        остаётся в силе — иначе наш собственный сбой понижал бы честно
+        подтверждённые адреса.
+        """
+        if self.network is None:
+            return None
+        mx = res.get("mx_records") or ([res["mx_record"]]
+                                       if res.get("mx_record") else [])
+        if not mx:
+            return None
+        try:
+            return self.network.confirm_valid_from_other_exit(
+                email, list(mx), first_proxy=res.get("proxy"))
+        except Exception:
+            return None
+
+    def _fly_canary(self, email, res):
+        """Пускает канарейку по домену только что подтверждённого адреса.
+
+        Тихо и не чаще одного раза на пару «выход + домен» за прогон: лишняя
+        сессия к чужому почтовику — лишний повод попасться ему на глаза,
+        ровно за тем ответом, ради которого мы и пришли.
+        """
+        watch = getattr(self, "canary", None)
+        if watch is None or self.network is None:
+            return False
+        try:
+            domain = email.rsplit("@", 1)[1].lower()
+        except Exception:
+            return False
+        proxy = res.get("proxy")
+        try:
+            exit_ip = self.network.exit_ip_of(proxy) if proxy else None
+        except Exception:
+            exit_ip = proxy
+        exit_ip = exit_ip or proxy
+
+        watch.note_valid(exit_ip, domain)
+        if not watch.should_probe(exit_ip, domain):
+            return False
+
+        mx = res.get("mx_records") or ([res["mx_record"]]
+                                       if res.get("mx_record") else [])
+        if not mx:
+            return False
+        try:
+            ответ = self.network.stealth_smtp_ping(
+                canary_address(domain), list(mx), prefer_exit_of=proxy)
+            статус = ответ.get("status")
+        except Exception:
+            # Сорвавшаяся проба — это НЕ улика. Молчим: обвинить выход по
+            # своему же сбою значит выбросить живые адреса.
+            return False
+
+        if not watch.record(exit_ip, domain, статус):
+            return False
+
+        self.callbacks['on_log'](
+            "[DEAD] Канарейка вернулась живой: %s принял заведомо "
+            "несуществующий адрес с выхода %s. Все «Годен» по этому домену с "
+            "этого выхода НЕДОКАЗУЕМЫ — виноват прокси, не база."
+            % (domain, exit_ip or "прямого соединения"), "dead")
+        return True
+
+    def _forget_cached(self, domains, why):
+        """Стирает из кэша вердикты по разоблачённым доменам.
+
+        `_revise` чинит ТЕКУЩИЙ прогон: таблицу и выгрузку. Но вердикт лежит
+        ещё и в кэше со сроком в тридцать суток, и следующий запуск достанет
+        оттуда тот самый «Годен», не сходив в сеть. Разоблачение действовало
+        бы один прогон, а ложный вердикт возвращался бы на месяц — то есть
+        владелец получил бы его ровно тогда, когда уже забыл про
+        предупреждение.
+
+        Тихо и по одному домену: сбой кэша не имеет права ронять прогон,
+        который к этому моменту уже закончен.
+        """
+        cache = getattr(self, "cache", None)
+        if cache is None or not domains:
+            return 0
+        forgotten = 0
+        for domain in domains:
+            try:
+                forgotten += cache.forget_domain(domain)
+            except Exception:
+                pass
+        if forgotten:
+            self.callbacks['on_log'](
+                "[INFO] Из кэша убрано вердиктов: %d (%s). Следующий запуск "
+                "проверит эти адреса заново, а не достанет старый «Годен»."
+                % (forgotten, why), "info")
+        return forgotten
+
     def _revise(self, domains, new_status, note):
         """Просит поверхность пересмотреть уже показанные строки по домену.
 
@@ -1157,6 +1255,12 @@ class ValidationPipeline:
         # обновляется на каждом адресе и не вытесняется никогда.
         domain_stats = BoundedCache(max_keys=100_000)
         domain_stats_lock = threading.Lock()
+
+        # Канарейки живут ОДИН прогон: врущим выход становится не навсегда, а
+        # на время, и почтовик отпускает подозрение сам. Запомнив это между
+        # запусками, мы повторили бы дефект Б4, где тарпитинг оседал в долгой
+        # памяти и хоронил всю почту gmail на месяц.
+        self.canary = CanaryWatch()
         
         # Предзагрузка тяжелых модулей один раз (O(1) вместо O(N) в потоках)
         if not self.name_extractor:
@@ -1367,32 +1471,42 @@ class ValidationPipeline:
                 raw_status = res["status"]
                 warn_if_proxies_dead()
 
-                # Опечатка в домене — ЗАПАСНОЙ путь, а не подмена.
+                # Опечатка в домене — ПОДСКАЗКА, а не вердикт.
                 #
-                # Проверяется ровно то, что загружено. И только если DNS
-                # ответил, что такого домена нет вовсе, мы пробуем похожий
-                # известный: `user@gmial.com` -> `user@gmail.com`. Обе строки
-                # остаются в выдаче, и в причине сказано, что произошло.
+                # Вердикт выносится о ЗАГРУЖЕННОМ адресе и остаётся при нём.
+                # Если у его домена нет MX — адрес мёртв, и это доказано:
+                # писать физически некуда. Похожий известный домен мы всё
+                # равно спрашиваем, потому что владельцу полезно знать, что
+                # за опечаткой стоит живой ящик, — но кладём это в ОТДЕЛЬНЫЕ
+                # колонки, а не в статус.
                 #
-                # Раньше подмена шла молча и ДО проверки: вердикт получался
-                # настоящий, но про другой ящик.
+                # Почему так, дословно по жалобе владельца: «ты при проверке
+                # ящика меняешь ему домен на другой, потом проверяешь именно
+                # почту вместе с изменённым доменом и говоришь мне что он
+                # валидный». Так и было: `email = suggestion`, и в колонке
+                # «Годен» оказывался адрес, которого он не загружал. Отправив
+                # по такой строке, он написал бы ЧУЖОМУ человеку — тому, чей
+                # адрес мы угадали, а не тому, кого он собирался достать.
+                #
+                # Обратная ошибка тут дешевле на порядок: «мёртвый домен» с
+                # припиской «похоже на опечатку, на gmail.com такой ящик
+                # есть» стоит одного взгляда владельца, а ложный Valid —
+                # письма не тому человеку.
                 if (raw_status == "invalid"
                         and "No MX" in res.get("reason", "")
                         and fix_typos):
                     suggestion = self.cleaner.suggest_domain_fix(email)
                     if suggestion and suggestion != email:
                         fixed_res = self.network.check_email(suggestion)
+                        data["suggested_email"] = suggestion
+                        data["suggested_status"] = fixed_res.get("status", "")
                         if fixed_res.get("status") in ("valid", "catchall"):
-                            data["original_email"] = email
-                            data["checked_as"] = suggestion
-                            fixed_res["reason"] = (
-                                "Домен исправлен: %s -> %s. %s"
-                                % (email.rsplit("@", 1)[1],
-                                   suggestion.rsplit("@", 1)[1],
-                                   fixed_res.get("reason", "")))
-                            res = fixed_res
-                            raw_status = res["status"]
-                            email = suggestion
+                            res["reason"] = (
+                                "%s. Похоже на опечатку: на %s такой ящик "
+                                "есть, но проверяли и хороним МЫ ЗАГРУЖЕННЫЙ "
+                                "адрес — решение за вами"
+                                % (res.get("reason", ""),
+                                   suggestion.rsplit("@", 1)[1]))
 
                 # Greylisted — в очередь на повтор, и ждём столько, сколько
                 # серые списки просят: повтор раньше выдержки получает тот же
@@ -1434,6 +1548,51 @@ class ValidationPipeline:
                         st["total"] += 1
                         if raw_status == "valid":
                             st["valid"] += 1
+                except Exception:
+                    pass
+
+                # Второе мнение о подтверждении — по требованию владельца.
+                # Не на каждом прогоне: это лишняя сессия на КАЖДЫЙ Valid.
+                # Включается перед тем прогоном, после которого он собирается
+                # рассылать.
+                if raw_status == "valid" and getattr(self, "confirm_valid", False):
+                    итог = self._second_opinion_on_valid(email, res)
+                    if итог is False:
+                        raw_status = "unknown"
+                        status_display = "Unknown"
+                        res["reason"] = (
+                            "Второй выход отверг адрес, первый принял — "
+                            "доказательства нет ни у одной стороны")
+
+                # Канарейка: заведомо мёртвый адрес отдельной пробой.
+                #
+                # Контрольная проба спрашивает выдуманный адрес В ТОЙ ЖЕ
+                # сессии и ловит catch-all — постоянное свойство домена.
+                # Канарейка ловит другое: тарпитинг, включившийся ПОСРЕДИ
+                # прогона, и зазор у гигантов, где контрольная проба идёт
+                # лишь раз в 25 адресов. Вернувшийся на неё 250 означает, что
+                # этот выход на этом домене врёт прямо сейчас.
+                if raw_status == "valid":
+                    self._fly_canary(email, res)
+
+                # Доля Valid по домену — В СТРОКУ, а не только в лог.
+                #
+                # «У домена ВСЕ проверенные адреса ответили 250» — сильный
+                # признак catch-all, и он уже считался. Но приписывался он к
+                # тексту причины, а фильтровать по тексту нельзя. Числом в
+                # колонке владелец отложит такие домены одним движением.
+                #
+                # Считаем на момент строки: к концу прогона число уточнится,
+                # но строка уже уехала в таблицу, а пересчитывать всё ради
+                # двух знаков после запятой не стоит той памяти.
+                try:
+                    with domain_stats_lock:
+                        st = domain_stats.get(dom_key) or {}
+                    всего = int(st.get("total") or 0)
+                    if всего:
+                        data["domain_valid_ratio"] = round(
+                            int(st.get("valid") or 0) / float(всего), 3)
+                        data["domain_checked"] = всего
                 except Exception:
                     pass
 
@@ -1823,10 +1982,34 @@ class ValidationPipeline:
                 self.callbacks['on_log'](
                     f"[INFO] Пересмотрено строк по catch-all доменам: {revised}. "
                     "Их «Годен» ничего не доказывал.", "info")
+            self._forget_cached(proven, "catch-all")
         if trapped:
             self._revise(trapped, "Unknown",
                          "домен перестал отвечать честно (тарпитинг) — «Годен» "
                          "по нему недоказуем")
+            self._forget_cached(trapped, "тарпитинг")
+
+        # Домены, где канарейка вернулась живой. Тарпитинг мог включиться
+        # посреди прогона, и первые сотни адресов проверены честно — но
+        # разделить их по времени мы не можем, поэтому пересматриваем все.
+        # Ошибиться в сторону «недоказуемо» дешевле: перепроверка стоит
+        # одного прогона, разосланное письмо на мёртвый ящик — репутации.
+        try:
+            подставные = self.canary.compromised_domains() if getattr(
+                self, "canary", None) else []
+        except Exception:
+            подставные = []
+        if подставные:
+            self._revise(подставные, "Unknown",
+                         "канарейка вернулась живой: сервер принял заведомо "
+                         "несуществующий адрес — «Годен» недоказуем")
+            self._forget_cached(подставные, "канарейка")
+            свод = self.canary.summary()
+            self.callbacks['on_log'](
+                "[DEAD] Канареек выпущено: %d, поймано врущих выходов: %d. "
+                "Домены: %s. Это НЕ проблема базы — нужен чистый прокси."
+                % (свод["проб"], свод["поймано"], ", ".join(свод["домены"])),
+                "dead")
             self.callbacks['on_log'](
                 "[DEAD] ВНИМАНИЕ: %s перестал отвечать честно — принимает любые "
                 "адреса, защищаясь от перебора с нашего IP. Все «Годен» по этим "

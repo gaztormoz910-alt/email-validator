@@ -491,7 +491,9 @@ def test_invariant_pipeline_keeps_every_part_it_needs():
         assert hasattr(pipeline, part), "конвейер собран без %s" % part
 
     # Чистильщик обязан быть рабочим, а не просто присутствовать.
-    assert pipeline.cleaner.clean_email("  <IVAN@Gmail.com>  ") == "ivan@gmail.com"
+    # Регистр ИМЕНИ ЯЩИКА сохраняется: по RFC 5321 §2.4 он значащий, и толковать его вправе только сервер назначения. Домен приводится к нижнему — DNS регистр не различает. Прежнее ожидание закрепляло общий .lower(), из-за которого наружу уезжал переписанный адрес.
+    # Задача проверки цела: скобки и пробелы по-прежнему счищены.
+    assert pipeline.cleaner.clean_email("  <IVAN@Gmail.com>  ") == "IVAN@gmail.com"
 
 
 def test_segments_survive_junk():

@@ -122,6 +122,34 @@ class TestBrokenAddressesStillFail(unittest.TestCase):
             with self.subTest(address=address):
                 self.assertFalse(validate_email_syntax(address))
 
+    # Ломаные адреса с НЕ-ASCII именем ящика — отдельным списком, и вот почему.
+    #
+    # Латинские случаи выше отсеиваются дважды: сначала предварительным
+    # отсевом (двойная точка, точка у края, пробел), потом общей регуляркой
+    # dot-atom. У кириллицы второго рубежа нет — общая регулярка про неё не
+    # знает и в этой ветке не применяется вовсе, — поэтому предварительный
+    # отсев здесь единственный сторож.
+    #
+    # Проверено мутацией: если снять этот отсев, ВСЕ латинские случаи выше
+    # по-прежнему отвергаются регуляркой, и поломку не замечает ни один тест
+    # набора — «ив ан@почта.рф» уезжает в проверку по сети как обычный адрес.
+    BROKEN_NON_ASCII = [
+        "иван..петров@почта.рф", "ив ан@почта.рф", "иван.@почта.рф",
+        "иван@почта..рф", "mül ler@bücher.de",
+    ]
+
+    def test_broken_non_ascii_addresses_are_rejected(self):
+        for address in self.BROKEN_NON_ASCII:
+            with self.subTest(address=address):
+                self.assertFalse(validate_email_syntax(address))
+
+    def test_valid_non_ascii_addresses_still_pass(self):
+        """Положительный контроль: предыдущий тест не должен проходить за счёт
+        того, что кириллица отвергается целиком. RFC 6531 её разрешает."""
+        for address in ("иван@почта.рф", "müller@bücher.de"):
+            with self.subTest(address=address):
+                self.assertTrue(validate_email_syntax(address))
+
     def test_garbage_types_do_not_crash(self):
         for junk in (None, 0, [], {}, b"a@b.com", object(), 3.5):
             with self.subTest(junk=junk):

@@ -247,11 +247,15 @@ def test_giants_requirements_are_documented_where_they_apply():
 def test_giants_skip_list_is_explained_not_silent():
     """Где критерий неприменим, это сказано с причиной, а не пропущено молча."""
     code = source("core", "network.py")
-    position = code.index("skip_catchall = (")
-    block = code[position - 400:position + 900]
+    # Список гигантов теперь один на модуль, и объяснение обязано стоять
+    # рядом с ним, а не рядом с местом использования: иначе следующая копия
+    # списка появится без причины, и это уже приводило к дефекту Б4.
+    position = code.index("NEVER_CATCHALL = frozenset(")
+    block = code[position - 500:position + 900]
     assert "catch-all" in block.lower()
-    # И для гигантов всё равно есть контроль — прямо здесь же объяснено.
-    assert "тарпит" in code.lower() or "перебор" in code.lower()
+    assert "тарпит" in block.lower(), "не сказано, чем на самом деле является приём"
+    # И само освобождение пользуется именно этим списком, а не своей копией.
+    assert "skip_catchall = self._is_never_catchall(domain)" in code
 
 
 # ═══════════════════════════════ устойчивость
