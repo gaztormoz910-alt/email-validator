@@ -29,7 +29,6 @@ pip install -r requirements-dev.txt
 | `python main.py` | окно на веб-стеке (pywebview + WebView2) — основной интерфейс |
 | `python main.py --classic` | прежнее окно на CustomTkinter, запасное |
 | `python cli.py validate --emails base.txt --proxies socks5.txt -o out.csv` | проверка без окна |
-| `python -m api.server` | локальный HTTP-API на 127.0.0.1 |
 
 Командная строка умеет и операции с базами без проверки:
 

@@ -93,6 +93,17 @@ def log_crash(kind, message, exc=None, context=None):
     означало бы потерю самой аварии.
     """
     try:
+        # Запись без единого слова описания не нужна никому.
+        #
+        # Первая версия перехватчика в окне присылала пустые сообщения, и в
+        # журнале скопилось двадцать записей «Ошибка в окне» без деталей.
+        # Разбирать их нельзя, а при запуске программа о них ещё и
+        # рассказывала. Пустая запись хуже её отсутствия: она создаёт
+        # видимость улики.
+        has_words = bool(str(message or "").strip()) or exc is not None
+        if not has_words:
+            return False
+
         stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         parts = ["", SEPARATOR, "%s  [%s]" % (stamp, kind), str(message)]
         if context:
