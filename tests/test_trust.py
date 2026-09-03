@@ -115,19 +115,45 @@ def _run(content, network, monkeypatch, fix_typos=True):
 
 
 def test_typo_fallback_checks_the_loaded_domain_first(monkeypatch):
-    """Сначала спрашиваем про ЗАГРУЖЕННЫЙ домен, и только потом про похожий."""
+    """Спрашиваем про ЗАГРУЖЕННЫЙ домен, и вердикт остаётся про него же.
+
+    Прежнее ожидание этой проверки закрепляло дефект: подсказка ПОДМЕНЯЛА
+    адрес, и в колонке «Годен» оказывалась строка, которой владелец не
+    загружал. Отправив по ней, он написал бы ЧУЖОМУ человеку — тому, чей
+    адрес мы угадали.
+
+    Теперь исправление — предложение, а не действие: загруженный адрес
+    остаётся с честным «мёртвый домен», а рядом лежит подсказка. Обратная
+    ошибка тут дешевле на порядок: «похоже на опечатку, на gmail.com такой
+    ящик есть» стоит одного взгляда, ложный Valid — письма не тому человеку.
+    """
     net = _DomainAware({"gmail.com"})
     results, net = _run("user@gmial.com", net, monkeypatch)
 
     assert net.asked[0] == "user@gmial.com", (
         "первым спросили не загруженный адрес: %s" % net.asked)
     assert results, "адрес пропал"
-    email, status, reason = results[0][0], results[0][1], results[0][2]
-    assert status == "Valid"
-    assert email == "user@gmail.com", "исправление не применилось"
-    assert "Домен исправлен" in reason, reason
-    assert results[0][4].get("original_email") == "user@gmial.com", (
-        "исходная строка потерялась")
+    email, status, reason, data = (results[0][0], results[0][1],
+                                   results[0][2], results[0][4])
+    assert email == "user@gmial.com", "адрес подменён на подсказку: %s" % email
+    assert status == "Invalid/Bounce", status
+    assert "опечатку" in reason, reason
+    assert data.get("suggested_email") == "user@gmail.com", (
+        "подсказка не сохранена: %s" % data.get("suggested_email"))
+    assert data.get("suggested_status") == "valid", data.get("suggested_status")
+
+
+def test_typo_fallback_control_the_suggestion_is_actually_checked(monkeypatch):
+    """Контроль: похожий домен ДЕЙСТВИТЕЛЬНО спрашивается, а не угадывается.
+
+    Без этого подсказка была бы предположением, выданным за проверку: на
+    gmail.com такого ящика может не быть, и обещать владельцу обратное
+    значило бы врать в ту же сторону, только тише.
+    """
+    net = _DomainAware({"gmail.com"})
+    _results, net = _run("user@gmial.com", net, monkeypatch)
+    assert "user@gmail.com" in net.asked, (
+        "похожий домен не спрашивали: %s" % net.asked)
 
 
 def test_typo_fallback_never_touches_a_live_domain(monkeypatch):

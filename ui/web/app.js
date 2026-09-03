@@ -609,6 +609,22 @@ function detailRow(row, columns) {
       + "спрашивали. Дата в колонке «Когда» исходная.";
     grid.appendChild(note);
   }
+  if (more.suggested_email) {
+    // Подсказка, а не подмена. Вердикт в строке — про ЗАГРУЖЕННЫЙ адрес, и
+    // менять его на угаданный нельзя: письмо ушло бы чужому человеку, чей
+    // ящик мы просто угадали. Решение принимает владелец, поэтому здесь
+    // сказано и что нашли, и чем это кончилось на похожем домене.
+    const note = document.createElement("p");
+    note.className = "detail__note";
+    const живой = more.suggested_status === "valid"
+      || more.suggested_status === "catchall";
+    note.textContent = живой
+      ? `Похоже на опечатку: на ${more.suggested_email} такой ящик есть. `
+        + "Проверяли и хороним МЫ ЗАГРУЖЕННЫЙ адрес — решение за вами."
+      : `Проверили и похожий адрес ${more.suggested_email} — там тоже `
+        + "ничего (" + (more.suggested_status || "без ответа") + ").";
+    grid.appendChild(note);
+  }
   if (!grid.childElementCount) {
     const note = document.createElement("p");
     note.className = "detail__note";
