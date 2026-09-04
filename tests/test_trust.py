@@ -436,7 +436,12 @@ def test_nxdomain_control_no_answer_still_asks_further():
             self.asked = []
 
         def resolve(self, domain, rdtype):
-            self.asked.append(rdtype)
+            # Запоминаем И ИМЯ: между MX и запасным путём теперь идёт зонд на
+            # wildcard, и он спрашивает ВЫДУМАННОЕ имя. Сверять голую
+            # последовательность типов значило бы ломать проверку на каждом
+            # новом зонде, ничего при этом не охраняя: инвариант здесь про
+            # запросы по НАШЕМУ домену, а не про их общее число.
+            self.asked.append((rdtype, domain))
             if rdtype == "MX":
                 raise dns.resolver.NoAnswer()
             raise dns.resolver.NXDOMAIN()
@@ -444,4 +449,8 @@ def test_nxdomain_control_no_answer_still_asks_further():
     v = NetworkValidator(timeout=1)
     v.resolver = Resolver()
     assert v.get_mx_records("corp.test") == []
-    assert v.resolver.asked == ["MX", "A", "AAAA"], v.resolver.asked
+    свои = [т for т, имя in v.resolver.asked if имя == "corp.test"]
+    assert свои == ["MX", "A", "AAAA"], v.resolver.asked
+    # И контроль обратной стороны: зонд действительно спрашивал ДРУГОЕ имя.
+    чужие = [имя for _т, имя in v.resolver.asked if имя != "corp.test"]
+    assert чужие and all(и.endswith(".corp.test") for и in чужие), чужие

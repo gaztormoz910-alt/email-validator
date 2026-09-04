@@ -2,6 +2,7 @@ import os
 import re
 
 from core.email_syntax import harvest_pattern, _lower_domain_only
+from core.inputnorm import normalize_input, split_addresses
 
 from core.encoding import open_text
 
@@ -441,7 +442,31 @@ class StreamLoader:
                         continue
                     first_line = False
 
+                    # Приведение входа ДО разбора строки, а не после.
+                    #
+                    # Первая редакция ставила его после `_parse_line_smart`, и
+                    # это было бесполезно: разбор уже успевал взять первое
+                    # поле из «a@x.com, b@y.com» и уже успевал испортить
+                    # `iv<невидимый>an@gmail.com`, отдав `an@gmail.com` —
+                    # адрес обрезался ровно по невидимому знаку. Замерено
+                    # обоими случаями.
+                    line = normalize_input(line)
                     email, data = _parse_line_smart(line, delimiter, col_map)
+
+                    # В одной строке бывает НЕ ОДИН адрес. Замерено до
+                    # правки: «a@x.com, b@y.com» давало только первый —
+                    # второй исчезал молча. Это хуже ложного Invalid: адрес
+                    # не назван мёртвым, он просто пропадает, и инвариант
+                    # «подано = выдано» этого не заметит, потому что считает
+                    # ровно то, что загрузчик отдал.
+                    несколько = split_addresses(line)
+                    if len(несколько) > 1:
+                        for один in несколько:
+                            готовый = _lower_domain_only(
+                                clean_input_line_fast(один).strip())
+                            if готовый and "@" in готовый:
+                                yield готовый, dict(data)
+                        continue
 
                     # Базовая очистка email.
                     #
