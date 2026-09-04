@@ -22,7 +22,7 @@ import time
 
 # Таблицы поведения почтовиков — в core/mail_constants.py: ими пользуются и
 # SMTP-диалог, и профилирование прокси, и проверки по DNS, и скоринг.
-from core.mxguard import filter_mx_hosts
+from core.mxguard import filter_mx_hosts, resolves_to_private, REASON_PRIVATE
 from core.mail_constants import (                                 # noqa: E402,F401
     YAHOO_DOMAINS, AOL_DOMAINS, NEEDS_CLEAN_IP_DOMAINS, NICHE_FREE_DOMAINS,
     MICROSOFT_DOMAINS, LEGIT_HELO_NAMES, DNSBL_ZONES, SPAMHAUS_ZONE,
@@ -37,6 +37,7 @@ from core.mail_constants import (                                 # noqa: E402,F
 # сетевым клиентом значило прятать самое тихое место проверки в самом шумном.
 from core.email_syntax import (
     has_quoted_local,                                   # noqa: E402,F401
+    domain_literal_ip,
     to_ascii_domain, has_non_ascii_local, validate_email_syntax,
     MAX_EMAIL_BYTES, MAX_LOCAL_BYTES, MAX_DOMAIN_BYTES,
 )
@@ -1338,6 +1339,11 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         разошлись бы молча, и строка показывала бы не то, что ушло.
         """
         local, _, raw = str(email or "").rpartition("@")
+        # Домен-литерал переводить в punycode нечего: там адрес, а не имя, и
+        # он уже ASCII. Прогон через IDNA возвращал пустую строку, то есть
+        # адрес терялся бы по дороге к команде RCPT.
+        if domain_literal_ip(raw) is not None:
+            return "%s@%s" % (local, raw.strip().lower())
         domain = to_ascii_domain(raw.lower())
         return "%s@%s" % (local, domain) if domain else ""
 
@@ -1365,7 +1371,26 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         # и там оно будет честным ответом, а не отговоркой.
 
         local_part, _, raw_domain = email.rpartition("@")
-        domain = to_ascii_domain(raw_domain.lower())
+
+        # Домен-литерал: вместо ИМЕНИ домена в адресе стоит сам адрес в
+        # квадратных скобках — `user@[192.168.1.1]`. RFC 5321 §4.1.3 это
+        # разрешает, а до правки такой получатель отвергался ещё синтаксисом,
+        # то есть хоронился без единого запроса в сеть.
+        #
+        # ЗАЩИТА ОТ ПОХОДА ВНУТРЬ СЕТИ ОСТАЁТСЯ В СИЛЕ. Разница с MX-записью
+        # только в том, кто назвал адрес: там его пишет владелец чужого
+        # домена, здесь он приходит строкой из базы. Ходить к себе внутрь
+        # нельзя ни по чьей указке, поэтому непубличный литерал даёт «не
+        # проверено» — но не «мёртвый»: внутренняя почта у кого-то может быть
+        # настоящей, мы просто не можем её увидеть снаружи.
+        литерал = domain_literal_ip(raw_domain)
+        if литерал is not None and resolves_to_private(str(литерал)):
+            return {"status": "unknown",
+                    "reason": "Проверить нечем: %s" % REASON_PRIVATE,
+                    "mx_record": "N/A"}
+
+        domain = (raw_domain.strip().lower() if литерал is not None
+                  else to_ascii_domain(raw_domain.lower()))
         if not domain:
             return {"status": "invalid", "reason": "Invalid Domain (IDNA Error)", "mx_record": "N/A"}
 
@@ -1397,7 +1422,14 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
                     "mx_record": "N/A"}
 
         # Шаг 1: DNS / MX Check (с A-фоллбэком — п.1.4)
-        mx_records = self.get_mx_records(domain)
+        #
+        # У домена-литерала спрашивать некого: цель названа прямо в адресе, и
+        # публичность её уже проверена выше. Через filter_mx_hosts такой хост
+        # гнать НЕЛЬЗЯ — он отбрасывает голые адреса как нарушение RFC 2181
+        # §10.3, и это верно для MX-ЗАПИСИ, но не для литерала, где адрес
+        # написан самим отправителем намеренно.
+        mx_records = ([str(литерал)] if литерал is not None
+                      else self.get_mx_records(domain))
         if mx_records is None:
             # DNS не ответил через прокси. Домен НЕ мёртв — мы просто не спросили.
             return {"status": "unknown",
@@ -1416,7 +1448,9 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         # Отброшенные хосты НАЗЫВАЮТСЯ: молчаливое отбрасывание выглядело бы
         # как «у домена нет MX», то есть превратило бы дыру безопасности в
         # ложный Invalid.
-        mx_records, отброшено = filter_mx_hosts(mx_records)
+        отброшено = []
+        if литерал is None:
+            mx_records, отброшено = filter_mx_hosts(mx_records)
         if отброшено and not mx_records:
             # Все MX ведут внутрь. Это НЕ приговор ящику: у домена может быть
             # настоящая внутренняя почта, просто снаружи её не проверить.

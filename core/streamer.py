@@ -1,7 +1,8 @@
 import os
 import re
 
-from core.email_syntax import harvest_pattern, _lower_domain_only
+from core.email_syntax import (harvest_pattern, validate_email_syntax,
+                               _lower_domain_only)
 from core.inputnorm import normalize_input, split_addresses
 
 from core.encoding import open_text
@@ -332,6 +333,50 @@ def _detect_column_map(sample_lines, delimiter):
     return col_map, False  # False = нет заголовка
 
 
+# Знаки, которые бывают ОБЁРТКОЙ вокруг адреса: угловые скобки из выгрузок
+# почтовиков, кавычки, запятые, пробелы. Всё, что не из этого набора, —
+# часть самого адреса, а не мусор.
+_ОБЁРТКА = set(" \t\r\n\"'<>[](){},;:|*!?«»“”‘’`")
+
+
+def _взять_адрес_целиком(часть, match):
+    """Адрес из строки — но НЕ кусок из его середины.
+
+    Образец ищет подстроку, похожую на адрес, и раньше её брали как есть.
+    На `a(b)c@example.com` он находил `c@example.com` — и дальше проверялся
+    и в отчёт попадал ДРУГОЙ ящик, а владелец видел вердикт о том, чего не
+    загружал. Это ровно тот подлог, против которого написан весь остальной
+    код, просто спрятанный в разборе строки.
+
+    Правило: срезать можно только ОБЁРТКУ. Если перед найденным адресом
+    стоит что-то ещё — строка испорчена, и отдавать надо её целиком, чтобы
+    проверка синтаксиса честно сказала «битый адрес», а не выносила вердикт
+    о соседнем ящике.
+
+    МУСОР НА ВХОДЕ — ЭТО «ОТДАЙ КАК ЕСТЬ», А НЕ ПАДЕНИЕ. Функция вызывается
+    на каждую строку базы, и исключение отсюда проглотил бы except уровнем
+    выше: адрес молча исчез бы из выдачи, а счётчик его засчитал. Поймано
+    фаззингом (tests/test_robustness.py), а не рассуждением.
+    """
+    if not isinstance(часть, str):
+        return ""
+    try:
+        начало, конец = match.start(), match.end()
+        match.group(0)
+    except Exception:
+        return часть
+
+    # «Имя <адрес>» — стандартная форма выгрузок почтовиков, и отображаемое
+    # имя там может быть каким угодно. Угловые скобки говорят прямо, где
+    # кончается имя и начинается адрес, поэтому гадать не нужно.
+    if начало and часть[начало - 1] == "<" and часть.find(">", конец) != -1:
+        return match.group(0)
+
+    if начало and any(з not in _ОБЁРТКА for з in часть[:начало]):
+        return часть
+    return match.group(0)
+
+
 def _parse_line_smart(line, delimiter, col_map):
     """Парсит строку с помощью определённой карты колонок."""
     if not isinstance(line, str):
@@ -340,6 +385,19 @@ def _parse_line_smart(line, delimiter, col_map):
         delimiter = ':'
     if not isinstance(col_map, dict):
         col_map = {}
+
+    # Строка, которая УЖЕ является законным адресом, не разбирается вовсе.
+    #
+    # Разделитель по умолчанию — двоеточие, потому что выгрузки приходят в
+    # виде `почта:пароль`. Но двоеточие есть и внутри законного адреса:
+    # `user@[IPv6:2001:db8::1]` разваливался на куски, и до проверки
+    # доезжало `user@[ipv6` — то есть адрес терялся молча.
+    #
+    # Проверка идёт до всякого дробления и стоит один вызов на строку.
+    целая = line.strip()
+    if целая and validate_email_syntax(целая):
+        return целая, {"name": "", "gender": "", "country": ""}
+
     parts = line.split(delimiter)
 
     email = ""
@@ -357,7 +415,7 @@ def _parse_line_smart(line, delimiter, col_map):
             # Дополнительная проверка — убедимся что это действительно email
             match = _EMAIL_RE.search(part)
             if match:
-                email = match.group(0)
+                email = _взять_адрес_целиком(part, match)
             else:
                 email = part  # На случай если regex не сработал
         elif col_type == 'name':
@@ -371,9 +429,10 @@ def _parse_line_smart(line, delimiter, col_map):
     # Fallback: если email не нашелся по маппингу — ищем @-паттерн в любом поле
     if not email or '@' not in email:
         for part in parts:
-            match = _EMAIL_RE.search(part.strip())
+            часть = part.strip()
+            match = _EMAIL_RE.search(часть)
             if match:
-                email = match.group(0)
+                email = _взять_адрес_целиком(часть, match)
                 break
 
     return email, {"name": name, "gender": gender, "country": country}
