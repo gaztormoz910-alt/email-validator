@@ -168,7 +168,11 @@
               <button class="seg__item" data-country="coverage" data-lock>Заполненность</button>
               <button class="seg__item is-active" data-country="accuracy" data-lock>Точность</button>
             </div>
-            <small class="field__hint" id="countryHint">заполнено почти всегда, ~треть стран — догадка</small>
+            <!-- Подпись пустая намеренно: её пишет renderCountryHint() из
+                 app.js. Зашитый сюда текст уже один раз разошёлся с
+                 выбранным режимом и обещал владельцу треть выдуманных
+                 стран вместо 8.8%. Пусто лучше, чем неверно. -->
+            <small class="field__hint" id="countryHint"></small>
           </div>
         </div>
       </details>
