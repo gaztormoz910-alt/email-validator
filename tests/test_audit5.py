@@ -87,17 +87,28 @@ def test_quoted_fix_did_not_break_ordinary_cleaning(raw, expected):
 # ══════════════════════════ A2: сбой DNS не делает вывода о домене
 
 class _Resolver:
-    """Резолвер, который на MX падает, а на A отвечает."""
+    """Резолвер, который на MX падает, а на A отвечает.
 
-    def __init__(self, mx_error, a_answer=True):
+    ОТВЕЧАЕТ ТОЛЬКО ПРО ЗАПРОШЕННЫЙ ДОМЕН. Первая редакция отвечала A на
+    любое имя, и это ровно определение wildcard-домена: после появления
+    проверки на подстановочную запись заглушка стала изображать домен, у
+    которого резолвится что угодно, — и запасной путь через A честно
+    перестал применяться. Заглушка мерила не то, что собиралась.
+    """
+
+    def __init__(self, mx_error, a_answer=True, wildcard=False):
         self.mx_error = mx_error
         self.a_answer = a_answer
+        self.wildcard = wildcard
         self.asked = []
+        self.known = {"corp.test"}
 
     def resolve(self, domain, rdtype):
         self.asked.append(rdtype)
         if rdtype == "MX":
             raise self.mx_error
+        if not self.wildcard and domain not in self.known:
+            raise Exception("нет такого имени")     # выдуманный поддомен
         if self.a_answer:
             return ["1.2.3.4"]
         raise Exception("нет ответа")
@@ -138,6 +149,19 @@ def test_dns_answer_still_falls_back_to_a_record():
     v.resolver = _Resolver(dns.resolver.NoAnswer())
     assert v.get_mx_records("corp.test") == ["corp.test"]
     assert v.mx_cache.get("corp.test") == ["corp.test"], "ответ не закэширован"
+
+
+def test_dns_answer_wildcard_domain_gets_no_a_fallback():
+    """Контроль обратной стороны: у wildcard-домена запасного пути нет.
+
+    Там резолвится ЛЮБОЕ выдуманное имя, и «A-запись есть» не доказывает,
+    что домен принимает почту: проба ушла бы на веб-сервер или на парковку.
+    """
+    import dns.resolver
+
+    v = _validator()
+    v.resolver = _Resolver(dns.resolver.NoAnswer(), wildcard=True)
+    assert v.get_mx_records("corp.test") == []
 
 
 # ══════════════════════════ A3-A5: Tor
