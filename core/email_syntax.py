@@ -21,6 +21,7 @@
   то есть счёт символов, и адрес на 300 кириллических букв (600 байт)
   проходил проверку, чтобы потом получить отказ от сервера.
 """
+import ipaddress
 import re
 
 __all__ = [
@@ -108,6 +109,38 @@ _RFC5322_REGEX = re.compile(
 # Домен отдельно — нужен, когда локальная часть не-ASCII и общей регуляркой
 # адрес не проверить.
 _DOMAIN_REGEX = re.compile(r'^' + _DOMAIN_BODY + r'$')
+
+# Имя ящика отдельно — нужно у домена-литерала, где домена как имени нет.
+_LOCAL_ONLY_REGEX = re.compile(r'^' + _LOCAL_PART + r'$')
+
+# Домен-литерал: RFC 5321 §4.1.3 разрешает вместо имени написать адрес в
+# квадратных скобках. `user@[192.168.1.1]` — законный получатель, и до этой
+# правки он отвергался синтаксисом, то есть хоронился без запроса в сеть.
+_DOMAIN_LITERAL_RE = re.compile(r'^\[(IPv6:)?([0-9A-Fa-f:.]{2,45})\]$',
+                                re.IGNORECASE)
+
+
+def domain_literal_ip(domain):
+    """Адрес из домена-литерала, либо None — если это не литерал.
+
+    Проверяется настоящим разбором адреса, а не регуляркой: `[999.1.1.1]` и
+    `[not-an-ip]` выглядят похоже, но получателями не являются, и принимать
+    их значило бы менять ложный Invalid на ложный Valid.
+    """
+    if not isinstance(domain, str):
+        return None
+    найдено = _DOMAIN_LITERAL_RE.match(domain.strip())
+    if not найдено:
+        return None
+    метка, тело = найдено.group(1), найдено.group(2)
+    try:
+        адрес = ipaddress.ip_address(тело)
+    except ValueError:
+        return None
+    # Метка `IPv6:` обязательна для шестой версии и запрещена для четвёртой.
+    if bool(метка) != (адрес.version == 6):
+        return None
+    return адрес
 
 _BAD_SYNTAX_PATTERNS = re.compile(
     r'(^\.|'            # Точка в НАЧАЛЕ имени ящика
@@ -256,6 +289,16 @@ def validate_email_syntax(email: str) -> bool:
 
     if not local or _byte_length(local) > MAX_LOCAL_BYTES:
         return False
+
+    # Домен-литерал: имени домена нет вовсе, есть адрес в скобках.
+    # RFC 5321 §4.1.3. Через IDNA его гнать нельзя — там нечего переводить.
+    if domain_literal_ip(domain) is not None:
+        if quoted:
+            return True
+        if not local.isascii():
+            return not (local.startswith(".") or local.endswith(".")
+                        or ".." in local)
+        return bool(_LOCAL_ONLY_REGEX.match(local))
 
     domain_ascii = to_ascii_domain(domain)
     if not domain_ascii:

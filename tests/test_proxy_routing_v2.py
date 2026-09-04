@@ -150,7 +150,32 @@ class TestPerProxyConcurrency(unittest.TestCase):
 
         self.assertLessEqual(peak[0], 3,
                              f"через прокси прошло {peak[0]} соединений при лимите 3")
-        self.assertGreater(peak[0], 1, "лимит выродился в один поток")
+        # Утверждения «peak > 1» здесь больше нет намеренно. Оно говорило не
+        # о лимите, а о том, что планировщик успел свести два потока вместе, —
+        # и на занятой машине могло не сойтись. Что слот действительно даёт
+        # три места, а не одно, проверяется ниже без всяких гонок.
+
+    def test_concurrency_slot_capacity_is_exact(self):
+        """Слот выдаёт ровно столько мест, сколько заказано, — и ни одним больше.
+
+        Замена гонке: берём места без блокировки и смотрим, на каком по счёту
+        получим отказ. Планировщик тут ни при чём, результат один и тот же на
+        любой машине и под любой нагрузкой.
+        """
+        v = NetworkValidator(timeout=1, proxies=["p:1"])
+        v.set_proxy_concurrency(3)
+        slot = v.proxy_slot("p:1")
+
+        взято = [slot.acquire(blocking=False) for _ in range(4)]
+        try:
+            self.assertEqual(
+                взято, [True, True, True, False],
+                "слот отдал места как %s при лимите 3: третье место обязано "
+                "быть, четвёртого — нет" % взято)
+        finally:
+            for получилось in взято:
+                if получилось:
+                    slot.release()
 
     def test_concurrency_same_slot_per_proxy(self):
         v = NetworkValidator(timeout=1, proxies=["p:1", "q:2"])
@@ -329,11 +354,50 @@ class TestMxSemaphoreDoesNotHoldDuringSleep(unittest.TestCase):
     LIMIT = 2
     DELAY = 0.3
     THREADS = 6
+    # Барьеру не на что тратить процессор: он спит, пока не соберутся все.
+    # Поэтому запас можно брать щедрый — на зелёном прогоне он не стоит
+    # ничего, а на красном ограничивает ожидание.
+    BARRIER_TIMEOUT = 10.0
 
-    def _run_pings(self):
+    def _threads_meeting_inside_the_delay(self):
+        """Сколько потоков одновременно оказались ВНУТРИ паузы перед MX.
+
+        СЕКУНДОМЕРА ЗДЕСЬ БОЛЬШЕ НЕТ, И ЭТО ГЛАВНОЕ В ЭТОЙ ПРОВЕРКЕ.
+
+        Раньше стояло утверждение «шесть потоков обязаны уложиться в 0.594 с».
+        Замерено: без нагрузки прогон занимает 0.301 с, а стоит машине быть
+        занятой тремя потоками — 0.974-1.835 с, то есть до 309% бюджета, и
+        проверка падает 8 раз из 8. Полный набор тестов идёт шесть минут и
+        машину занимает, поэтому «мигало» оно именно там.
+
+        Ослабить порог было нельзя: тогда проверка перестала бы ловить
+        регрессию, ради которой написана. Поэтому изменён СПОСОБ измерения.
+
+        Барьер на все шесть потоков ставится внутрь паузы. Если пауза идёт
+        СНАРУЖИ семафора (как и должна), все шестеро доходят до барьера и он
+        отпускает их разом. Если пауза уедет ПОД семафор, внутри окажутся
+        только двое, барьер не соберётся и лопнет — проверка упадёт, и упадёт
+        она от самой регрессии, а не от занятого процессора.
+
+        Побочная выгода: на зелёном прогоне тут больше не спят вообще.
+        """
         v = NetworkValidator(timeout=1)
         v._max_concurrent_per_mx = self.LIMIT
-        v._mx_delay = lambda mx_host: self.DELAY
+
+        barrier = threading.Barrier(self.THREADS)
+        сошлись = []
+        guard = threading.Lock()
+
+        def задержка(mx_host):
+            try:
+                barrier.wait(timeout=self.BARRIER_TIMEOUT)
+            except threading.BrokenBarrierError:
+                return 0.0          # столько потоков внутрь не поместилось
+            with guard:
+                сошлись.append(mx_host)
+            return 0.0
+
+        v._mx_delay = задержка
 
         # Соединение не нужно: измеряем очередь, а не сеть.
         def boom(proxy=None):
@@ -341,7 +405,6 @@ class TestMxSemaphoreDoesNotHoldDuringSleep(unittest.TestCase):
 
         v._make_smtp_connection = boom
 
-        started = time.monotonic()
         threads = [threading.Thread(
             target=lambda: v._do_single_ping("a@b.com", "mx.b.com", proxy=None))
             for _ in range(self.THREADS)]
@@ -349,20 +412,40 @@ class TestMxSemaphoreDoesNotHoldDuringSleep(unittest.TestCase):
             t.start()
         for t in threads:
             t.join()
-        return time.monotonic() - started
+        return len(сошлись)
 
     def test_semaphore_is_free_while_the_delay_runs(self):
-        elapsed = self._run_pings()
-        waves = -(-self.THREADS // self.LIMIT)          # округление вверх
-        serialized = self.DELAY * waves                  # 0.9 с при старом поведении
-        self.assertLess(
-            elapsed, serialized * 0.66,
-            f"{self.THREADS} потоков заняли {elapsed:.2f}с при лимите {self.LIMIT}: "
-            f"похоже, пауза снова идёт под семафором (тогда было бы ~{serialized:.2f}с)")
+        сошлось = self._threads_meeting_inside_the_delay()
+        self.assertEqual(
+            сошлось, self.THREADS,
+            f"внутри паузы перед MX одновременно оказалось {сошлось} потоков "
+            f"из {self.THREADS} при лимите {self.LIMIT} — значит пауза снова "
+            "идёт ПОД семафором и держит слот параллельности")
+
+    def test_delay_before_mx_is_actually_applied(self):
+        """Пауза обязана быть, иначе проверка выше зеленела бы впустую.
+
+        Утверждение только СНИЗУ и на одном потоке. Нижняя граница безопасна:
+        занятая машина делает прогон длиннее, а не короче, поэтому ложно
+        упасть она не может — в отличие от верхней, которая тут и мигала.
+        """
+        v = NetworkValidator(timeout=1)
+        v._max_concurrent_per_mx = self.LIMIT
+        v._mx_delay = lambda mx_host: self.DELAY
+
+        def boom(proxy=None):
+            raise OSError("соединение не нужно для этого замера")
+
+        v._make_smtp_connection = boom
+
+        started = time.monotonic()
+        v._do_single_ping("a@b.com", "mx.b.com", proxy=None)
+        elapsed = time.monotonic() - started
+
         self.assertGreaterEqual(
-            elapsed, self.DELAY * 0.8,
-            f"прогон занял {elapsed:.2f}с — пауза перед запросом к MX не сработала "
-            "вовсе, и замер сверху ничего не доказывает")
+            elapsed, self.DELAY * 0.9,
+            f"один запрос занял {elapsed:.3f}с при паузе {self.DELAY}с — "
+            "пауза перед запросом к MX не применяется вовсе")
 
     def test_semaphore_still_limits_concurrency(self):
         """Слот всё ещё ограничивает одновременные ОБРАЩЕНИЯ, а не сон."""

@@ -65,6 +65,7 @@ _MAILTO_RE = re.compile(r'^\s*mailto:\s*', re.IGNORECASE)
 
 # Разбор кавычек живёт в core/email_syntax.py — там же, где грамматика
 # RFC 5322. Обратной зависимости нет, цикла не будет.
+from core.email_syntax import domain_literal_ip           # noqa: E402
 from core.email_syntax import has_quoted_local            # noqa: E402
 from core.inputnorm import normalize_input                # noqa: E402
 
@@ -100,9 +101,18 @@ def strip_wrapping_junk(raw: str) -> str:
         inner = value[value.rfind("<") + 1:value.rfind(">")]
         if "@" in inner:
             value = inner
-    stripped = _lower_domain_only(value.strip(_JUNK_EDGES))
+    # Квадратная скобка тоже бывает НЕ мусором. RFC 5321 §4.1.3 разрешает
+    # написать вместо имени домена адрес в скобках: `user@[192.168.1.1]` —
+    # законный получатель. Счистка краёв срезала закрывающую скобку и
+    # превращала его в `user@[192.168.1.1`, то есть в ложный Invalid,
+    # сделанный нашими же руками и без единого запроса в сеть.
+    края = _JUNK_EDGES
+    if domain_literal_ip(value.strip().rpartition("@")[2]) is not None:
+        края = края.replace("[", "").replace("]", "")
+
+    stripped = _lower_domain_only(value.strip(края))
     if quoted_before and not has_quoted_local(stripped):
-        return _lower_domain_only(value.strip(_JUNK_EDGES.replace('"', "")))
+        return _lower_domain_only(value.strip(края.replace('"', "")))
     return stripped
 
 
@@ -352,7 +362,19 @@ class EmailCleaner:
         # Если локальная часть пустая после очистки — мусор
         if not local_part:
             return None
-        
+
+        # Домен-литерал — это АДРЕС, а не имя (RFC 5321 §4.1.3), и всё, что
+        # ниже, к нему неприменимо: там чинятся склейки в ИМЕНАХ доменов —
+        # отрезаются хвосты после известного TLD, ищутся вложенные домены.
+        #
+        # Прогон литерала через ту логику ломал шестую версию: последняя
+        # проверка требует точку в домене, а у `[ipv6:2001:db8::1]` её нет,
+        # и законный адрес выбрасывался как мусор. Четвёртая версия проходила
+        # случайно — у неё точки есть. То есть поломка была ещё и незаметной:
+        # ровно половина случаев работала.
+        if domain_literal_ip(domain) is not None:
+            return "%s@%s" % (local_part, domain)
+
         # 1. Жесткая зачистка "хвостов" от копипаста в домене
 
         # Приписки после известного TLD через дефис/подчёркивание: corp.com-jobs
