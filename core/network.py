@@ -22,6 +22,7 @@ import time
 
 # Таблицы поведения почтовиков — в core/mail_constants.py: ими пользуются и
 # SMTP-диалог, и профилирование прокси, и проверки по DNS, и скоринг.
+from core.mxguard import filter_mx_hosts
 from core.mail_constants import (                                 # noqa: E402,F401
     YAHOO_DOMAINS, AOL_DOMAINS, NEEDS_CLEAN_IP_DOMAINS, NICHE_FREE_DOMAINS,
     MICROSOFT_DOMAINS, LEGIT_HELO_NAMES, DNSBL_ZONES, SPAMHAUS_ZONE,
@@ -1404,6 +1405,25 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
                     "mx_record": "N/A"}
         if not mx_records:
             return {"status": "invalid", "reason": "No MX/A records (Dead Domain)", "mx_record": "N/A"}
+
+        # Куда идти НЕЛЬЗЯ. Хозяин чужого домена сам пишет свои DNS-записи, и
+        # `MX 0 192.168.1.50` уводит подключение внутрь НАШЕЙ сети. Замерено
+        # на живом коде: избирательный сервер внутри сети давал вердикт
+        # `valid` на ящик, которого нигде нет. Половину случая закрывала
+        # тройная проба catch-all, но только когда внутренний сервер
+        # принимает всё подряд.
+        #
+        # Отброшенные хосты НАЗЫВАЮТСЯ: молчаливое отбрасывание выглядело бы
+        # как «у домена нет MX», то есть превратило бы дыру безопасности в
+        # ложный Invalid.
+        mx_records, отброшено = filter_mx_hosts(mx_records)
+        if отброшено and not mx_records:
+            # Все MX ведут внутрь. Это НЕ приговор ящику: у домена может быть
+            # настоящая внутренняя почта, просто снаружи её не проверить.
+            return {"status": "unknown",
+                    "reason": "Проверить нечем: %s" % отброшено[0][1],
+                    "mx_record": "N/A",
+                    "mx_rejected": [х for х, _п in отброшено]}
 
         # Шаг 2: Защита от попадания в Blacklist (AV Honeypot-ловушки)
         av_vendors = [

@@ -16,6 +16,23 @@ from core.email_syntax import to_ascii_domain, _lower_domain_only
 # Gmail: точки в локальной части игнорируются, домены-синонимы ведут в тот же ящик.
 _GMAIL_DOMAINS = {"gmail.com", "googlemail.com", "google.com"}
 
+# Домены Яндекса — ОДИН И ТОТ ЖЕ ящик. Найдено сверкой с чужим каталогом
+# критериев и подтверждено их справкой: почта на ya.ru, yandex.ru,
+# yandex.com, yandex.by, yandex.kz, yandex.ua и narod.ru доступна по любому
+# из написаний. До этой правки дедуп считал их разными адресами, и человек
+# получал письмо столько раз, сколькими написаниями он попал в базу, — а
+# второе письмо тому, кто уже отписался, это жалоба на спам.
+#
+# ТОЧКИ ЗДЕСЬ НЕ СХЛОПЫВАЮТСЯ. У Яндекса они значащие, в отличие от Gmail:
+# ivan.petrov и ivanpetrov — разные ящики. Схлопнув их, мы склеили бы двух
+# разных людей, и один перестал бы получать письма вовсе.
+_YANDEX_DOMAINS = {"yandex.ru", "yandex.com", "yandex.by", "yandex.kz",
+                   "yandex.ua", "yandex.com.tr", "ya.ru", "narod.ru"}
+
+# Домены Mail.ru в этот список НЕ входят намеренно. bk.ru, list.ru, inbox.ru
+# и internet.ru — РАЗНЫЕ ящики: на них регистрируются отдельно, и один и тот
+# же логин принадлежит разным людям.
+
 # Провайдеры, у которых "+тег" отбрасывается почтовиком (john+news@ == john@).
 # Только те, где это гарантированно так. Для корпоративных доменов НЕ трогаем:
 # там "+" может быть обычным символом логина, и мы склеим разных людей.
@@ -49,6 +66,7 @@ _MAILTO_RE = re.compile(r'^\s*mailto:\s*', re.IGNORECASE)
 # Разбор кавычек живёт в core/email_syntax.py — там же, где грамматика
 # RFC 5322. Обратной зависимости нет, цикла не будет.
 from core.email_syntax import has_quoted_local            # noqa: E402
+from core.inputnorm import normalize_input                # noqa: E402
 
 
 def strip_wrapping_junk(raw: str) -> str:
@@ -59,7 +77,11 @@ def strip_wrapping_junk(raw: str) -> str:
     """
     if not isinstance(raw, str):
         return ""
-    value = _MAILTO_RE.sub("", raw)
+    # Приведение входа идёт ПЕРВЫМ: пока в строке невидимые знаки или
+    # полноширинная собака, ни один следующий шаг не видит настоящего адреса.
+    # `ｉｖａｎ＠ｇｍａｉｌ．ｃｏｍ` без этого отвергался как битый синтаксис — живой
+    # gmail, набранный в японской раскладке, хоронился без запроса в сеть.
+    value = _MAILTO_RE.sub("", normalize_input(raw))
     # Кавычка бывает НЕ мусором. RFC 5321 §4.1.2 разрешает имя ящика в
     # кавычках, и там они — часть адреса: `"very.unusual"@example.com`.
     # Счистка краёв снимала открывающую и оставляла закрывающую, превращая
@@ -97,7 +119,10 @@ def normalize_for_dedup(email: str) -> str:
     if not isinstance(email, str) or "@" not in email:
         return (email or "").strip().lower() if isinstance(email, str) else ""
 
-    email = email.strip().lower()
+    # Приведение входа и здесь: ключ обязан совпасть у двух написаний
+    # ОДНОГО ящика. `josé` готовой буквой и `josé` парой «e + акут» — это
+    # один человек, а разные ключи означали бы письмо дважды.
+    email = normalize_input(email).strip().lower()
     local, domain = email.rsplit("@", 1)
 
     # Домен приводим к punycode. Один и тот же ящик пишут двумя способами:
@@ -120,6 +145,9 @@ def normalize_for_dedup(email: str) -> str:
     if domain in _GMAIL_DOMAINS:
         local = local.replace(".", "")
         domain = "gmail.com"
+    elif domain in _YANDEX_DOMAINS:
+        # Только домен: точки у Яндекса значащие, см. пояснение к списку.
+        domain = "yandex.ru"
 
     if not local:
         return email  # Защита от вырожденного случая вроде "+tag@gmail.com"
