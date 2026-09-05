@@ -121,49 +121,15 @@
             <small class="field__hint">на одно соединение; на адрес — до ×6 (попытки через разные прокси)</small>
           </label>
 
-          <label class="toggle">
-            <input type="checkbox" id="optAi" data-lock checked>
-            <span class="toggle__text">
-              Отсеивать адреса-роботы
-              <small>распознаёт бессмысленные имена вроде xk3n9fj2q@</small>
-            </span>
-          </label>
-
-          <label class="toggle">
-            <input type="checkbox" id="optOsint" data-lock checked>
-            <span class="toggle__text">
-              Искать имя, пол и страну
-              <small>медленнее, но заполняет колонки для сегментации</small>
-            </span>
-          </label>
-
-          <label class="toggle is-folded" id="resumeRow">
-            <input type="checkbox" id="optResume" data-lock>
-            <span class="toggle__text">
-              Продолжить прерванный прогон
-              <small id="resumeHint">уже проверено: 0</small>
-            </span>
-          </label>
-
-          <label class="toggle">
-            <input type="checkbox" id="optConfirm" data-lock>
-            <span class="toggle__text">
-              Перепроверять «Годен» вторым прокси
-              <small>дольше вдвое, но ловит почтовик, который врёт только
-              нашему выходу; включайте перед рассылкой</small>
-            </span>
-          </label>
-
-          <label class="toggle">
-            <input type="checkbox" id="optCache" data-lock checked>
-            <span class="toggle__text">
-              Не перепроверять известное
-              <small>выключите, если базе больше месяца или сменили прокси</small>
-            </span>
-          </label>
+          <!-- Пять переключателей качества УБРАНЫ ОТСЮДА НАМЕРЕННО.
+               Владелец не хочет щёлкать их вручную перед каждым прогоном,
+               поэтому все пять включены значениями по умолчанию в ядре
+               (core/pipeline.py: run_pipeline и start). Возвращать их сюда
+               нельзя, не вернув и обратно передачу значений в webapp.py —
+               иначе окно снова начнёт их выключать. -->
 
           <div class="field">
-            <span class="field__label">Колонка «Страна»</span>
+            <span class="field__label">Колонки «Имя» и «Страна»</span>
             <div class="seg" role="group">
               <button class="seg__item" data-country="coverage" data-lock>Заполненность</button>
               <button class="seg__item is-active" data-country="accuracy" data-lock>Точность</button>
