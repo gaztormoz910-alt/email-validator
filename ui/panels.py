@@ -166,49 +166,14 @@ class PanelsMixin:
             self.settings_body,
             "на одно соединение; на адрес — до ×6 (попытки через разные прокси)")
 
-        self.chk_ai = ctk.CTkSwitch(
-            self.settings_body, text="Отсеивать адреса-роботы",
-            text_color=TEXT_MAIN, font=ctk.CTkFont(size=FONT_BODY),
-            progress_color=ACCENT_PRIMARY, button_color=TEXT_MAIN,
-            button_hover_color=TEXT_MAIN)
-        self.chk_ai.select()
-        self.chk_ai.pack(padx=SPACE_LG, anchor="w", pady=(SPACE_SM, 0))
-        self._settings_hint(self.settings_body,
-                            "распознаёт бессмысленные имена вроде xk3n9fj2q@")
+        # ЧЕТЫРЕ ТУМБЛЕРА КАЧЕСТВА УБРАНЫ ОТСЮДА НАМЕРЕННО, как и пять
+        # в веб-окне: владелец не хочет включать их вручную перед каждым
+        # прогоном. Все они включены значениями по умолчанию в ядре
+        # (core/pipeline.py). Оба окна обязаны звать движок ОДИНАКОВО —
+        # это стережёт tests/test_allfix.py, и расхождение здесь однажды
+        # уже стоило владельцу прогонов.
 
-        self.chk_osint_val = ctk.CTkSwitch(
-            self.settings_body, text="Искать имя, пол и страну",
-            text_color=TEXT_MAIN, font=ctk.CTkFont(size=FONT_BODY),
-            progress_color=ACCENT_PRIMARY, button_color=TEXT_MAIN,
-            button_hover_color=TEXT_MAIN)
-        self.chk_osint_val.select()
-        self.chk_osint_val.pack(padx=SPACE_LG, anchor="w", pady=(SPACE_SM, 0))
-        self._settings_hint(self.settings_body,
-                            "медленнее, но заполняет колонки для сегментации")
-
-        # Продолжение прерванного прогона. Журнал сделанного пишется всегда;
-        # без этого тумблера он просто никем не читался, и «Стоп» на большой
-        # базе означал начать сначала.
-        self.chk_resume = ctk.CTkSwitch(
-            self.settings_body, text="Продолжить прерванный прогон",
-            text_color=TEXT_MAIN, font=ctk.CTkFont(size=FONT_BODY),
-            progress_color=ACCENT_PRIMARY, button_color=TEXT_MAIN,
-            button_hover_color=TEXT_MAIN)
-        self.chk_resume.pack(padx=SPACE_LG, anchor="w", pady=(SPACE_SM, 0))
-        self._settings_hint(self.settings_body,
-                            "пропустит адреса, уже проверенные по этим же файлам")
-
-        self.chk_cache = ctk.CTkSwitch(
-            self.settings_body, text="Не перепроверять известное",
-            text_color=TEXT_MAIN, font=ctk.CTkFont(size=FONT_BODY),
-            progress_color=ACCENT_PRIMARY, button_color=TEXT_MAIN,
-            button_hover_color=TEXT_MAIN)
-        self.chk_cache.select()
-        self.chk_cache.pack(padx=SPACE_LG, anchor="w", pady=(SPACE_SM, 0))
-        self._settings_hint(self.settings_body,
-                            "выключите, если базе больше месяца или сменили прокси")
-
-        ctk.CTkLabel(self.settings_body, text="Колонка «Страна»",
+        ctk.CTkLabel(self.settings_body, text="Колонки «Имя» и «Страна»",
                      text_color=TEXT_MAIN, font=ctk.CTkFont(size=FONT_BODY)).pack(
             padx=SPACE_LG, anchor="w", pady=(SPACE_LG, SPACE_XS))
 
@@ -224,7 +189,8 @@ class PanelsMixin:
 
         self.country_mode_hint = ctk.CTkLabel(
             self.settings_body,
-            text="заполнено почти всегда, ~треть стран — догадка",
+            text="заполнено почти всегда: ~треть стран догадка, имя может "
+                 "быть склеено сегментатором из чего угодно",
             text_color=TEXT_DIM, font=ctk.CTkFont(size=FONT_TINY), justify="left",
             wraplength=320)
         self.country_mode_hint.pack(padx=SPACE_LG, anchor="w", pady=(0, SPACE_LG))

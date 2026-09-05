@@ -520,9 +520,19 @@ def test_classic_window_feeds_the_engine_the_same_way():
     web = kwargs_of(os.path.join(ROOT, "ui", "webapp.py"), "email_sources")
     assert classic, "в классическом окне не найден запуск движка"
     assert classic - web == set(), "классическое окно передаёт лишнее: %s" % (classic - web)
-    for required in ("email_sources", "proxies", "threads", "timeout",
-                     "enable_ai", "use_cache"):
+    # То, что зависит от ПРОГОНА, окна обязаны передавать сами.
+    for required in ("email_sources", "proxies", "threads", "timeout"):
         assert required in classic and required in web, required
+
+    # А пять настроек качества — наоборот: ни одно окно не должно их
+    # передавать. Они включены значениями по умолчанию в ядре, и любое
+    # окно, снова начавшее их слать, сможет их выключить — ровно то, от
+    # чего владелец избавлялся, убирая тумблеры.
+    for запрещено in ("enable_ai", "enable_osint", "use_cache",
+                      "resume", "confirm_valid"):
+        assert запрещено not in classic, (
+            "классическое окно снова передаёт %s" % запрещено)
+        assert запрещено not in web, "веб-окно снова передаёт %s" % запрещено
 
 
 def test_classic_window_reads_any_encoding_too():

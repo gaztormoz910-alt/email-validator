@@ -211,6 +211,13 @@ class ValidationPipeline:
         self._emitted = 0
         self._emitted_lock = threading.Lock()
 
+        # Второе мнение о «Годен» включено С МОМЕНТА СОЗДАНИЯ, а не
+        # только после start(). CLI зовёт run_pipeline напрямую, и
+        # раньше там читалось getattr(self, 'confirm_valid', False) —
+        # то есть из командной строки настройка была выключена
+        # всегда, что бы ни стояло в подписи start().
+        self.confirm_valid = True
+
         self.cleaner = EmailCleaner()
         self.filter = None
         self.network = None
@@ -434,7 +441,18 @@ class ValidationPipeline:
         if not name:
             name = self.name_extractor.extract_name(email) or ""
             if name:
-                name_source = "адрес"
+                # ЧЕЙ это разбор, а не «всегда адрес». Границы ставит либо
+                # человек (точка, подчёркивание, CamelCase), либо наш
+                # сегментатор, либо имя вовсе приходит из публичного
+                # профиля. Пока источник был один на три случая, догадка
+                # «Kava Morasports» показывалась владельцу как факт.
+                # getattr, а не прямой вызов: обогащение целиком обёрнуто
+                # в except, и экстрактор без нового метода уронил бы не
+                # ярлык, а САМО ИМЯ — молча, на всей базе. Поймано
+                # полным прогоном: подставной экстрактор в
+                # tests/test_result_cache.py этого метода не знает.
+                узнать = getattr(self.name_extractor, "last_name_source", None)
+                name_source = (узнать() if callable(узнать) else "") or "адрес"
             if name and enable_ai and not self.ml_predictor.is_person(name):
                 name, name_source = "", ""   # NER распознал организацию, не человека
 
@@ -651,7 +669,155 @@ class ValidationPipeline:
         if stop is not None:
             stop.set()
 
+    def _profile_live_proxies(self, live_proxies, timeout, threads):
+        """Профиль пула: реальный выходной IP, обратный DNS, чёрные списки.
+
+        Выходной IP спрашиваем у самого Gmail (он сообщает его в ответе на
+        EHLO) — стороннего сервиса не нужно. Проверять надо именно ЕГО:
+        адрес подключения к прокси совпадает с выходным не всегда.
+
+        Живёт отдельным методом не ради красоты. Внутри блок обёрнут в
+        `except Exception` — то есть ЛЮБАЯ поломка здесь превращается в одну
+        строку лога и молчаливую потерю всего профиля пула. Пока блок сидел
+        внутри setup(), проверить его отдельно было нечем, и он падал
+        каждый прогон, ничего об этом не сообщая по существу.
+
+        Требует УЖЕ созданный self.network: профили с прошлого запуска
+        спрашиваются у него.
+        """
+        # Профилируем прокси: реальный выходной IP, обратный DNS, чёрные списки.
+        # Выходной IP спрашиваем у самого Gmail (он сообщает его в ответе на
+        # EHLO) — стороннего сервиса не нужно. Проверять надо именно ЕГО:
+        # адрес подключения к прокси совпадает с выходным не всегда.
+        proxy_profiles = {}
+        if live_proxies:
+            try:
+                from core.network import profile_proxies
+                self.callbacks['on_log'](
+                    f"[INFO] Профилирование {len(live_proxies)} прокси "
+                    "(выходной IP, PTR, чёрные списки)...", "info")
+
+                def on_prof(done, total, ptr_n, bl_n):
+                    self.callbacks['on_log'](
+                        f"[PROXY] Профиль... {done}/{total} | с PTR: {ptr_n} | в списках: {bl_n}", "info")
+
+                # Профили, снятые в прошлый раз, подставляются сразу.
+                #
+                # Снятие — это выходной IP через EHLO у Gmail, обратный
+                # DNS, семь чёрных списков и три прямые пробы почтовиков
+                # НА КАЖДЫЙ прокси. На пуле в несколько сотен — минуты
+                # простоя перед каждой работой, а выходной адрес за сутки
+                # обычно не меняется. Заново снимаем только тех, кого не
+                # помним; фоновое обновление всё равно идёт раз в десять
+                # минут и поправит то, что успело устареть.
+                remembered = self.network.recall_proxy_profiles(live_proxies)
+                fresh_needed = [p for p in live_proxies if p not in remembered]
+                if remembered:
+                    self.callbacks['on_log'](
+                        "[PROXY] Из прошлого запуска помню профиль %d прокси "
+                        "из %d — заново проверяю только остальных."
+                        % (len(remembered), len(live_proxies)), "info")
+
+                # Потоки берём из ползунка: раньше здесь было жёсткое 30, и
+                # список в несколько тысяч прокси профилировался часами.
+                proxy_profiles = dict(remembered)
+                if fresh_needed:
+                    proxy_profiles.update(profile_proxies(
+                        fresh_needed, timeout=timeout, workers=threads,
+                        progress_callback=on_prof))
+
+                vals = list(proxy_profiles.values())
+                ptr_n = sum(1 for v in vals if v["has_ptr"] is True)
+                bl_n = sum(1 for v in vals if v["in_dnsbl"])
+                known_ip = sum(1 for v in vals if v["exit_ip"])
+                dirty_n = sum(1 for v in vals if v.get("rdns_dirty"))
+                outlook_n = sum(1 for v in vals if v.get("outlook_ok") is True)
+                clean_n = len(live_proxies) - bl_n
+
+                lats = sorted(v["latency_ms"] for v in vals if v.get("latency_ms"))
+                if lats:
+                    median = lats[len(lats) // 2]
+                    self.callbacks['on_log'](
+                        f"[INFO] Скорость прокси: медиана {median} мс, "
+                        f"быстрейший {lats[0]} мс, медленнейший {lats[-1]} мс.", "info")
+
+                self.callbacks['on_log'](
+                    f"[INFO] Профиль готов: выходной IP определён у {known_ip} из "
+                    f"{len(live_proxies)}, с PTR — {ptr_n}, в чёрных списках — {bl_n}.", "info")
+
+                if outlook_n is not None:
+                    self.callbacks['on_log'](
+                        f"[INFO] Microsoft реально принял {outlook_n} прокси из "
+                        f"{len(live_proxies)} (проверено пробой до MAIL FROM, "
+                        "а не по спискам).", "info")
+                if dirty_n:
+                    self.callbacks['on_log'](
+                        f"[DEAD] У {dirty_n} прокси имя в PTR выдаёт прокси/VPN/динамику "
+                        "(proxy, vpn, tor, pool...). Почтовики такие штрафуют даже "
+                        "при валидном обратном DNS.", "dead")
+
+                if ptr_n:
+                    self.callbacks['on_log'](
+                        f"[INFO] Yahoo/AOL пойдут через {ptr_n} прокси с PTR.", "info")
+                else:
+                    self.callbacks['on_log'](
+                        "[DEAD] Обратного DNS (PTR) нет ни у одного прокси — Yahoo, AOL "
+                        "и Verizon проверить не получится. Остальные домены проверятся.", "dead")
+
+                if clean_n:
+                    self.callbacks['on_log'](
+                        f"[INFO] Outlook/iCloud/GMX пойдут через {clean_n} прокси "
+                        "с чистой репутацией.", "info")
+                else:
+                    self.callbacks['on_log'](
+                        "[DEAD] ВСЕ прокси числятся в чёрных списках — Outlook, iCloud "
+                        "и GMX будут молчать. Нужны прокси с чистым IP.", "dead")
+
+                # Структурная сводка для окна. Всё перечисленное выше уже
+                # уходило строками лога, но лог прокручивается и теряется,
+                # а решение «хватит ли этих прокси» пользователь принимает
+                # именно по этим числам. Считает их core/proxy_profile.py,
+                # чтобы панель, лог и CLI не могли разойтись.
+                # Готовность — до прогона, а не после.
+                #
+                # Раньше владелец узнавал, что прокси не годятся, из
+                # сплошного «не доказано» через полчаса работы. Причина
+                # при этом лежала в одной строке профиля, которую никто
+                # не читал. Теперь она произносится вслух и с указанием,
+                # что чинить.
+                try:
+                    from core.proxy_profile import readiness_report
+                    ready = readiness_report(proxy_profiles)
+                    self.callbacks['on_log'](
+                        ("[INFO] Готовность прокси: %s" if ready["ready"]
+                         else "[DEAD] Готовность прокси: %s") % ready["verdict"],
+                        "info" if ready["ready"] else "dead")
+                    for item in ready["providers"]:
+                        if not item["ok"]:
+                            self.callbacks['on_log'](
+                                "[DEAD]    %s — 0 годных прокси: %s"
+                                % (item["name"], item["reason"]), "dead")
+                except Exception:
+                    pass
+
+                if 'on_proxy_profile' in self.callbacks:
+                    try:
+                        from core.proxy_profile import pool_summary
+                        self.callbacks['on_proxy_profile'](pool_summary(proxy_profiles))
+                    except Exception:
+                        pass
+            except Exception as e:
+                self.callbacks['on_log'](
+                    "[DEAD] Профилирование прокси не удалось: %s: %s. "
+                    "Выходной IP, PTR и чёрные списки не узнаны ни у одного "
+                    "прокси — Yahoo/AOL и Outlook/iCloud пойдут вслепую."
+                    % (type(e).__name__, e), "dead")
+        return proxy_profiles
+
     def setup(self, timeout=5, enable_ai=False, proxies=None, threads=100, use_cache=True):
+        # Прогон начинается с чистой сети: донашивать объект от прошлого
+        # запуска нельзя — у него внутри старый список прокси.
+        self.network = None
         # Гибридный режим: Whitelist + DNS-проверка неизвестных доменов
         self.callbacks['on_log']("[INFO] Подготовка валидатора (гибридный режим: Whitelist + DNS)...", "info")
 
@@ -803,132 +969,21 @@ class ValidationPipeline:
                     "dead")
             proxies = live_proxies
 
-            # Профилируем прокси: реальный выходной IP, обратный DNS, чёрные списки.
-            # Выходной IP спрашиваем у самого Gmail (он сообщает его в ответе на
-            # EHLO) — стороннего сервиса не нужно. Проверять надо именно ЕГО:
-            # адрес подключения к прокси совпадает с выходным не всегда.
-            proxy_profiles = {}
-            if live_proxies:
-                try:
-                    from core.network import profile_proxies
-                    self.callbacks['on_log'](
-                        f"[INFO] Профилирование {len(live_proxies)} прокси "
-                        "(выходной IP, PTR, чёрные списки)...", "info")
+            # Сеть создаётся ЗДЕСЬ, ДО профилирования, а не после него.
+            # Профилирование спрашивает у неё профили, снятые в прошлый раз.
+            # Пока объект создавался ниже, этот вызов падал с AttributeError
+            # на КАЖДОМ прогоне: в логе оставалась одна строка «не удалось
+            # (AttributeError)», а выходной IP, PTR и чёрные списки не
+            # узнавались ни у одного прокси. Маршрутизация Yahoo/AOL (нужен
+            # PTR) и Outlook/iCloud (нужна чистая репутация) после этого
+            # работала вслепую.
+            self.network = NetworkValidator(timeout=timeout, proxies=proxies)
+            proxy_profiles = self._profile_live_proxies(
+                live_proxies, timeout, threads)
 
-                    def on_prof(done, total, ptr_n, bl_n):
-                        self.callbacks['on_log'](
-                            f"[PROXY] Профиль... {done}/{total} | с PTR: {ptr_n} | в списках: {bl_n}", "info")
-
-                    # Профили, снятые в прошлый раз, подставляются сразу.
-                    #
-                    # Снятие — это выходной IP через EHLO у Gmail, обратный
-                    # DNS, семь чёрных списков и три прямые пробы почтовиков
-                    # НА КАЖДЫЙ прокси. На пуле в несколько сотен — минуты
-                    # простоя перед каждой работой, а выходной адрес за сутки
-                    # обычно не меняется. Заново снимаем только тех, кого не
-                    # помним; фоновое обновление всё равно идёт раз в десять
-                    # минут и поправит то, что успело устареть.
-                    remembered = self.network.recall_proxy_profiles(live_proxies)
-                    fresh_needed = [p for p in live_proxies if p not in remembered]
-                    if remembered:
-                        self.callbacks['on_log'](
-                            "[PROXY] Из прошлого запуска помню профиль %d прокси "
-                            "из %d — заново проверяю только остальных."
-                            % (len(remembered), len(live_proxies)), "info")
-
-                    # Потоки берём из ползунка: раньше здесь было жёсткое 30, и
-                    # список в несколько тысяч прокси профилировался часами.
-                    proxy_profiles = dict(remembered)
-                    if fresh_needed:
-                        proxy_profiles.update(profile_proxies(
-                            fresh_needed, timeout=timeout, workers=threads,
-                            progress_callback=on_prof))
-
-                    vals = list(proxy_profiles.values())
-                    ptr_n = sum(1 for v in vals if v["has_ptr"] is True)
-                    bl_n = sum(1 for v in vals if v["in_dnsbl"])
-                    known_ip = sum(1 for v in vals if v["exit_ip"])
-                    dirty_n = sum(1 for v in vals if v.get("rdns_dirty"))
-                    outlook_n = sum(1 for v in vals if v.get("outlook_ok") is True)
-                    clean_n = len(live_proxies) - bl_n
-
-                    lats = sorted(v["latency_ms"] for v in vals if v.get("latency_ms"))
-                    if lats:
-                        median = lats[len(lats) // 2]
-                        self.callbacks['on_log'](
-                            f"[INFO] Скорость прокси: медиана {median} мс, "
-                            f"быстрейший {lats[0]} мс, медленнейший {lats[-1]} мс.", "info")
-
-                    self.callbacks['on_log'](
-                        f"[INFO] Профиль готов: выходной IP определён у {known_ip} из "
-                        f"{len(live_proxies)}, с PTR — {ptr_n}, в чёрных списках — {bl_n}.", "info")
-
-                    if outlook_n is not None:
-                        self.callbacks['on_log'](
-                            f"[INFO] Microsoft реально принял {outlook_n} прокси из "
-                            f"{len(live_proxies)} (проверено пробой до MAIL FROM, "
-                            "а не по спискам).", "info")
-                    if dirty_n:
-                        self.callbacks['on_log'](
-                            f"[DEAD] У {dirty_n} прокси имя в PTR выдаёт прокси/VPN/динамику "
-                            "(proxy, vpn, tor, pool...). Почтовики такие штрафуют даже "
-                            "при валидном обратном DNS.", "dead")
-
-                    if ptr_n:
-                        self.callbacks['on_log'](
-                            f"[INFO] Yahoo/AOL пойдут через {ptr_n} прокси с PTR.", "info")
-                    else:
-                        self.callbacks['on_log'](
-                            "[DEAD] Обратного DNS (PTR) нет ни у одного прокси — Yahoo, AOL "
-                            "и Verizon проверить не получится. Остальные домены проверятся.", "dead")
-
-                    if clean_n:
-                        self.callbacks['on_log'](
-                            f"[INFO] Outlook/iCloud/GMX пойдут через {clean_n} прокси "
-                            "с чистой репутацией.", "info")
-                    else:
-                        self.callbacks['on_log'](
-                            "[DEAD] ВСЕ прокси числятся в чёрных списках — Outlook, iCloud "
-                            "и GMX будут молчать. Нужны прокси с чистым IP.", "dead")
-
-                    # Структурная сводка для окна. Всё перечисленное выше уже
-                    # уходило строками лога, но лог прокручивается и теряется,
-                    # а решение «хватит ли этих прокси» пользователь принимает
-                    # именно по этим числам. Считает их core/proxy_profile.py,
-                    # чтобы панель, лог и CLI не могли разойтись.
-                    # Готовность — до прогона, а не после.
-                    #
-                    # Раньше владелец узнавал, что прокси не годятся, из
-                    # сплошного «не доказано» через полчаса работы. Причина
-                    # при этом лежала в одной строке профиля, которую никто
-                    # не читал. Теперь она произносится вслух и с указанием,
-                    # что чинить.
-                    try:
-                        from core.proxy_profile import readiness_report
-                        ready = readiness_report(proxy_profiles)
-                        self.callbacks['on_log'](
-                            ("[INFO] Готовность прокси: %s" if ready["ready"]
-                             else "[DEAD] Готовность прокси: %s") % ready["verdict"],
-                            "info" if ready["ready"] else "dead")
-                        for item in ready["providers"]:
-                            if not item["ok"]:
-                                self.callbacks['on_log'](
-                                    "[DEAD]    %s — 0 годных прокси: %s"
-                                    % (item["name"], item["reason"]), "dead")
-                    except Exception:
-                        pass
-
-                    if 'on_proxy_profile' in self.callbacks:
-                        try:
-                            from core.proxy_profile import pool_summary
-                            self.callbacks['on_proxy_profile'](pool_summary(proxy_profiles))
-                        except Exception:
-                            pass
-                except Exception as e:
-                    self.callbacks['on_log'](
-                        f"[DEAD] Профилирование прокси не удалось ({type(e).__name__}).", "dead")
-
-        self.network = NetworkValidator(timeout=timeout, proxies=proxies)
+        # Прокси не задавали — сеть ещё не создана, создаём здесь.
+        if self.network is None:
+            self.network = NetworkValidator(timeout=timeout, proxies=proxies)
 
         # Spamhaus ZEN — крупнейший чёрный список, и до сих пор он молчал.
         # Код опроса был написан и покрыт тестами, но включался только в них:
@@ -1141,8 +1196,18 @@ class ValidationPipeline:
             self._emitted += 1
         self.callbacks['on_result'](email, status, reason, mx, data)
 
-    def run_pipeline(self, email_sources, threads=50, fix_typos=True, check_spam=True, deep_ping=True, enable_ai=False, enable_osint=False,
-                     resume=False):
+    def run_pipeline(self, email_sources, threads=50, fix_typos=True,
+                     check_spam=True, deep_ping=True, enable_ai=True,
+                     enable_osint=True, resume=True):
+        """Прогон базы. ВСЕ ПЯТЬ настроек качества включены по умолчанию.
+
+        Раньше отсев роботов, обогащение и продолжение прерванного прогона
+        приходили сюда выключенными, и включались только из окна. Владелец
+        просил обратное: включено под капотом, а из окна убрано, чтобы не
+        щёлкать вручную перед каждым прогоном. Значит и CLI, и любой другой
+        вызов обязаны получать то же поведение — иначе «под капотом» было бы
+        неправдой ровно там, где окна нет.
+        """
         # Пока шла подготовка, могли нажать «Стоп». Тогда работу не начинаем
         # вовсе: взвести is_running здесь значило бы отменить команду.
         if self._stop_requested:
@@ -2077,6 +2142,24 @@ class ValidationPipeline:
             self.cache.close()
             self.cache = None
 
+        # ЛОВУШКА, закрытая здесь.
+        #
+        # RunState стирает память о прогоне ТОЛЬКО когда продолжение
+        # выключено (`if not resume: self.clear()` в core/runstate.py). Раз
+        # продолжение теперь включено всегда и убрано из окна, память не
+        # стиралась бы никогда: второй запуск того же файла дал бы НОЛЬ
+        # адресов к проверке, а починить это было бы нечем — галочки в окне
+        # больше нет, остаётся удалять sqlite руками.
+        #
+        # Поэтому память стирается сама, но ТОЛЬКО после прогона, дошедшего
+        # до конца. Нажали «Стоп» — память цела, и продолжение работает
+        # ровно так, как обещает его название.
+        try:
+            if resume and not self._stop_requested:
+                state.clear()
+        except Exception:
+            pass
+
         # Состояние дописывается на диск: недописанная пачка иначе потерялась бы,
         # и возобновление не увидело бы последние сотни адресов.
         try:
@@ -2110,12 +2193,15 @@ class ValidationPipeline:
         self.is_running = False
         self.callbacks['on_complete']()
 
-    def start(self, email_sources, threads, timeout, fix_typos, check_spam, deep_ping, enable_ai, proxies=None, enable_osint=False, use_cache=True,
-              resume=False,
-              # Второе мнение о каждом «Годен» с другого
-              # выходного адреса. По умолчанию выключено: это лишняя
-              # сессия на каждый подтверждённый адрес.
-              confirm_valid=False):
+    def start(self, email_sources, threads, timeout, fix_typos, check_spam,
+              deep_ping, enable_ai=True, proxies=None, enable_osint=True,
+              use_cache=True, resume=True,
+              # Второе мнение о каждом «Годен» с другого выходного адреса.
+              # Стоит лишней сессии на каждый подтверждённый адрес, но ловит
+              # почтовик, который врёт ТОЛЬКО нашему выходу и принимает всё
+              # подряд. Владелец включил его насовсем: перед рассылкой цена
+              # лишней сессии несравнима с ценой отправки в пустоту.
+              confirm_valid=True):
         self.confirm_valid = bool(confirm_valid)
         # Новый прогон отменяет прошлую команду остановки.
         self._stop_requested = False

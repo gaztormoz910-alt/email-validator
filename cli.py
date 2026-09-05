@@ -176,11 +176,18 @@ def cmd_validate(args):
         on_log(line)
 
     try:
-        pipeline.setup(timeout=args.timeout, enable_ai=args.ai, proxies=proxies,
-                       threads=args.threads, use_cache=not args.no_cache)
+        # confirm_valid ставится ПОЛЕМ, а не параметром: run_pipeline его не
+        # принимает, а читает у объекта. Флаг был объявлен и никуда не
+        # подключён — из командной строки второе мнение не работало вовсе.
+        pipeline.confirm_valid = not args.no_confirm_valid
+        pipeline.setup(timeout=args.timeout, enable_ai=not args.no_ai,
+                       proxies=proxies, threads=args.threads,
+                       use_cache=not args.no_cache)
         pipeline.run_pipeline(sources, threads=args.threads, fix_typos=True,
-                              check_spam=True, deep_ping=True, enable_ai=args.ai,
-                              enable_osint=args.osint)
+                              check_spam=True, deep_ping=True,
+                              enable_ai=not args.no_ai,
+                              enable_osint=not args.no_osint,
+                              resume=not args.no_resume)
     except KeyboardInterrupt:
         pipeline.stop()
         print("\nПрервано. Сохраняю то, что успели проверить.", file=sys.stderr)
@@ -328,13 +335,23 @@ def build_parser():
     v.add_argument("--suppress", help="файл отписок — вычесть перед записью")
     v.add_argument("--status", help="оставить только эти статусы через запятую")
     v.add_argument("--min-score", type=int, default=0)
-    v.add_argument("--ai", action="store_true", help="включить ML-обогащение")
-    v.add_argument("--osint", action="store_true", help="искать имя в Gravatar")
+    # ПЯТЬ НАСТРОЕК КАЧЕСТВА ВКЛЮЧЕНЫ, выключаются флагом --no-*.
+    #
+    # Так же, как в окне: владелец не хочет включать их вручную, а забытая
+    # настройка — это молча ухудшенный результат. Прежние --ai и --osint
+    # означали обратное (по умолчанию выключено), и командная строка
+    # работала хуже окна при тех же данных.
+    v.add_argument("--no-ai", action="store_true",
+                   help="не отсеивать адреса-роботы (ML-обогащение выключено)")
+    v.add_argument("--no-osint", action="store_true",
+                   help="не искать имя, пол и страну")
     v.add_argument("--no-cache", action="store_true", help="не брать вердикты из кэша")
-    v.add_argument("--confirm-valid", action="store_true",
-                   help="перепроверять каждый «Годен» вторым прокси "
-                        "(вдвое дольше, ловит почтовик, который врёт "
-                        "только нашему выходу)")
+    v.add_argument("--no-resume", action="store_true",
+                   help="не продолжать прерванный прогон, начать с нуля")
+    v.add_argument("--no-confirm-valid", action="store_true",
+                   help="не перепроверять «Годен» вторым прокси "
+                        "(вдвое быстрее, но почтовик, который врёт только "
+                        "нашему выходу, останется незамеченным)")
     v.add_argument("--scan-only", action="store_true",
                    help="только показать состав базы, без единого запроса")
     v.add_argument("--allow-direct", action="store_true",

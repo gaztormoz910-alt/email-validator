@@ -606,7 +606,10 @@ LOCKABLE_IDS = [
     "pasteEmails", "pasteProxies", "pasteDorks", "pastePproxy",
     "clearEmails", "clearProxies", "clearDorks", "clearPproxy",
     "threads", "timeout", "pThreads", "pTimeout",
-    "optAi", "optOsint", "optCache", "pEngine",
+    # optAi / optOsint / optCache / optConfirm / optResume убраны из окна:
+    # все пять настроек качества включены в ядре и щёлкать их вручную
+    # больше не нужно. Запирать нечего.
+    "pEngine",
 ]
 
 

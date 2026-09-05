@@ -244,7 +244,10 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         self._refresh_start_hint()
 
     def _on_country_mode_change(self, value):
-        """Переключает пороги предсказания страны по имени.
+        """Переключает строгость ОБЕИХ догадок: имени и страны.
+
+        Раньше переключатель менял только порог страны, а имя
+        собиралось сегментатором из чего угодно и подписывалось фактом.
 
         Действует сразу, без перезапуска: пороги читаются на каждом
         предсказании, а не защёлкиваются при старте прогона.
@@ -254,16 +257,21 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         set_country_mode(mode)
         if mode == "accuracy":
             self.country_mode_hint.configure(
-                text="неуверенная страна остаётся пустой (верно ~50%, пусто ~42%)")
+                text="имя — только подтверждённое словарём, страна — только "
+                     "при уверенном распределении (заполнено ~47% против ~70%)")
             self.safe_log(
-                "[INFO] Страна по имени: режим ТОЧНОСТЬ. Слабое распределение "
-                "отбрасывается — колонка будет заполнена реже, но вернее.", "info")
+                "[INFO] Режим ТОЧНОСТЬ. Имя ставится, только когда словарь "
+                "подтвердил хотя бы одну его часть или границы поставил сам "
+                "человек; слабое распределение страны отбрасывается. Замерено "
+                "на 5000 адресов: имя заполнено у 46.7% против 70.5%.", "info")
         else:
             self.country_mode_hint.configure(
-                text="заполнено почти всегда, ~треть стран — догадка")
+                text="заполнено почти всегда: ~треть стран догадка, имя может "
+                     "быть склеено сегментатором из чего угодно")
             self.safe_log(
-                "[INFO] Страна по имени: режим ЗАПОЛНЕННОСТЬ. Колонка заполняется "
-                "почти всегда; догадку видно по колонке «Источник».", "info")
+                "[INFO] Режим ЗАПОЛНЕННОСТЬ. Имя и страна заполняются почти "
+                "всегда; догадку видно по колонке «Источник» — у имени она "
+                "помечена как «склеено сегментатором».", "info")
 
     # Сколько строк показывать в предпросмотре. Больше человек всё равно не
     # читает, а Tk тратит на каждую строку и память, и время отрисовки.
@@ -546,10 +554,6 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         self.proxy_selector.configure(state=state)
         self.threads_slider.configure(state=state)
         self.timeout_slider.configure(state=state)
-        self.chk_ai.configure(state=state)
-        self.chk_osint_val.configure(state=state)
-        self.chk_cache.configure(state=state)
-        self.chk_resume.configure(state=state)
         self.dork_selector.configure(state=state)
         self.parser_proxy_selector.configure(state=state)
         self.parser_threads_slider.configure(state=state)
@@ -666,11 +670,9 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
             fix_typos=True,
             check_spam=True,
             deep_ping=True,
-            enable_ai=self.chk_ai.get() == 1,
-            enable_osint=self.chk_osint_val.get() == 1,
+            # Четыре настройки качества окно больше не передаёт: они
+            # включены в ядре. Оба окна зовут движок одинаково.
             proxies=actual_proxies,
-            use_cache=self.chk_cache.get() == 1,
-            resume=self.chk_resume.get() == 1
         )
 
     def pause_validation(self):
