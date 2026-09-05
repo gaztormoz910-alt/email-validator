@@ -22,6 +22,11 @@ from core.pipeline import ValidationPipeline
 from core.streamer import StreamLoader
 
 
+# Выборка и передышка для скана состава базы живут в ядре: окон два, и
+# разъехавшиеся числа означали бы разный отчёт по одной и той же базе.
+from core.provider import BASE_SCAN_BREATHE
+
+
 class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -282,7 +287,7 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
     # получает его так редко, что окно подмерзает — при том, что обработчик
     # кнопки вернулся мгновенно и «всё в фоне». Тысяча элементов между
     # вдохами стоит около миллисекунды на тысячу и снимает подморозку.
-    BREATHE_EVERY = 1000
+    BREATHE_EVERY = BASE_SCAN_BREATHE
 
     def _ui_call(self, fn):
         """Ставит работу в очередь главного потока. Закрытое окно — не ошибка.
@@ -483,12 +488,6 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
         self._scan_base_composition()
         self._refresh_start_hint()
 
-    # Сколько адресов нюхать для отчёта о составе базы. Это доли, а не
-    # абсолютные числа: на двухстах тысячах адресов доля Gmail отличается от
-    # доли на пятидесяти миллионах в третьем знаке после запятой, а времени
-    # уходит в двести раз меньше.
-    BASE_SCAN_SAMPLE = 200_000
-
     def _scan_base_composition(self):
         """Показывает состав базы по провайдерам. Без сети — только чтение файла.
 
@@ -504,19 +503,24 @@ class ValidatorApp(PanelsMixin, ParserTabMixin, ctk.CTk):
 
         def worker():
             try:
+                import time as _time
                 from core.provider import scan_base_providers, format_base_scan
                 # breathe_every заставляет скан отпускать GIL. Без него этот
                 # поток — сплошной чистый Python, и окно подмерзает на треть
                 # секунды, хотя обработчик кнопки давно вернулся. См. пояснение
                 # в самой scan_base_providers.
-                scan = scan_base_providers(sources, limit=self.BASE_SCAN_SAMPLE,
+                # limit НЕ ПЕРЕДАЁТСЯ намеренно: выборка бралась с начала
+                # и описывала первый файл, выдавая его состав за состав всей
+                # базы. Замерено на базе владельца из восьми файлов: выборка
+                # говорила «Gmail 0» при 1 499 557 гмейлов в базе.
+                начало = _time.monotonic()
+                scan = scan_base_providers(sources,
                                            breathe_every=self.BREATHE_EVERY)
                 for line in format_base_scan(scan):
                     self.safe_log(line, "info")
-                if scan.get("total", 0) >= self.BASE_SCAN_SAMPLE:
-                    self.safe_log(
-                        f"[INFO] Состав посчитан по первым {self.BASE_SCAN_SAMPLE} "
-                        "адресам — на долях это не сказывается.", "info")
+                self.safe_log(
+                    "[INFO] Состав посчитан по ВСЕЙ базе (%d адресов) за %.1f с."
+                    % (scan.get("total", 0), _time.monotonic() - начало), "info")
             except Exception as e:
                 self.safe_log(f"[DEAD] Скан состава базы не удался: {type(e).__name__}", "dead")
 
