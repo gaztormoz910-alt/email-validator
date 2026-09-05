@@ -51,13 +51,14 @@ def test_gap_hidden_row_takes_no_space():
     folded = folded[:folded.index("}") + 1]
     assert "display: none" in folded, folded
 
+    # Строки «продолжить прерванный прогон» в окне БОЛЬШЕ НЕТ: продолжение
+    # включено в ядре всегда, а память о прогоне стирается сама после
+    # прогона, дошедшего до конца. Спрашивать владельца стало не о чем.
     html = read("ui/web/index.html")
-    row = html[html.index('id="resumeRow"') - 200:html.index('id="resumeRow"') + 40]
-    assert "is-folded" in row, row
-    assert "is-gone" not in row, "строка снова прячется с сохранением места"
-
+    assert 'id="resumeRow"' not in html, (
+        "строка продолжения вернулась в окно — её снова можно забыть включить")
     app = read("ui/web/app.js")
-    assert 'classList.toggle("is-folded", !done)' in app
+    assert "askResume" not in app, "окно снова опрашивает убранную строку"
 
 
 def test_gap_is_gone_still_exists_for_its_own_case():

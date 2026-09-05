@@ -81,13 +81,19 @@ def test_second_opinion_disagreement_lowers_the_verdict():
         "расхождение выходов превращается в приговор — это ложный Invalid")
 
 
-def test_control_second_opinion_is_off_by_default():
-    """По умолчанию выключено: это лишняя сессия на КАЖДЫЙ Valid.
+def test_control_second_opinion_is_on_by_default():
+    """По умолчанию ВКЛЮЧЕНО — решение владельца от 05.09.2026.
 
-    Включается перед тем прогоном, после которого владелец рассылает.
+    Раньше здесь стерегли обратное: лишняя сессия на каждый Valid стоит
+    времени, и включать её предлагалось перед рассылкой. Но включать надо
+    было руками, а забытый тумблер означает рассылку по недоказанным
+    адресам. Владелец распорядился включить насовсем и убрать из окна.
+
+    Смотрим на СВЕЖЕСОЗДАННЫЙ объект, а не на подпись метода: подпись можно
+    поменять и не подключить — так уже было со SMTPUTF8.
     """
     pipe = _конвейер(_Сеть(True))
-    assert getattr(pipe, "confirm_valid", False) is False
+    assert getattr(pipe, "confirm_valid", False) is True
 
 
 def test_control_second_opinion_failure_keeps_the_first_answer():

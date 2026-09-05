@@ -35,52 +35,64 @@ def читать(*куски):
 
 # ══════════════════════ D1: второе мнение доступно ══════════════════════
 
-def test_second_opinion_has_a_switch_in_the_window():
-    """Тумблер есть в разметке и подписан по-человечески."""
-    разметка = читать("ui", "web", "index.html")
-    assert 'id="optConfirm"' in разметка, "тумблера нет в окне"
-    кусок = разметка[разметка.index('id="optConfirm"'):]
-    кусок = кусок[:кусок.index("</label>")]
-    assert "Годен" in кусок, "непонятно, что делает тумблер"
-    assert "прокси" in кусок.lower(), "не сказано, чем платим"
+def test_second_opinion_is_not_a_switch_in_the_window_any_more():
+    """Тумблера в окне НЕТ, и окно настройку не передаёт.
 
+    ЧТО ИЗМЕНИЛОСЬ И ПОЧЕМУ. Эта проверка стерегла «настройка достижима из
+    окна»: до неё второе мнение было написано, покрыто тестами и недоступно.
+    Владелец 05.09.2026 распорядился иначе — включить все пять настроек
+    качества под капотом и убрать их из интерфейса, чтобы не щёлкать вручную
+    перед каждым прогоном.
 
-def test_second_opinion_setting_travels_window_to_pipeline():
-    """Настройка доезжает по ВСЕЙ цепочке, а не теряется на полпути.
-
-    Тумблер, чьё значение теряется по дороге, — это обман: владелец щёлкает,
-    а поведение не меняется. Поэтому проверяются все три звена.
+    Требование не ослабло, а переехало: раньше стерегли достижимость, теперь
+    стережём, что окно НЕ МОЖЕТ её выключить. Проверка по-прежнему умеет
+    краснеть — вернуть тумблер, не вернув передачу значения, она не даст.
     """
+    разметка = читать("ui", "web", "index.html")
     скрипт = читать("ui", "web", "app.js")
     мост = читать("ui", "webapp.py")
 
-    assert '$("#optConfirm").checked' in скрипт, "окно не читает тумблер"
-    assert "confirm:" in скрипт, "окно не отправляет настройку"
-    assert 'payload.get("confirm"' in мост, "мост не принимает настройку"
-    assert "confirm_valid=" in мост, "мост не передаёт её конвейеру"
+    assert 'id="optConfirm"' not in разметка, (
+        "тумблер вернулся в окно — значит его снова можно забыть включить")
+    assert "optConfirm" not in скрипт, "окно снова читает убранный тумблер"
+    assert 'payload.get("confirm"' not in мост, (
+        "мост снова принимает настройку из окна и может её выключить")
 
 
 def test_second_opinion_is_a_real_pipeline_parameter():
-    """Конвейер действительно принимает параметр и запоминает его."""
+    """Конвейер принимает параметр, запоминает его и включает по умолчанию."""
     from core.pipeline import ValidationPipeline
 
     параметры = inspect.signature(ValidationPipeline.start).parameters
     assert "confirm_valid" in параметры, "конвейер не принимает настройку"
-    assert параметры["confirm_valid"].default is False, (
-        "второе мнение включено по умолчанию — это лишняя сессия на КАЖДЫЙ "
-        "подтверждённый адрес")
+    assert параметры["confirm_valid"].default is True, (
+        "второе мнение выключено по умолчанию, а владелец включил его "
+        "насовсем: цена лишней сессии несравнима с ценой рассылки в пустоту")
     assert "self.confirm_valid" in читать("core", "pipeline.py"), (
         "параметр принят, но никуда не положен")
 
 
-def test_second_opinion_has_a_command_line_flag():
-    """Из командной строки тоже: на VPS окна не будет."""
+def test_second_opinion_command_line_flag_is_actually_wired():
+    """Из командной строки тоже — и флаг должен что-то делать.
+
+    НАЙДЕНО ЭТОЙ ЖЕ ПРОВЕРКОЙ 05.09.2026: флаг `--confirm-valid` был
+    объявлен и НИКУДА НЕ ПОДКЛЮЧЁН. `run_pipeline` параметра не принимает,
+    он читает поле у объекта, а поле никто не ставил. То есть из командной
+    строки второе мнение не работало вообще, а прежняя проверка этого не
+    видела: она искала только наличие строки в справке.
+    """
     cli = читать("cli.py")
-    assert "--confirm-valid" in cli, "нет флага командной строки"
+    assert "--no-confirm-valid" in cli, "нет флага командной строки"
+    assert "pipeline.confirm_valid =" in cli, (
+        "флаг объявлен, но ни к чему не подключён — он ничего не делает")
 
 
-def test_control_second_opinion_default_stays_off_end_to_end():
-    """Контроль: не включив тумблер, владелец платит ноль лишних сессий."""
+def test_control_second_opinion_default_is_on_end_to_end():
+    """Контроль до самого конца цепочки: значение доезжает до объекта.
+
+    Подпись функции можно поменять и не подключить — так уже было со
+    SMTPUTF8. Поэтому смотрим не на подпись, а на созданный конвейер.
+    """
     from core.pipeline import ValidationPipeline
 
     pipe = ValidationPipeline(callbacks={
@@ -88,7 +100,11 @@ def test_control_second_opinion_default_stays_off_end_to_end():
         "on_result": lambda *a: None,
         "on_complete": lambda: None,
     })
-    assert getattr(pipe, "confirm_valid", False) is False
+    pipe.start(email_sources=[], threads=1, timeout=1, fix_typos=True,
+               check_spam=True, deep_ping=True, proxies=None)
+    pipe.stop()
+    assert getattr(pipe, "confirm_valid", False) is True, (
+        "второе мнение не доехало до конвейера — подпись поменяли, а поведение нет")
 
 
 # ══════════════════════ D2: отскоки загружаются ═════════════════════════

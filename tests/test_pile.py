@@ -66,26 +66,58 @@ def test_resume_count_is_zero_for_other_files(tmp_path):
     assert resumable_count([{"type": "file", "path": two}], path=journal) == 0
 
 
-def test_resume_reaches_the_pipeline_from_the_web_window():
-    """Флаг из окна обязан дойти до конвейера, а не потеряться по дороге."""
+def test_resume_is_on_by_default_in_the_core():
+    """Продолжение включено В ЯДРЕ, а не выставляется окном.
+
+    ЧТО ИЗМЕНИЛОСЬ И ПОЧЕМУ. Раньше эта проверка требовала, чтобы окно
+    ПЕРЕДАВАЛО флаг: тогда он приходил в ядро жёстким False, и без окна
+    продолжения не существовало. Владелец 05.09.2026 потребовал обратного —
+    включить все пять настроек качества под капотом и убрать их из окна,
+    чтобы не щёлкать вручную перед каждым прогоном.
+
+    Требование не ослабло, а переехало: раньше стерегли «настройка
+    достижима», теперь — «настройка включена и окно её не выключает».
+    """
+    import inspect
+    from core.pipeline import ValidationPipeline
+
+    for метод in (ValidationPipeline.run_pipeline, ValidationPipeline.start):
+        параметры = inspect.signature(метод).parameters
+        assert параметры["resume"].default is True, (
+            "%s: продолжение снова выключено по умолчанию" % метод.__name__)
+
     source = read("ui/webapp.py")
-    assert 'resume=False)' not in source, (
-        "в окне снова жёсткий отказ продолжать")
-    assert 'resume=bool(payload.get("resume", False))' in source
-    assert "def resume_info" in source, "окну нечем спросить, есть ли что продолжать"
+    assert 'payload.get("resume"' not in source, (
+        "окно снова передаёт настройку и может её выключить")
 
 
-def test_resume_has_a_handle_in_both_windows():
-    """Ручка нужна в обоих интерфейсах: запасное окно владелец оставил."""
-    assert 'id="optResume"' in read("ui/web/index.html")
-    assert 'resume: $("#optResume").checked' in read("ui/web/app.js")
+def test_resume_state_is_wiped_after_a_finished_run():
+    """ЛОВУШКА: без этого включённое навсегда продолжение убивает повтор.
 
+    RunState стирает память о прогоне только когда продолжение выключено
+    (`if not resume: self.clear()`). Раз оно включено всегда, а галочки в
+    окне больше нет, память не стиралась бы никогда — и второй запуск того
+    же файла проверил бы НОЛЬ адресов, без единого способа это исправить.
+    """
+    source = read("core/pipeline.py")
+    assert "if resume and not self._stop_requested:" in source, (
+        "память о прогоне не стирается — повторный прогон даст ноль адресов")
+    assert "state.clear()" in source, "стирание не вызывается"
+
+
+def test_resume_toggle_is_gone_from_the_classic_window_too():
+    """Оба окна одинаковы: тумблера нет ни в одном.
+
+    Расхождение между окнами однажды уже стоило владельцу прогонов — новое
+    окно подавало движку не то, что старое. Поэтому убирать надо в обоих.
+    """
     panels = read("ui/panels.py")
-    assert "self.chk_resume" in panels, "в классическом окне тумблера нет"
     gui = read("ui/gui.py")
-    assert "resume=self.chk_resume.get() == 1" in gui
-    assert "self.chk_resume.configure(state=state)" in gui, (
-        "тумблер не запирается на время прогона — его можно передёрнуть на ходу")
+    for имя in ("chk_ai", "chk_osint_val", "chk_resume", "chk_cache"):
+        assert имя not in panels, "тумблер %s вернулся в классическое окно" % имя
+        assert имя not in gui, "классическое окно снова читает %s" % имя
+    assert "resume=" not in gui, (
+        "классическое окно снова передаёт настройку и может её выключить")
 
 
 # ══════════════════════════ P2: SPF у обратных адресов
