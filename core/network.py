@@ -1097,18 +1097,21 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
                 # вынесенный одним сервером, в таких доменах ошибочен, и цена
                 # ошибки здесь максимальная: выброшенный живой контакт.
                 if result["status"] == "invalid":
+                    почему = {}
                     confirmed = self._confirm_invalid_on_other_mx(
                         email, mx_record, mx_records, needs_ptr, needs_clean,
-                        want_country, deadline, first_proxy=proxy)
+                        want_country, deadline, first_proxy=proxy, почему=почему)
                     if confirmed is None:
-                        # Сверить было НЕ С ЧЕМ: у домена один почтовый сервер
-                        # и в пуле нет второго выходного адреса. Приговор
-                        # остаётся в силе, но владелец обязан знать, что он
-                        # держится на одном ответе.
+                        # Сверить было НЕ С ЧЕМ. Приговор остаётся в силе, но
+                        # владелец обязан знать И ТО, что он держится на одном
+                        # ответе, И ПОЧЕМУ второго не случилось: от причины
+                        # зависит, что чинить — прокси, срок или ничего.
                         result["second_opinion"] = "unavailable"
+                        result["second_opinion_reason"] = почему.get("текст", "")
                         result["reason"] = (
-                            "%s [второго мнения не было: у домена один MX и "
-                            "нет другого выхода]" % result.get("reason", ""))
+                            "%s [второго мнения не было: %s]"
+                            % (result.get("reason", ""),
+                               почему.get("текст", "причина не названа")))
                         return result
                     if confirmed:
                         # Отмечаем ЧЕМ подтверждён: уверенность в вердикте
@@ -1188,7 +1191,7 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
 
     def _confirm_invalid_on_other_mx(self, email, decided_on, mx_records,
                                      needs_ptr, needs_clean, want_country,
-                                     deadline, first_proxy=None):
+                                     deadline, first_proxy=None, почему=None):
         """Второе мнение о приговоре: другой сервер ЛИБО другой выходной IP.
 
         True  — подтверждено, ящика действительно нет;
@@ -1212,21 +1215,33 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         другой, если он есть. Если другого IP нет — второго мнения нет, и это
         честное None, а не молчаливое согласие.
         """
-        if time.monotonic() > deadline:
+        # ПРИЧИНА НАЗЫВАЕТСЯ НАСТОЯЩАЯ, а не первая попавшаяся.
+        #
+        # Причин у «второго мнения нет» четыре, и владельцу печаталась всегда
+        # одна: «у домена один MX». На gmail.com, у которого MX пять, это была
+        # прямая неправда — ровно в том месте, где он решает, верить ли
+        # приговору «ящика не существует» и удалять ли контакт.
+        def нечем(причина):
+            if почему is not None:
+                почему["текст"] = причина
             return None
+
+        if time.monotonic() > deadline:
+            return нечем("не успели: истёк общий срок проверки этого адреса")
 
         # Прокси с ДРУГИМ выходным адресом. Без него спрашивать бессмысленно.
         proxy = self._pick_best_proxy(need_ptr=needs_ptr, need_clean=needs_clean,
                                       want_country=want_country,
                                       avoid_exit_of=first_proxy)
         if first_proxy and proxy is None:
-            return None          # другого выхода нет — сверить не с чем
+            return нечем("в пуле не осталось прокси с другим выходным IP")
 
         # Сервер по возможности другой: две независимые оси лучше одной.
         others = [mx for mx in (mx_records or []) if mx != decided_on]
         target = others[0] if others else decided_on
         if not others and not first_proxy:
-            return None          # ни другого MX, ни другого IP — сверять нечем
+            return нечем("у домена один почтовый сервер, а проверка шла "
+                         "без прокси — второго выхода тоже нет")
 
         second = self._do_single_ping(email, target, proxy=proxy)
         status = second.get("status")
@@ -1236,7 +1251,8 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             return False
         # unknown/greylisted/risky — второй сервер ничего не сказал, и
         # выдавать его молчание за несогласие нельзя.
-        return None
+        return нечем("второй сервер (%s) ответил неопределённо: %s"
+                     % (target, str(second.get("reason") or status)[:80]))
 
     def confirm_valid_from_other_exit(self, email, mx_records,
                                       first_proxy=None, deadline=None):

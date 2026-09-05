@@ -29,7 +29,11 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 # Имена, на которые опирается всё остальное. Список собран не рукой: он
 # получен пересечением «что создаёт разметка» и «что читает остальной код».
 CONTRACT = [
-    "chk_ai", "chk_cache", "chk_invalid_var", "chk_osint_val", "chk_spam_var",
+    # chk_ai / chk_cache / chk_osint_val / chk_resume убраны из окна
+    # 05.09.2026: пять настроек качества включены в ядре, щёлкать их
+    # вручную больше не нужно. Фильтры результатов (chk_valid и
+    # прочие) к ним отношения не имеют и остаются.
+    "chk_invalid_var", "chk_spam_var",
     "chk_unknown_var", "chk_valid_var", "chunk_entry", "controls_frame",
     "country_mode_hint", "country_mode_seg", "country_mode_var", "db_selector",
     "dork_selector", "engine_frame", "engine_selector", "engine_var",

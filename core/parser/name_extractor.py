@@ -106,6 +106,26 @@ def split_name(full_name):
     return parts[0], parts[-1]
 
 
+def строгий_режим_имён():
+    """Включён ли режим «Точность». Переключатель ОДИН на имя и страну.
+
+    Владелец жмёт одну кнопку и ждёт, что вырастет качество, а не одна
+    колонка из двух. Пока режим действовал только на страну, нажатая
+    «Точность» оставляла в колонке «Имя» «Kava Morasports», «Sskam At» и
+    «Anjue Www» — и подписывала их «из самого адреса — факт».
+
+    Импорт внутри функции намеренно: ml_predictor тянет за собой словарь
+    стран, а этот модуль грузится и там, где страна не нужна вовсе.
+    """
+    try:
+        from .ml_predictor import get_country_mode
+        return get_country_mode() == "accuracy"
+    except Exception:
+        # Режим неизвестен — работаем как раньше. Молча УЖЕСТОЧИТЬ разбор
+        # из-за сбоя импорта нельзя: половина базы осталась бы без имён.
+        return False
+
+
 class NameExtractor:
     def __init__(self, enable_osint=False, proxy_provider=None):
         # Load wordsegment corpus into memory (only happens once per process)
@@ -508,6 +528,33 @@ class NameExtractor:
                 if not confirmed and not structural:
                     return self._fallback_osint(email)
 
+        # РЕЖИМ «ТОЧНОСТЬ»: границу, придуманную сегментатором, обязан
+        # подтвердить индекс популярных имён.
+        #
+        # ПОЧЕМУ НЕ БАЗОЙ НА 138 МЛН. Она подтверждает почти любой обломок:
+        # замерено — 'kava', 'white', 'viju', 'upscale', 'installations' и
+        # даже 'aaa' в ней «чьё-то имя где-то в мире». Именно она и
+        # пропускала «Kava Morasports» и «Upscale Installations».
+        #
+        # РАЗДЕЛИТЕЛИ НЕ ПЕРЕСУЖИВАЮТСЯ. Точку в `moein.zargarzadeh`
+        # поставил человек; отбрасывать его разметку из-за того, что
+        # фамилии нет в индексе, значит терять живых людей с неевропейскими
+        # фамилиями. Строгость направлена на НАШУ догадку, а не на его факт.
+        #
+        # ЗАМЕРЕНО на базе владельца, 5000 адресов: имя ставится у 70.5%
+        # против 46.7%. Уходят «Addda Bbb», «Gits Mt», «Nodnork Us»,
+        # «Lait Ssh», «Pixvor I»; остаются «Simone Sorbi», «Usman Saleem»,
+        # «Jennifer Mabe», «Satish Tomer».
+        if (not from_separators and строгий_режим_имён()
+                and not any(is_known_name(part) for part in parts)):
+            return self._fallback_osint(email)
+
+        # ЧЕЙ это разбор. Границы, поставленные человеком (точка,
+        # подчёркивание, CamelCase), — факт о его адресе. Границы,
+        # угаданные сегментатором, — наша догадка, и называть её фактом
+        # владельцу нельзя: именно так «Kava Morasports» попадало
+        # в окно с подписью «из самого адреса — факт».
+        self._osint_local.name_source = "адрес" if from_separators else "разбор"
         return " ".join(part.title() for part in parts)
 
     def extract_name(self, email):
@@ -574,6 +621,18 @@ class NameExtractor:
             
         return self._fallback_osint(email)
         
+    def last_name_source(self):
+        """Откуда взялось имя при последнем разборе В ЭТОМ ПОТОКЕ.
+
+        "профиль" — публичный профиль, факт;
+        "адрес"   — границы поставил сам человек, факт о его адресе;
+        "разбор"  — границы угадал сегментатор, это ДОГАДКА.
+
+        Хранение потоковое по той же причине, что и у last_profile:
+        воркеров сотни, общий атрибут они бы перетирали друг у друга.
+        """
+        return getattr(self._osint_local, "name_source", "") or ""
+
     def last_profile(self):
         """Профиль Gravatar, полученный этим потоком при последнем разборе.
 
@@ -596,6 +655,7 @@ class NameExtractor:
         """
         self._osint_local.profile = {}
         self._osint_local.asked = True
+        self._osint_local.name_source = ""
         if not (self.enable_osint and self.osint_operator):
             return ""
         try:
@@ -612,6 +672,7 @@ class NameExtractor:
         squashed = "".join(ch for ch in name.lower() if ch.isalnum())
         if squashed == "".join(ch for ch in local_part if ch.isalnum()):
             return ""      # это логин, а не имя
+        self._osint_local.name_source = "профиль"
         return name
 
     def _fallback_osint(self, email):
@@ -623,4 +684,6 @@ class NameExtractor:
         if not getattr(self._osint_local, "asked", False):
             return self._profile_name(email)
         profile = getattr(self._osint_local, "profile", {}) or {}
-        return (profile.get("name") or "").strip()
+        имя = (profile.get("name") or "").strip()
+        self._osint_local.name_source = "профиль" if имя else ""
+        return имя
