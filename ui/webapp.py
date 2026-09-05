@@ -96,6 +96,11 @@ class ValidatorApi:
         self._line_counts = {"emails": 0, "proxies": 0, "dorks": 0, "pproxy": 0}
         self._count_jobs = {}
         self._count_lock = threading.Lock()
+        # Отдельный счётчик поколений для скана состава базы. Общий со
+        # счётом строк не годится: строки пересчитываются при каждой правке
+        # файла на диске, а состав — только при смене набора источников.
+        self._scan_job = 0
+        self._scan_lock = threading.Lock()
         self._state = "idle"                # idle | running | paused | done
         self._proxy_summary = None
         self._pending = []                  # строки лога, ещё не отданные
@@ -356,6 +361,7 @@ class ValidatorApi:
         if accepted:
             self._on_log(f"[INFO] Подключено файлов: {len(accepted)}.", "info")
             self._recount(kind)
+            self._rescan_base(kind)
         for reason in refused:
             self._on_log(f"[DEAD] Файл отклонён: {reason}", "dead")
         for name in oversized:
@@ -409,6 +415,7 @@ class ValidatorApi:
 
         bucket.append({"type": "text", "content": text, "title": "вставленный текст"})
         self._recount(kind)
+        self._rescan_base(kind)
         return self.sources()
 
     def clear(self, payload):
@@ -420,6 +427,9 @@ class ValidatorApi:
             return dict(self.sources(), error=self._BUSY_REFUSAL)
         bucket.clear()
         self._recount(payload.get("kind"))
+        # И при очистке тоже: она обязана отменить отчёт, начатый для
+        # прошлого набора, иначе он допечатается уже после неё.
+        self._rescan_base(payload.get("kind"))
         return self.sources()
 
     @staticmethod
@@ -470,6 +480,71 @@ class ValidatorApi:
                         for item in snapshot if item.get("type") == "file"]
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _rescan_base(self, kind):
+        """Состав базы в лог — сразу после загрузки, как в классическом окне.
+
+        Отвечает на вопрос, который владелец задаёт ДО запуска: сколько
+        адресов, каких провайдеров, что из этого проверится с текущего IP, а
+        чему нужен адрес с PTR или чистой репутацией. Ни одного сетевого
+        запроса — только чтение выборки.
+
+        ЗОВЁТСЯ ТОЛЬКО ПРИ СМЕНЕ НАБОРА ИСТОЧНИКОВ, а не из _recount.
+        _recount дёргается из sources() при каждом опросе панели, если файл
+        изменился на диске; повесить скан туда значило бы перечитывать
+        полумиллионный файл снова и снова, пока окно открыто.
+
+        Прокси и дорки не сканируются: разбивка по почтовым провайдерам для
+        них бессмысленна.
+        """
+        if kind != "emails":
+            return
+
+        snapshot = list(self._sources.get(kind) or [])
+        with self._scan_lock:
+            # Поколение растёт и при очистке: скан, начатый для прошлого
+            # набора, не должен допечатать свой отчёт после неё.
+            self._scan_job += 1
+            job = self._scan_job
+        if not snapshot:
+            return
+
+        def устарел():
+            with self._scan_lock:
+                return self._scan_job != job
+
+        def work():
+            import time as _time
+            from core.provider import (scan_base_providers, format_base_scan,
+                                       BASE_SCAN_BREATHE)
+            self._on_log("[INFO] Считаю состав базы по ВСЕМ подключённым "
+                         "источникам — это чтение без единого запроса в сеть.",
+                         "info")
+            начало = _time.monotonic()
+            try:
+                # breathe_every заставляет скан отпускать GIL. Без него этот
+                # поток — сплошной чистый Python, и панель перестаёт отвечать
+                # на опрос, хотя загрузка давно вернулась.
+                #
+                # limit НЕ ПЕРЕДАЁТСЯ намеренно: выборка бралась с начала и
+                # описывала первый файл, выдавая его состав за состав базы.
+                scan = scan_base_providers(snapshot,
+                                           breathe_every=BASE_SCAN_BREATHE,
+                                           should_stop=устарел)
+            except Exception as e:
+                self._on_log("[DEAD] Скан состава базы не удался: %s: %s"
+                             % (type(e).__name__, e), "dead")
+                return
+            if scan.get("stopped") or устарел():
+                return          # набор сменился, наш отчёт устарел
+            for line in format_base_scan(scan):
+                self._on_log(line, "info")
+            self._on_log("[INFO] Состав посчитан по ВСЕЙ базе (%d адресов) "
+                         "за %.1f с." % (scan.get("total", 0),
+                                         _time.monotonic() - начало), "info")
+
+        threading.Thread(target=work, daemon=True,
+                         name="скан-состава-базы").start()
 
     def _files_changed_on_disk(self, kind):
         """Изменились ли файлы этого набора с момента подсчёта.

@@ -5,6 +5,8 @@
 покрытия, а потому что владелец увидел эту строку своими глазами и она
 означала потерю денег или потерю контакта.
 """
+import re
+import time
 import unittest
 from unittest import mock
 
@@ -615,3 +617,240 @@ class TestResumeTrap(unittest.TestCase):
             len(звонки2), len(звонки1),
             "второй прогон того же файла проверил %d адресов вместо %d"
             % (len(звонки2), len(звонки1)))
+
+
+# ═══════ Состав базы печатается и в веб-окне, а не только в старом ═══════
+
+class TestBaseScanInWebWindow(unittest.TestCase):
+    """Владелец не видел в терминале ни состава базы, ни разбивки по доменам.
+
+    Причина оказалась не в поломке: отчёт `scan_base_providers` жив, но
+    подключён был только к КЛАССИЧЕСКОМУ окну (ui/gui.py) и к командной
+    строке (--scan-only). В веб-окне его не было ни одной строкой, а работает
+    владелец именно в нём.
+    """
+
+    ПОЧТЫ = "\n".join(["a%d@gmail.com" % i for i in range(60)]
+                      + ["b%d@yahoo.com" % i for i in range(30)]
+                      + ["c%d@outlook.com" % i for i in range(10)])
+
+    def _окно(self):
+        from ui.webapp import ValidatorApi
+        api = ValidatorApi()
+        строки = []
+        было = api._on_log
+        api._on_log = lambda текст, тег="info": (строки.append(текст),
+                                                 было(текст, тег))[0]
+        return api, строки
+
+    def _дождаться(self, строки, кусок, секунд=20.0):
+        предел = time.monotonic() + секунд
+        while time.monotonic() < предел:
+            if any(кусок in с for с in строки):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_basescan_prints_after_loading_the_base(self):
+        """ПОВЕДЕНИЕ: загрузили базу — состав напечатан."""
+        api, строки = self._окно()
+        api.paste({"kind": "emails", "text": self.ПОЧТЫ})
+
+        self.assertTrue(self._дождаться(строки, "Состав базы"),
+                        "состав базы не напечатан: %r" % строки[-6:])
+        отчёт = "\n".join(строки)
+        self.assertIn("Gmail", отчёт, "провайдеры не перечислены")
+        self.assertIn("Yahoo", отчёт, "провайдеры не перечислены")
+        # Ровно то, о чём владелец спрашивал: чем какой домен проверять.
+        self.assertIn("Проверю с текущего IP", отчёт)
+        self.assertIn("PTR", отчёт, "не сказано, каким доменам нужен PTR")
+
+    def test_basescan_prints_nothing_for_proxies(self):
+        """ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ: разбивка по почтовикам у прокси бессмысленна."""
+        api, строки = self._окно()
+        api.paste({"kind": "proxies", "text": "1.2.3.4:1080\n5.6.7.8:1080"})
+        time.sleep(1.0)
+        self.assertFalse(any("Состав базы" in с for с in строки),
+                         "состав базы посчитан для списка прокси: %r" % строки)
+
+    def test_basescan_once_not_on_every_panel_poll(self):
+        """Скан не должен висеть в _recount.
+
+        _recount зовётся из sources() при КАЖДОМ опросе панели, если файл
+        изменился на диске. Скан оттуда означал бы перечитывание
+        полумиллионного файла снова и снова, пока окно открыто.
+        """
+        import inspect
+        from ui.webapp import ValidatorApi
+        self.assertNotIn("_rescan_base", inspect.getsource(ValidatorApi._recount),
+                         "скан повешен на пересчёт строк — он будет повторяться")
+        self.assertNotIn("_rescan_base", inspect.getsource(ValidatorApi.sources),
+                         "скан повешен на опрос панели — он будет повторяться")
+
+        # И поведением: опрос панели отчёт не печатает.
+        api, строки = self._окно()
+        api.paste({"kind": "emails", "text": self.ПОЧТЫ})
+        self.assertTrue(self._дождаться(строки, "Состав базы"))
+        было = sum(1 for с in строки if "Состав базы" in с)
+        for _ in range(5):
+            api.sources()
+        time.sleep(1.0)
+        стало = sum(1 for с in строки if "Состав базы" in с)
+        self.assertEqual(стало, было,
+                         "опрос панели пересчитал состав ещё %d раз" % (стало - было))
+
+    def test_basescan_async_does_not_block_loading(self):
+        """Загрузка обязана вернуться сразу: скан идёт в фоне.
+
+        Классическое окно на этом уже обжигалось — 344 мс без отклика, хотя
+        обработчик давно вернулся, потому что фоновый поток на чистом Python
+        не отпускал GIL.
+        """
+        import inspect
+        from ui.webapp import ValidatorApi
+        исходник = inspect.getsource(ValidatorApi._rescan_base)
+        self.assertIn("threading.Thread", исходник, "скан идёт в главном потоке")
+        self.assertIn("breathe_every", исходник,
+                      "скан не отпускает GIL — панель перестанет отвечать")
+
+        api, строки = self._окно()
+        крупно = "\n".join("u%d@gmail.com" % i for i in range(60000))
+        начало = time.monotonic()
+        api.paste({"kind": "emails", "text": крупно})
+        ушло = time.monotonic() - начало
+        self.assertLess(ушло, 1.0,
+                        "загрузка держала окно %.2f с — скан не в фоне" % ушло)
+
+    def test_basescan_shared_constants_keep_both_windows_equal(self):
+        """Оба окна берут передышку из ОДНОГО места и НЕ режут базу выборкой.
+
+        Разъехавшиеся числа означали бы разный отчёт по одной и той же базе.
+        """
+        import io as _io
+        from core.provider import BASE_SCAN_BREATHE
+        self.assertGreater(BASE_SCAN_BREATHE, 0)
+        for файл in ("ui/gui.py", "ui/webapp.py"):
+            текст = _io.open(файл, encoding="utf-8").read()
+            self.assertIn("BASE_SCAN_BREATHE", текст,
+                          "%s не берёт передышку из ядра" % файл)
+            свои = re.search(r"^\s*BASE_SCAN_BREATHE\s*=\s*\d", текст, re.M)
+            self.assertIsNone(свои,
+                              "%s снова задаёт своё число вместо импорта" % файл)
+            # Выборки быть не должно вовсе: она бралась С НАЧАЛА и описывала
+            # первый файл, выдавая его состав за состав всей базы.
+            кусок = текст[текст.index("scan_base_providers("):]
+            кусок = кусок[:кусок.index(")")]
+            self.assertNotIn("limit", кусок,
+                             "%s снова режет базу выборкой: %r" % (файл, кусок))
+
+
+# ═══ Состав считается по ВСЕЙ базе, а не по первым 200 000 адресам ══════
+
+class TestWholeBaseScan(unittest.TestCase):
+    """Выборка бралась С НАЧАЛА и описывала первый файл.
+
+    Владелец загрузил 3 614 531 строку восемью файлами и увидел отчёт по
+    200 000. ЗАМЕРЕНО на его файлах: выборка говорила «Gmail 0», а в базе
+    Gmail 1 499 557 — 41.5%. При этом печаталась строка «VPS с PTR ничего
+    не добавит — таких адресов в базе нет»: уверенное утверждение обо всей
+    базе, выведенное из одного файла.
+    """
+
+    # Yahoo лежит ВТОРЫМ источником и только там. Головная выборка его не
+    # увидит — на этом проверка и держится.
+    ПЕРВЫЙ = "\n".join("g%d@gmail.com" % i for i in range(3000))
+    ВТОРОЙ = "\n".join("y%d@yahoo.com" % i for i in range(1500))
+
+    def _окно(self):
+        from ui.webapp import ValidatorApi
+        api = ValidatorApi()
+        строки = []
+        было = api._on_log
+        api._on_log = lambda текст, тег="info": (строки.append(текст),
+                                                 было(текст, тег))[0]
+        return api, строки
+
+    def _дождаться(self, строки, кусок, секунд=25.0):
+        предел = time.monotonic() + секунд
+        while time.monotonic() < предел:
+            if any(кусок in с for с in строки):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_wholebase_counts_sources_beyond_the_first(self):
+        from core.provider import scan_base_providers
+        источники = [{"type": "text", "content": self.ПЕРВЫЙ},
+                     {"type": "text", "content": self.ВТОРОЙ}]
+        скан = scan_base_providers(источники)
+        self.assertEqual(скан["total"], 4500,
+                         "посчитаны не все источники: %d" % скан["total"])
+        self.assertEqual(скан["providers"].get("Yahoo"), 1500,
+                         "второй источник не увиден вовсе: %r" % скан["providers"])
+
+        # ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ: с прежней головной выборкой Yahoo пропадал.
+        головной = scan_base_providers(источники, limit=3000)
+        self.assertIsNone(головной["providers"].get("Yahoo"),
+                          "выборка с начала внезапно видит второй источник — "
+                          "тогда проверка выше ничего не доказывает")
+
+    def test_wholebase_same_whether_loaded_at_once_or_in_parts(self):
+        """«Не важно, за один подход или несколько» — прямое требование."""
+        from core.provider import scan_base_providers
+
+        разом, _ = self._окно(), None
+        api, строки = разом
+        api.paste({"kind": "emails", "text": self.ПЕРВЫЙ + "\n" + self.ВТОРОЙ})
+        self.assertTrue(self._дождаться(строки, "Состав базы"))
+        один = [с for с in строки if "Состав базы" in с][-1]
+
+        api2, строки2 = self._окно()
+        api2.paste({"kind": "emails", "text": self.ПЕРВЫЙ})
+        self.assertTrue(self._дождаться(строки2, "Состав базы"))
+        строки2.clear()
+        api2.paste({"kind": "emails", "text": self.ВТОРОЙ})
+        self.assertTrue(self._дождаться(строки2, "Состав базы"))
+        два = [с for с in строки2 if "Состав базы" in с][-1]
+
+        self.assertEqual(один, два,
+                         "итог зависит от того, как загружали: %r против %r"
+                         % (один, два))
+        self.assertIn("4500", один, "посчитаны не все адреса: %r" % один)
+
+    def test_wholebase_cancels_a_superseded_scan(self):
+        """Восемь загрузок подряд не должны означать восемь полных проходов."""
+        from core.provider import scan_base_providers
+
+        просмотрено = {"n": 0}
+        источник = [{"type": "text",
+                     "content": "\n".join("a%d@gmail.com" % i
+                                          for i in range(50000))}]
+
+        def бросить_сразу():
+            просмотрено["n"] += 1
+            return True
+
+        from core.provider import BASE_SCAN_BREATHE
+        скан = scan_base_providers(источник, breathe_every=BASE_SCAN_BREATHE,
+                                   should_stop=бросить_сразу)
+        self.assertTrue(скан.get("stopped"), "скан не сообщил, что брошен")
+        self.assertLessEqual(скан["total"], BASE_SCAN_BREATHE * 2,
+                             "скан прошёл %d адресов вместо того чтобы "
+                             "броситься" % скан["total"])
+
+        # ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ: без отказа проходится всё.
+        целиком = scan_base_providers(источник, breathe_every=BASE_SCAN_BREATHE)
+        self.assertEqual(целиком["total"], 50000)
+        self.assertFalse(целиком.get("stopped"))
+
+    def test_wholebase_speaks_before_and_after(self):
+        """Минута молчания читается как зависание. Окно обязано говорить."""
+        api, строки = self._окно()
+        api.paste({"kind": "emails", "text": self.ПЕРВЫЙ})
+        self.assertTrue(self._дождаться(строки, "Считаю состав базы"),
+                        "окно не сказало, что считает: %r" % строки[-4:])
+        self.assertTrue(self._дождаться(строки, "по ВСЕЙ базе"),
+                        "окно не сказало, что посчитало всё: %r" % строки[-4:])
+        итог = [с for с in строки if "по ВСЕЙ базе" in с][-1]
+        self.assertIn("3000", итог, "не назван размер: %r" % итог)
+        self.assertRegex(итог, r"за \d+\.\d с", "не сказано, сколько заняло")
