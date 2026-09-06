@@ -31,6 +31,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core.provider import canonical_country, canonical_gender
 from core.streamer import StreamLoader
 
 # Столько строк пишем во временный файл. Достаточно, чтобы полное чтение
@@ -312,8 +313,21 @@ class TestStreamingStaysLazy(unittest.TestCase):
         source = [{"type": "file", "path": self.path}]
         _email, data = next(StreamLoader(source).stream_emails())
         self.assertEqual(data.get("name"), SAMPLE_NAMES[0])
-        self.assertEqual(data.get("gender"), SAMPLE_GENDERS[0])
-        self.assertEqual(data.get("country"), SAMPLE_COUNTRIES[0])
+        # Пол и страна приводятся к одному написанию ещё в загрузчике.
+        # Значение при этом не выдумывается: `female` и `US` из файла — это
+        # ровно «Женский» и «США», просто записанные так же, как их называют
+        # предиктор и домен. Без приведения в фильтре окна получались четыре
+        # кучки по стране вместо одной (ЗАМЕРЕНО на базе владельца: USA
+        # 314 561, united states 66 536, United States 5 096) и девять по
+        # полу вместо двух.
+        self.assertEqual(data.get("gender"),
+                         canonical_gender(SAMPLE_GENDERS[0]))
+        self.assertEqual(data.get("country"),
+                         canonical_country(SAMPLE_COUNTRIES[0]))
+        # Явные значения рядом с выводом функции: иначе проверка стала бы
+        # тавтологией и молчала бы, если приведение сломается целиком.
+        self.assertEqual(data.get("gender"), "Женский")
+        self.assertEqual(data.get("country"), "США")
 
     def test_plain_list_without_extra_columns_also_works(self):
         handle, path = tempfile.mkstemp(suffix=".txt")
