@@ -364,17 +364,22 @@ class TestДвеСобаки(unittest.TestCase):
     битой строкой и получают ВИДИМЫЙ отказ синтаксиса.
     """
 
-    def test_два_адреса_через_решётку_дают_два_адреса(self):
+    def test_из_двух_адресов_остаётся_один(self):
+        """РЕШЕНИЕ ИЗМЕНЕНО ВЛАДЕЛЬЦЕМ 06.09.2026.
+
+        Раньше строка отдавала оба адреса — второй не терялся, но человек
+        получал два письма. Теперь остаётся один, приоритетный: выбор и его
+        обоснование проверяются в tests/test_dedup_glue.py.
+        """
         выдано = выдача(
             ГОЛОВА + "\nmaria.fultz@precon.com # mariafultz@pcdci.com,"
             "maria,female,united states")
-        self.assertEqual(len(выдано), 12)
-        self.assertEqual([п for п, _ in выдано[10:]],
-                         ["maria.fultz@precon.com", "mariafultz@pcdci.com"])
-        for _, данные in выдано[10:]:
-            self.assertEqual(данные["name"], "maria")
-            self.assertEqual(данные["gender"], "Женский")
-            self.assertEqual(данные["country"], "США")
+        self.assertEqual(len(выдано), 11)
+        почта, данные = выдано[-1]
+        self.assertEqual(почта, "maria.fultz@precon.com")
+        self.assertEqual(данные["name"], "maria")
+        self.assertEqual(данные["gender"], "Женский")
+        self.assertEqual(данные["country"], "США")
 
     def test_склеенные_вплотную_остаются_одной_битой_строкой(self):
         """Резать их значило бы ВЫДУМАТЬ адрес, а не восстановить."""
@@ -504,9 +509,12 @@ class TestФайлВладельцаПослеДолга(unittest.TestCase):
     четыре починенных домена, `Great Britain` и `Germany`.
     """
 
-    ВСЕГО_АДРЕСОВ = 417083
-    СТРАН_НЕ_МЕНЬШЕ = 390527
-    ПОЛОВ_НЕ_МЕНЬШЕ = 20605
+    # Пересчитано 06.09.2026: владелец распорядился оставлять один адрес
+    # на человека, и 4 350 вторых адресов ушли вместе со своими строками
+    # данных. См. tests/test_dedup_glue.py.
+    ВСЕГО_АДРЕСОВ = 412733
+    СТРАН_НЕ_МЕНЬШЕ = 386179
+    ПОЛОВ_НЕ_МЕНЬШЕ = 16928
 
     @classmethod
     def setUpClass(cls):

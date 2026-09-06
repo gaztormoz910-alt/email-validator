@@ -4,7 +4,7 @@ import re
 from core.email_syntax import (harvest_pattern, validate_email_syntax,
                                _lower_domain_only)
 from core.inputnorm import normalize_input, split_addresses
-from core.provider import canonical_country, canonical_gender
+from core.provider import best_address, canonical_country, canonical_gender
 
 from core.encoding import open_text
 
@@ -946,6 +946,8 @@ class StreamLoader:
                 continue
 
             first_line = True
+            свёрнуто = 0        # отсеяно адресов
+            строк_с_группой = 0  # в скольких строках была группа
             try:
                 for line in lines_iter:
                     line = line.strip()
@@ -977,11 +979,24 @@ class StreamLoader:
                     # ровно то, что загрузчик отдал.
                     несколько = split_addresses(line)
                     if len(несколько) > 1:
+                        готовые = []
                         for один in несколько:
                             готовый = _lower_domain_only(
                                 clean_input_line_fast(один).strip())
                             if готовый and "@" in готовый:
-                                yield готовый, dict(data)
+                                готовые.append(готовый)
+                        if готовые:
+                            # Несколько адресов в ОДНОЙ строке — это один
+                            # человек, а не несколько. Раньше отдавались все,
+                            # и он получал столько писем, сколько у него
+                            # ящиков: дедуп их не схлопывает, адреса-то
+                            # разные. По решению владельца от 06.09.2026
+                            # остаётся один, приоритетный (см.
+                            # `address_priority` в core/provider.py).
+                            if len(готовые) > 1:
+                                свёрнуто += len(готовые) - 1
+                                строк_с_группой += 1
+                            yield best_address(готовые), data
                         continue
 
                     # Базовая очистка email.
@@ -1004,6 +1019,14 @@ class StreamLoader:
                     if email and '@' in email:
                         yield email, data
             finally:
+                if свёрнуто:
+                    self._сказать(
+                        "Схлопнуто адресов одного человека: %d (в %d строках "
+                        "стояло по нескольку). Оставлен один, приоритет у "
+                        "крупного почтовика — Gmail и Яндекс отвечают с "
+                        "любого IP, потом Outlook и iCloud, потом Yahoo и "
+                        "AOL, потом корпоративные. Так человек не получит "
+                        "несколько писем." % (свёрнуто, строк_с_группой))
                 # Закрываем файл если открывали
                 if source["type"] == "file" and hasattr(lines_iter, 'close'):
                     lines_iter.close()
