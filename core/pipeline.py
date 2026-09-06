@@ -1719,7 +1719,14 @@ class ValidationPipeline:
         def feeder_thread():
             nonlocal duplicates_skipped, queued_count, already_done
             from core.streamer import StreamLoader
-            for email, data in StreamLoader(email_sources).stream_emails():
+            # Решения, принятые загрузчиком по форме файла, объявляются в
+            # лог. Единственное такое решение сегодня — отбраковка колонки,
+            # похожей на пароли; отбраковать колонку молча значит лишить
+            # владельца целой колонки данных без единой строки в логе.
+            загрузчик = StreamLoader(
+                email_sources,
+                on_note=lambda текст: self.callbacks['on_log'](текст, "warning"))
+            for email, data in загрузчик.stream_emails():
                 if not self.is_running:
                     break
 
