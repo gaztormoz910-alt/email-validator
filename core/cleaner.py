@@ -67,6 +67,7 @@ _MAILTO_RE = re.compile(r'^\s*mailto:\s*', re.IGNORECASE)
 # RFC 5322. Обратной зависимости нет, цикла не будет.
 from core.email_syntax import domain_literal_ip           # noqa: E402
 from core.email_syntax import has_quoted_local            # noqa: E402
+from core.email_syntax import has_quoted_form             # noqa: E402
 from core.inputnorm import normalize_input                # noqa: E402
 
 
@@ -351,7 +352,30 @@ class EmailCleaner:
             return None
 
         local_part, domain = email.rsplit("@", 1)
-        
+
+        # 0а. Пробел ВНУТРИ адреса. Куски склеиваются в один адрес:
+        # `donald.m ross@yahoo.com` -> `donald.mross@yahoo.com`.
+        #
+        # ЗАМЕРЕНО на файле владельца: 425 таких строк, и ВСЕ 425 не
+        # проходили проверку синтаксиса — то есть до этой правки контакт был
+        # потерян гарантированно, оставался лишь видимый отказ.
+        #
+        # РАЗМЕН НАЗВАН ВЛАДЕЛЬЦУ И ВЫБРАН ИМ 06.09.2026. У `donald.m ross`
+        # три прочтения: `donald.mross`, `donald.m.ross`, `ross`. Склейка
+        # берёт первое, и если верным было другое, письмо уйдёт ЧУЖОМУ
+        # существующему человеку. Он выбрал шанс вместо гарантированной
+        # потери. Исходная строка при этом не теряется: пайплайн запоминает
+        # её в `loaded_as` ДО очистки, и она видна в отчёте.
+        #
+        # Имя ящика В КАВЫЧКАХ не трогаем никогда: там пробел законен по
+        # RFC 5321 §4.1.2 и является частью адреса, а не порчей.
+        if " " in local_part and not has_quoted_form(local_part):
+            local_part = local_part.replace(" ", "")
+        # В домене пробела быть не может физически: метка DNS его не
+        # содержит. Здесь догадки нет вовсе.
+        if " " in domain:
+            domain = domain.replace(" ", "")
+
         # 0. Зачистка левой части (local_part)
         import re
         # Убираем повторяющиеся точки (karl....motiv -> karl.motiv)
