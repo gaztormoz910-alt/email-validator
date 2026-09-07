@@ -139,16 +139,5 @@ class TestDorkCountingIsCheap(unittest.TestCase):
 class TestProxyLoadingIsOffTheMainThread(unittest.TestCase):
     """Чтение прокси при старте парсера обязано уйти в фон."""
 
-    def test_start_parsing_spawns_a_thread(self):
-        import inspect
-        from ui.parser_tab import ParserTabMixin
-        source = inspect.getsource(ParserTabMixin.start_parsing)
-        self.assertIn("threading.Thread", source,
-                      "прокси читаются прямо в обработчике кнопки")
-        self.assertNotIn("dedupe_proxies(list(", source,
-                         "список прокси материализуется целиком")
-        self.assertIn("dedupe_proxies_stream", source)
-
-
 if __name__ == "__main__":
     unittest.main()

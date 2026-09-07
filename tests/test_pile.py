@@ -105,21 +105,6 @@ def test_resume_state_is_wiped_after_a_finished_run():
     assert "state.clear()" in source, "стирание не вызывается"
 
 
-def test_resume_toggle_is_gone_from_the_classic_window_too():
-    """Оба окна одинаковы: тумблера нет ни в одном.
-
-    Расхождение между окнами однажды уже стоило владельцу прогонов — новое
-    окно подавало движку не то, что старое. Поэтому убирать надо в обоих.
-    """
-    panels = read("ui/panels.py")
-    gui = read("ui/gui.py")
-    for имя in ("chk_ai", "chk_osint_val", "chk_resume", "chk_cache"):
-        assert имя not in panels, "тумблер %s вернулся в классическое окно" % имя
-        assert имя not in gui, "классическое окно снова читает %s" % имя
-    assert "resume=" not in gui, (
-        "классическое окно снова передаёт настройку и может её выключить")
-
-
 # ══════════════════════════ P2: SPF у обратных адресов
 
 def test_mail_from_spf_is_measured_for_every_sender():
@@ -453,9 +438,3 @@ def test_two_windows_gap_is_measured_not_guessed():
     assert "двенадцати возможностям" in doc
     assert "запасное окно остаётся" in doc.lower() or "остаётся" in doc
 
-
-def test_classic_window_shows_the_retry_phase_too():
-    """Фаза перепроверки была разрывом — и он закрыт, а не описан."""
-    gui = read("ui/gui.py")
-    assert "'on_phase': self.safe_phase" in gui
-    assert "Перепроверка отложенных" in gui

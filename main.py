@@ -1,14 +1,15 @@
 # main.py
 """Запуск валидатора.
 
-По умолчанию открывается окно на веб-стеке (pywebview поверх WebView2) —
-то же, на чём сделан youtube-parser. Прежнее окно на CustomTkinter никуда не
-делось и запускается флагом --classic: оно покрыто тестами и остаётся
-запасным путём, пока новое не отработает на живых прогонах. Движок проверки
-у обоих один и тот же.
+Окно одно — на веб-стеке (pywebview поверх WebView2), разметка в ui/web.
 
-    python main.py             новое окно
-    python main.py --classic   прежнее окно
+Прежнее окно на CustomTkinter удалено 06.09.2026 по решению владельца: два
+окна на один движок означали две панели настроек, которые молча расходились.
+Живой пример перед удалением: режим определения страны стоял «Точность» в
+одном окне и «Заполненность» в другом, и одна и та же база давала разную
+страну в зависимости от того, каким окном её открыли.
+
+    python main.py
 """
 import os
 import sys
@@ -54,24 +55,13 @@ except Exception:
     pass
 
 
-def run_classic():
-    """Прежнее окно на CustomTkinter."""
-    from ui.gui import ValidatorApp
-
-    app = ValidatorApp()
-    app.safe_log("[INFO] Система успешно инициализирована. Валидатор готов к работе.", "info")
-    app.safe_log("[INFO] Ожидание загрузки базы (.txt)...", "info")
-    app.mainloop()
-
-
 def run_web():
     """Окно на веб-стеке. При отсутствии pywebview честно объясняет, что делать."""
     try:
         import webview  # noqa: F401
     except ImportError:
-        print("Не установлен pywebview — окно на веб-стеке им и рисуется.\n"
-              "Поставьте его командой:\n\n    pip install pywebview\n\n"
-              "или запустите прежнее окно:\n\n    python main.py --classic\n")
+        print("Не установлен pywebview — окно им и рисуется.\n"
+              "Поставьте его командой:\n\n    pip install pywebview\n")
         raise SystemExit(1)
 
     from ui.webapp import run
@@ -89,10 +79,7 @@ def run_web():
 
 
 def main():
-    if "--classic" in sys.argv:
-        run_classic()
-    else:
-        run_web()
+    run_web()
 
 
 if __name__ == "__main__":

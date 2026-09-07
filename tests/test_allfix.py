@@ -486,62 +486,6 @@ def test_backoff_decay_keeps_braking_while_the_server_complains():
 
 # ═══════════════════════════════ G10: запасное окно остаётся рабочим
 
-def test_classic_window_still_starts():
-    """Владелец решил оставить запасное окно — значит, оно обязано жить."""
-    import main
-    from ui.gui import ValidatorApp
-
-    assert callable(main.run_classic)
-    assert callable(getattr(ValidatorApp, "start_validation", None))
-    assert callable(getattr(ValidatorApp, "stop_validation", None))
-
-
-def test_classic_window_feeds_the_engine_the_same_way():
-    """Оба окна обязаны звать движок одинаково.
-
-    Именно расхождение здесь однажды и стоило владельцу прогонов: новое окно
-    подавало конвейеру источники вместо строк прокси, и проверка шла с
-    домашнего адреса.
-    """
-    def kwargs_of(path, marker):
-        tree = ast.parse(io.open(path, encoding="utf-8").read())
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            target = node.func
-            if not isinstance(target, ast.Attribute) or target.attr != "start":
-                continue
-            names = {kw.arg for kw in node.keywords if kw.arg}
-            if marker in names:
-                return names
-        return set()
-
-    classic = kwargs_of(os.path.join(ROOT, "ui", "gui.py"), "email_sources")
-    web = kwargs_of(os.path.join(ROOT, "ui", "webapp.py"), "email_sources")
-    assert classic, "в классическом окне не найден запуск движка"
-    assert classic - web == set(), "классическое окно передаёт лишнее: %s" % (classic - web)
-    # То, что зависит от ПРОГОНА, окна обязаны передавать сами.
-    for required in ("email_sources", "proxies", "threads", "timeout"):
-        assert required in classic and required in web, required
-
-    # А пять настроек качества — наоборот: ни одно окно не должно их
-    # передавать. Они включены значениями по умолчанию в ядре, и любое
-    # окно, снова начавшее их слать, сможет их выключить — ровно то, от
-    # чего владелец избавлялся, убирая тумблеры.
-    for запрещено in ("enable_ai", "enable_osint", "use_cache",
-                      "resume", "confirm_valid"):
-        assert запрещено not in classic, (
-            "классическое окно снова передаёт %s" % запрещено)
-        assert запрещено not in web, "веб-окно снова передаёт %s" % запрещено
-
-
-def test_classic_window_reads_any_encoding_too():
-    """Запасное окно читает базу тем же потоковым читателем."""
-    source = io.open(os.path.join(ROOT, "ui", "gui.py"), encoding="utf-8").read()
-    assert "StreamLoader" in source
-    assert 'errors="ignore"' not in source
-
-
 # ═══════════════════════════════ G12: загрузка базы не подменяет адрес
 
 # Адреса, законные по RFC 5322 §3.2.3, которые прежний образец резал.
@@ -784,14 +728,6 @@ def test_undefined_names_check_can_actually_fail():
     assert "undefined name" in out.getvalue()
 
 
-def test_classic_parser_tab_reads_proxies():
-    """Тот самый случай, названный по имени."""
-    import ui.parser_tab as tab
-
-    source = io.open(tab.__file__, encoding="utf-8").read()
-    assert "from core.streamer import StreamLoader" in source
-
-
 # ═══════════════════════════════ G17: нумерация в начале строки
 
 NUMBERED = [
@@ -824,23 +760,6 @@ def test_numbering_leaves_a_clean_line_alone():
     for line in ("ivan@gmail.com", "1.2.3.4:8080", "1234567890@mail.ru",
                  "site:vk.com @mail.ru"):
         assert clean_input_line_fast(line) == line
-
-
-def test_numbering_has_one_definition_for_the_whole_program():
-    """Копий образца было три, и рабочей — одна.
-
-    Окно чистило вставку своей копией, движок — своей испорченной, а третья
-    лежала в gui.py и не использовалась вовсе.
-    """
-    from core.streamer import clean_input_line_fast
-    from ui.widgets import clean_input_line
-
-    assert clean_input_line("1. ivan@gmail.com") == "ivan@gmail.com"
-    assert clean_input_line.__module__ != clean_input_line_fast.__module__
-    assert clean_input_line("1. ivan@gmail.com") == clean_input_line_fast("1. ivan@gmail.com")
-
-    gui = io.open(os.path.join(ROOT, "ui", "gui.py"), encoding="utf-8").read()
-    assert "CLEAN_PREFIX_RE = re.compile" not in gui
 
 
 def test_numbering_survives_a_whole_numbered_file():
