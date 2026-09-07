@@ -90,6 +90,3 @@ class Throttle:
                 return True
             return False
 
-    def reset(self):
-        with self._lock:
-            self._last = None

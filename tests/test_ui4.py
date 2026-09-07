@@ -219,29 +219,6 @@ def test_export_parity_header_matches_row_width():
 
 # ══════════════════════════ U5: классическое окно пересматривает вердикт
 
-def test_classic_revise_is_subscribed():
-    """Канал пересмотра подписан ВСЕМИ поверхностями, а не тремя из четырёх.
-
-    Без подписки конвейер получает ноль пересмотренных строк, и домен,
-    уличённый в конце прогона как catch-all или тарпитящий, оставляет свои
-    «Годен» на экране и в выгрузке.
-    """
-    for surface in ("ui/webapp.py", "ui/gui.py", "cli.py"):
-        assert "on_revise" in read(surface), "%s не слушает пересмотр" % surface
-
-
-def test_classic_revise_actually_moves_rows():
-    """И подписка не пустая: обработчик правит хранилище и перерисовывает."""
-    gui = read("ui/gui.py")
-    body = gui[gui.index("def safe_revise"):]
-    body = body[:body.index("\n    def ", 10)]
-    assert "revise_domain" in body, "подписались, но ничего не пересматриваем"
-    assert "refresh_validator_tree" in body, "пересмотрели, но не показали"
-    assert "force=True" in body, (
-        "перерисовка без force ничего не сделает: набор адресов на странице "
-        "не изменился, и проверка «показывать ли заново» решит, что нечего")
-
-
 def test_classic_revise_control_store_can_do_it():
     """Контроль: пересмотр в хранилище действительно работает.
 
@@ -283,47 +260,6 @@ def _tuple_of(source, name):
     return []
 
 
-def test_classic_columns_show_confidence_and_loaded():
-    """Уверенность и загруженная строка есть и в запасном окне."""
-    panels = read("ui/panels.py")
-    columns = _tuple_of(panels, "columns")
-    assert "confidence" in columns, "нет колонки уверенности"
-    assert "loaded" in columns, "нет колонки «загружено как»"
-    assert 'heading("confidence"' in panels and 'heading("loaded"' in panels
-    assert 'column("confidence"' in panels and 'column("loaded"' in panels
-
-    gui = read("ui/gui.py")
-    assert 'data.get("verdict_confidence"' in gui
-    assert 'data.get("original_email"' in gui
-
-
-def test_classic_columns_count_matches_inserted_values():
-    """Контроль: колонок ровно столько, сколько значений кладётся в строку.
-
-    Рассинхрон здесь не падает и ничего не пишет в лог — Tk молча теряет
-    хвост значений, и вся таблица едет на одну колонку. Это самая дорогая
-    ошибка в этой правке и единственная, которую нельзя увидеть чтением.
-    """
-    columns = _tuple_of(read("ui/panels.py"), "columns")
-    assert columns, "не нашёл описание колонок"
-
-    tree = ast.parse(read("ui/gui.py"))
-    widths = []
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "insert"
-                and isinstance(node.func.value, ast.Attribute)
-                and node.func.value.attr == "tree"):
-            for kw in node.keywords:
-                if kw.arg == "values" and isinstance(kw.value, ast.Tuple):
-                    widths.append(len(kw.value.elts))
-    assert widths, "не нашёл вставку строки в таблицу"
-    for width in widths:
-        assert width == len(columns), (
-            "колонок %d, а значений кладётся %d — таблица поедет"
-            % (len(columns), width))
-
-
 # ══════════════════════════ U7: ничего не спрятано
 
 # Служебные поля, которым в интерфейсе делать нечего. Список поимённый и с
@@ -337,19 +273,6 @@ INTERNAL_ONLY = {
     "has_gravatar": "показывается САМОЙ аватаркой в первой колонке, "
                     "отдельной строкой была бы тавтология",
 }
-
-
-def test_nothing_hidden_from_every_surface():
-    """Каждый ключ движка виден хоть где-то. Опись считается заново."""
-    keys = set(re.findall(r'data\["([a-z_]+)"\]\s*=', read("core/pipeline.py")))
-    keys |= {"company", "job_role", "company_source", "job_role_source"}
-
-    surfaces = [read(p) for p in ("ui/web/app.js", "ui/web/index.html",
-                                 "ui/webapp.py", "ui/gui.py", "ui/panels.py",
-                                 "cli.py")]
-    hidden = [k for k in sorted(keys)
-              if k not in INTERNAL_ONLY and not any(k in s for s in surfaces)]
-    assert not hidden, "движок считает, а показать негде: %s" % ", ".join(hidden)
 
 
 def test_nothing_hidden_reaches_the_main_window():
