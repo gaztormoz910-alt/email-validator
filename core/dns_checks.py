@@ -31,6 +31,7 @@ import dns.reversename
 
 from core.dns_resolver import DNSUnavailable, ProxiedResolver
 from core.email_syntax import to_ascii_domain
+from core.mxguard import is_ip_literal
 from core.mail_constants import (DNSBL_ZONES, SPAMHAUS_ZONE,
                                  SPAMHAUS_SANITY_LISTED, SPAMHAUS_SANITY_CLEAN,
                                  _dkim_selectors_for)
@@ -399,6 +400,79 @@ class DnsChecksMixin:
             except Exception:
                 return False          # не ответило — значит не wildcard
         return True
+
+    def mx_hosts_alive(self, hosts):
+        """Существуют ли хосты, названные в MX-записях домена.
+
+        True  — хотя бы один хост резолвится, идём проверять почту как обычно;
+        False — ВСЕ хосты ответили NXDOMAIN: почту домен принять не может;
+        None  — выяснить не удалось, вывода нет.
+
+        ЗАЧЕМ. MX-запись живёт в DNS отдельно от сервера, на который
+        указывает. Домен съезжает с Microsoft 365, подписку закрывают, хост
+        `x-com.mail.protection.outlook.com` перестаёт существовать — а запись
+        остаётся. Такой домен выглядел «живым»: MX есть, значит идём стучаться,
+        не достучались, «не проверено». ЗАМЕРЕНО на 300 редких доменах базы
+        владельца: 3 домена (1.0%) именно такие, и NXDOMAIN у них
+        подтверждается тремя запросами подряд при живом контроле.
+
+        ТРИ СОСТОЯНИЯ, А НЕ ДВА, И ЭТО ГЛАВНОЕ. `NXDOMAIN` — это ответ
+        сервера «такого имени нет», факт. Таймаут и SERVFAIL — это НАША
+        неудача. Свести их в одно значило бы хоронить живые домены при каждом
+        сбое DNS, то есть купить точность ценой ложных приговоров.
+        """
+        # Мусор на входе — «не знаю», а не падение: метод зовётся на каждом
+        # домене базы, и исключение отсюда проглотил бы except уровнем выше.
+        # Домен молча уехал бы в «не проверено», а причину было бы не найти.
+        if not isinstance(hosts, (list, tuple, set)) or not hosts:
+            return None
+        все_нет = True
+        хоть_что_то_спросили = False
+        for host in hosts:
+            if not isinstance(host, str) or not host.strip():
+                continue
+            имя = host.strip().rstrip(".")
+            # Голый адрес вместо имени резолвить не нужно и нечего.
+            if is_ip_literal(имя):
+                return True
+            with self._mx_host_lock:
+                if имя in self._mx_host_cache:
+                    известно = self._mx_host_cache[имя]
+                else:
+                    известно = "?"
+            if известно == "?":
+                известно = self._resolve_mx_host(имя)
+                if известно != "?":
+                    with self._mx_host_lock:
+                        self._mx_host_cache[имя] = известно
+            if известно == "есть":
+                return True
+            if известно == "нет":
+                хоть_что_то_спросили = True
+            else:
+                все_нет = False        # не спросили — вывода делать нельзя
+        if все_нет and хоть_что_то_спросили:
+            return False
+        return None
+
+    def _resolve_mx_host(self, имя):
+        """«есть» | «нет» (NXDOMAIN) | «?» (не выяснили). Тихо, без исключений."""
+        for тип in ("A", "AAAA"):
+            try:
+                ответ = self.resolver.resolve(имя, тип)
+                if ответ:
+                    return "есть"
+            except dns.resolver.NXDOMAIN:
+                return "нет"
+            except dns.resolver.NoAnswer:
+                pass                   # имя есть, записи такого типа нет
+            except Exception:
+                return "?"             # таймаут, SERVFAIL, прокси — не знаем
+        # Имя существует, но ни A, ни AAAA у него нет: подключиться некуда,
+        # однако это НЕ «имени нет». Оставляем «не выяснили» — приговор здесь
+        # был бы построен на отсутствии записи, а не на ответе «такого имени
+        # не существует», и это разные вещи.
+        return "?"
 
     def get_mx_records(self, domain: str):
         """Ищет MX-записи домена, с фоллбэком на A и AAAA (RFC 5321, п.1.4).

@@ -64,7 +64,9 @@ def test_mx_private_the_hole_is_closed_end_to_end():
 
     Именно этот сценарий давал `valid` до правки — замерено прогоном.
     """
-    цель = "kto-ugodno@zloy-domen.test"
+    # Зона .com, а не .test: по зарезервированной зоне валидатор
+    # выносит приговор раньше, и до проверки MX дело не дошло бы.
+    цель = "kto-ugodno@zloy-domen-t.com"
     куда = []
 
     class Сервер(object):
