@@ -127,38 +127,6 @@ class TestGuiLoad(unittest.TestCase):
         with io.open(path, encoding="utf-8") as handle:
             return handle.read()
 
-    def test_gui_load_counting_helper_runs_in_thread(self):
-        from ui.gui import ValidatorApp
-        source = inspect.getsource(ValidatorApp._count_lines_async)
-        self.assertIn("threading.Thread", source,
-                      "подсчёт строк идёт в главном потоке — окно замрёт")
-        # _ui_call — это self.after с защитой от закрытого окна (см. ui/gui.py).
-        # Проверка на «результат уходит в поток интерфейса», а не на конкретное
-        # написание: прямой after() тут тоже был бы верен, просто хуже.
-        self.assertTrue("self._ui_call" in source or "self.after" in source,
-                        "результат подсчёта не возвращается в поток интерфейса")
-
-    def test_gui_load_no_synchronous_counting_left(self):
-        """Ни один обработчик не зовёт count_total_lines напрямую."""
-        source = self._gui_source()
-        # Контроль: сам помощник в файле есть, значит ищем в нужном месте
-        self.assertIn("_count_lines_async", source)
-        offenders = [line.strip() for line in source.splitlines()
-                     if "count_total_lines()" in line
-                     and "total = StreamLoader" not in line
-                     and not line.strip().startswith("#")
-                     and "Зачем фон" not in line]
-        self.assertEqual(offenders, [],
-                         "остался синхронный подсчёт строк: " + str(offenders))
-
-    def test_gui_load_shows_progress_placeholder(self):
-        """Пока идёт счёт, пользователь видит, что происходит."""
-        from ui.gui import ValidatorApp
-        source = inspect.getsource(ValidatorApp._count_lines_async)
-        self.assertIn("считаю", source,
-                      "во время подсчёта подпись пустая — выглядит как зависание")
-
-
 class TestMemory(unittest.TestCase):
     """Память на большом входе измеряется, а не декларируется."""
 

@@ -27,7 +27,6 @@ pip install -r requirements-dev.txt
 | Команда | Что делает |
 |---|---|
 | `python main.py` | окно на веб-стеке (pywebview + WebView2) — основной интерфейс |
-| `python main.py --classic` | прежнее окно на CustomTkinter, запасное |
 | `python cli.py validate --emails base.txt --proxies socks5.txt -o out.csv` | проверка без окна |
 
 Командная строка умеет и операции с базами без проверки:
@@ -125,7 +124,7 @@ python -m pytest
 | Каталог | Что внутри |
 |---|---|
 | `core/` | движок: SMTP-диалог, DNS, прокси, скоринг, обогащение, парсер дорков |
-| `ui/` | оба окна: `webapp.py` + `web/` (основное), `gui.py` + `panels.py` (запасное) |
+| `ui/` | окно: `webapp.py` + разметка в `web/` |
 | `api/` | локальный HTTP-API |
 | `tools/` | вспомогательные скрипты (запуск гейтов, калибровка скоринга) |
 | `tests/` | набор проверок |

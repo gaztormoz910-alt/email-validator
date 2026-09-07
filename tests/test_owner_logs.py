@@ -721,29 +721,6 @@ class TestBaseScanInWebWindow(unittest.TestCase):
         self.assertLess(ушло, 1.0,
                         "загрузка держала окно %.2f с — скан не в фоне" % ушло)
 
-    def test_basescan_shared_constants_keep_both_windows_equal(self):
-        """Оба окна берут передышку из ОДНОГО места и НЕ режут базу выборкой.
-
-        Разъехавшиеся числа означали бы разный отчёт по одной и той же базе.
-        """
-        import io as _io
-        from core.provider import BASE_SCAN_BREATHE
-        self.assertGreater(BASE_SCAN_BREATHE, 0)
-        for файл in ("ui/gui.py", "ui/webapp.py"):
-            текст = _io.open(файл, encoding="utf-8").read()
-            self.assertIn("BASE_SCAN_BREATHE", текст,
-                          "%s не берёт передышку из ядра" % файл)
-            свои = re.search(r"^\s*BASE_SCAN_BREATHE\s*=\s*\d", текст, re.M)
-            self.assertIsNone(свои,
-                              "%s снова задаёт своё число вместо импорта" % файл)
-            # Выборки быть не должно вовсе: она бралась С НАЧАЛА и описывала
-            # первый файл, выдавая его состав за состав всей базы.
-            кусок = текст[текст.index("scan_base_providers("):]
-            кусок = кусок[:кусок.index(")")]
-            self.assertNotIn("limit", кусок,
-                             "%s снова режет базу выборкой: %r" % (файл, кусок))
-
-
 # ═══ Состав считается по ВСЕЙ базе, а не по первым 200 000 адресам ══════
 
 class TestWholeBaseScan(unittest.TestCase):

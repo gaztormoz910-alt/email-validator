@@ -209,8 +209,11 @@ def test_hooks_are_armed_at_startup():
     with io.open(os.path.join(ROOT, "main.py"), encoding="utf-8") as handle:
         source = handle.read()
     assert "install_hooks" in source
-    assert source.index("install_hooks") < source.index("def run_classic"), (
-        "перехватчики ставятся позже загрузки интерфейсов")
+    # Раньше сравнивалось с `def run_classic` — этой функции больше нет.
+    # Смысл тот же: перехватчики обязаны стоять ДО функции, которая
+    # поднимает окно, иначе сбой при загрузке модулей следа не оставит.
+    assert source.index("install_hooks") < source.index("def run_web"), (
+        "перехватчики ставятся позже загрузки интерфейса")
 
 
 # ══════════════════════════ C3: мост

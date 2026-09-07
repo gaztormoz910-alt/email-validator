@@ -249,7 +249,20 @@ def check_requirements():
         return False
     with open(path, encoding="utf-8") as handle:
         text = handle.read().lower()
-    return all(name in text for name in ("dnspython", "pysocks", "customtkinter"))
+    return all(name in text for name in ("dnspython", "pysocks", "pywebview"))
+
+
+def check_web_counting_is_background():
+    """Подсчёт строк в веб-окне идёт в фоне, а не в обработчике.
+
+    Пришла на смену двум проверкам старого окна, удалённого 06.09.2026:
+    сторожили они не разметку, а ядро — что чтение гигантского файла не
+    держит окно.
+    """
+    import inspect
+    from ui import webapp
+    source = inspect.getsource(webapp)
+    return "threading.Thread" in source and "count_total_lines" in source
 
 
 # --- проверки ОТКРЫТЫХ изъянов ----------------------------------------------
@@ -336,7 +349,7 @@ def open_monoliths():
     def lines(rel):
         with open(os.path.join(ROOT, *rel.split("/")), "rb") as handle:
             return handle.read().count(b"\n")
-    return lines("core/network.py") > 1500 and lines("ui/gui.py") > 1500
+    return lines("core/network.py") > 1500 and lines("core/pipeline.py") > 1500
 
 
 def open_rest_api():
@@ -446,25 +459,6 @@ def check_lazy_proxy_input():
     return checker.total == 0 and getattr(AsyncProxyChecker, "QUEUE_HEADROOM", 0) > 0
 
 
-def check_gui_sync_counting():
-    """Подсчёт строк ушёл в фон, синхронных вызовов не осталось."""
-    import inspect
-    from ui.gui import ValidatorApp
-    helper = inspect.getsource(ValidatorApp._count_lines_async)
-    if "threading.Thread" not in helper or "self.after" not in helper:
-        return False
-    source = inspect.getsource(sys.modules["ui.gui"])
-    offenders = [line for line in source.splitlines()
-                 if "count_total_lines()" in line
-                 and "total = StreamLoader" not in line
-                 and not line.strip().startswith("#")
-                 and "Зачем фон" not in line]
-    return not offenders
-
-
-
-
-# --- Изъяны, закрытые в третьем круге работ ---------------------------------
 
 def check_smtp_enhanced_codes():
     """Расширенный код RFC 3463 решает вердикт, а не украшает причину."""
@@ -560,21 +554,6 @@ def check_result_store_memory():
         tracemalloc.stop()
     return peak / rows < 100        # байт на строку; словарями было бы ~480
 
-
-def check_gui_preview_full_read():
-    """Предпросмотр обрывается на потолке и не читает файл целиком."""
-    import inspect
-    from ui.gui import ValidatorApp
-    source = inspect.getsource(ValidatorApp._attach_sources)
-    if "break" not in source or "PREVIEW_LINES" not in source:
-        return False
-    if "threading.Thread" not in source:
-        return False
-    for name in ("load_file", "load_proxies"):
-        body = inspect.getsource(getattr(ValidatorApp, name))
-        if "StreamLoader" in body:
-            return False
-    return True
 
 
 def check_blocking_precount():
@@ -676,7 +655,6 @@ CLOSED_CHECKS = {
     "local_part_rules": check_local_part_rules,
     "junk_stripping": check_junk_stripping,
     "lazy_proxy_input": check_lazy_proxy_input,
-    "gui_sync_counting": check_gui_sync_counting,
     "smtp_enhanced_codes": check_smtp_enhanced_codes,
     "false_valid_substring": check_false_valid_substring,
     "code_551_553": check_code_551_553,
@@ -685,7 +663,7 @@ CLOSED_CHECKS = {
     "names_table_behind_ai_flag": check_names_table_behind_ai_flag,
     "scoring_status_vocabulary": check_scoring_status_vocabulary,
     "result_store_memory": check_result_store_memory,
-    "gui_preview_full_read": check_gui_preview_full_read,
+    "web_counting_is_background": check_web_counting_is_background,
     "blocking_precount": check_blocking_precount,
     "parser_ram_dedup": check_parser_ram_dedup,
     "export_materialisation": check_export_materialisation,

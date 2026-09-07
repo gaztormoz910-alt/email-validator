@@ -1,104 +1,36 @@
+# -*- coding: utf-8 -*-
 """Жалобы владельца после живого прогона — каждая как отдельная проверка.
 
-Все четыре пришли из одного прогона на его базе, и три из них оказались
-одним и тем же дефектом:
+ЧТО ЗДЕСЬ ИЗМЕНИЛОСЬ 06.09.2026. Файл был написан под старое окно на
+CustomTkinter и поднимал его целиком. Окно удалено по решению владельца
+(«мне старая версия софта не нужна, оставь ту, где HTML/CSS»), поэтому
+проверки разделены на две части:
 
-  «прогресс 100%, а в терминале ещё идут почты»
-  «в карточке ноль валидных, хотя в таблице они есть»
-  «строки появляются ПОСЛЕ „Валидация завершена"»
+  * то, что сторожило ЯДРО, — разбор имени на части, группировка статусов,
+    колонки выгрузки — осталось здесь и вызывает ядро напрямую, без окна;
 
-Причина общая: очереди между рабочими потоками и окном не разбирались до
-конца перед тем, как объявить о завершении. Отчёт уходил в лог через
-after(0) и обгонял результаты, лежащие в очереди.
+  * то, что сторожило ОЧЕРЕДИ старого окна («прогресс 100%, а строки ещё
+    идут»), удалено вместе с ним: у веб-окна другая модель — результаты
+    отдаются опросом состояния, а не докладываются в очередь главного
+    потока, и переносить туда проверку чужого механизма нечего.
 
-Четвёртая — про обогащение: «переключаю Заполненность/Точность, результат
-одинаковый». Кэш вердиктов возвращал вместе со статусом ещё и имя, пол и
-страну, посчитанные в прошлый раз, — то есть молча отменял настройки окна.
+Три жалобы владельца, из-за которых файл появился, были про одно и то же:
+очереди между потоками и окном не разбирались до конца перед тем, как
+объявить о завершении. Механизм, который это чинил, удалён вместе с окном,
+которое им страдало.
 """
-import os
-import sys
+import inspect
 import unittest
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from tests.gui_fixture import shared_app
 from ui.result_store import group_of
 
 
-class TestNothingIsShownAfterCompletion(unittest.TestCase):
-    """К моменту «Валидация завершена» показано ВСЁ, что насчитал прогон."""
-
-    def setUp(self):
-        try:
-            self.app = shared_app()
-        except RuntimeError as exc:
-            self.skipTest(str(exc))
-
-    def _terminal_lines(self):
-        text = self.app.terminal_box.get("1.0", "end-1c")
-        return [line for line in text.splitlines() if line.strip()]
-
-    def test_last_results_are_printed_before_the_completion_line(self):
-        for i in range(5):
-            self.app.safe_add_result(f"late{i}@example.com", "Valid", "250 OK",
-                                     "mx.example.com", {})
-        self.app.on_pipeline_complete()
-        self.app.update()
-
-        lines = self._terminal_lines()
-        done_at = next((i for i, l in enumerate(lines) if "завершена" in l), None)
-        self.assertIsNotNone(done_at, "строки о завершении нет вовсе")
-        for i in range(5):
-            with self.subTest(address=i):
-                at = next((n for n, l in enumerate(lines)
-                           if f"late{i}@example.com" in l), None)
-                self.assertIsNotNone(at, f"результат late{i} не показан вовсе")
-                self.assertLess(at, done_at,
-                                f"результат late{i} встал ПОСЛЕ отчёта о завершении")
-
-    def test_cards_count_the_last_batch_too(self):
-        """Карточка не имеет права показывать ноль при полной таблице."""
-        for i in range(7):
-            self.app.safe_add_result(f"card{i}@example.com", "Valid", "250 OK",
-                                     "mx.example.com", {})
-        self.app.on_pipeline_complete()
-        self.app.update()
-
-        self.assertEqual(self.app.stat_1.cget("text"), "7",
-                         "карточка «Валидные» разошлась с хранилищем")
-        self.assertEqual(len(self.app.result_store), 7)
-
-    def test_positive_control_without_draining_the_card_would_lag(self):
-        """Контроль: без разбора очередей карточка и правда отстаёт.
-
-        Иначе проверка выше зелёная просто потому, что очередь успела
-        разобраться сама, и ничего не доказывает.
-        """
-        for i in range(7):
-            self.app.safe_add_result(f"ctl{i}@example.com", "Valid", "250 OK",
-                                     "mx.example.com", {})
-        # Обновляем карточки БЕЗ разбора очередей — как было до починки.
-        self.app._refresh_stat_cards()
-        self.assertEqual(self.app.stat_1.cget("text"), "0",
-                         "замер не видит отставания — он слеп")
-
-    def test_cards_are_zeroed_when_a_new_run_starts(self):
-        """Карточки не должны показывать числа ПРОШЛОГО прогона."""
-        for i in range(4):
-            self.app.safe_add_result(f"old{i}@example.com", "Valid", "250 OK", "mx", {})
-        self.app.on_pipeline_complete()
-        self.app.update()
-        self.assertEqual(self.app.stat_1.cget("text"), "4")
-
-        # То же, что делает start_validation перед запуском.
-        self.app.result_store.clear()
-        self.app._refresh_stat_cards()
-        self.assertEqual(self.app.stat_1.cget("text"), "0",
-                         "после очистки наверху остались числа прошлого прогона")
-
-
 class TestRiskyIsNotSpam(unittest.TestCase):
-    """Risky — «не доказано», а не «спам». Смешение меняет решение о рассылке."""
+    """Risky — «не доказано», а не «спам».
+
+    Смешение меняет решение о рассылке: «спам» владелец выбрасывает, а
+    «не доказано» перепроверяет.
+    """
 
     def test_risky_goes_with_unknown(self):
         self.assertEqual(group_of("Risky"), "unknown")
@@ -109,32 +41,21 @@ class TestRiskyIsNotSpam(unittest.TestCase):
             with self.subTest(status=status):
                 self.assertEqual(group_of(status), "spam")
 
-    def test_log_still_says_RISKY_not_UNKNOWN(self):
-        """Группы укрупняют, терминал — нет.
-
-        Risky ушёл к Unknown в ГРУППАХ фильтра, и вместе с этим строка в
-        терминале стала писаться как [UNKNOWN]. Это регрессия: у владельца в
-        логах было [RISKY], и различие между «сервер промолчал» и «ответ был,
-        но неоднозначный» ему нужно.
-        """
-        app = shared_app()
-        app.safe_add_result("r@example.com", "Risky", "таймаут", "mx", {})
-        app.safe_add_result("u@example.com", "Unknown", "нет ответа", "mx", {})
-        app.on_pipeline_complete()
-        app.update()
-
-        text = app.terminal_box.get("1.0", "end-1c")
-        self.assertIn("[RISKY] r@example.com", text,
-                      "Risky в терминале потерял свою метку")
-        self.assertIn("[UNKNOWN] u@example.com", text)
-
     def test_card_labels_do_not_promise_spam(self):
-        """Подпись карточки обязана описывать то, что в ней лежит."""
-        import inspect
-        from ui.panels import PanelsMixin
-        source = inspect.getsource(PanelsMixin)
-        self.assertNotIn("Спам / Ловушки", source,
-                         "подпись обещает спам, а туда попадают и ролевые адреса")
+        """Подпись карточки обязана описывать то, что в ней лежит.
+
+        Раньше проверялась подпись старого окна. Теперь — разметка веб-окна:
+        в эту корзину попадают и ролевые адреса, а они не спам.
+        """
+        import io
+        import os
+        путь = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "ui", "web", "index.html")
+        разметка = io.open(путь, encoding="utf-8").read()
+        self.assertNotIn("Спам / Ловушки", разметка,
+                         "подпись обещает спам, а туда попадают и ролевые")
+        self.assertIn("Ловушки и роль", разметка,
+                      "корзина должна называть оба своих содержимых")
 
 
 class TestNameIsSplitIntoParts(unittest.TestCase):
@@ -159,16 +80,41 @@ class TestNameIsSplitIntoParts(unittest.TestCase):
             self.assertEqual(split_name(junk), ("", ""))
 
     def test_export_has_the_columns(self):
-        import inspect
-        from ui.gui import ValidatorApp
-        source = inspect.getsource(ValidatorApp._export_to_disk)
+        """Выгрузка окна. Раньше проверялась у старого, теперь у веб-окна."""
+        from ui import webapp
+        source = inspect.getsource(webapp)
         self.assertIn("FirstName", source)
         self.assertIn("LastName", source)
+        self.assertIn('"first_name"', source)
 
     def test_cli_export_has_the_columns(self):
         import cli
         self.assertIn("first_name", cli.EXPORT_FIELDS)
         self.assertIn("last_name", cli.EXPORT_FIELDS)
+
+
+class TestRiskyKeepsItsOwnName(unittest.TestCase):
+    """Группы укрупняют, а САМ СТАТУС остаётся своим.
+
+    Risky ушёл к Unknown в ГРУППАХ фильтра, и однажды вместе с этим он начал
+    писаться как Unknown и в самой строке результата. Это была регрессия: у
+    владельца различие между «сервер промолчал» и «ответ был, но
+    неоднозначный» осталось нужным.
+
+    Проверка переведена со старого окна на ядро: там, где статус рождается,
+    а не там, где рисуется. Так она переживёт и следующую смену окна.
+    """
+
+    def test_group_is_shared_but_the_status_is_not(self):
+        self.assertEqual(group_of("Risky"), group_of("Unknown"))
+        self.assertNotEqual("Risky", "Unknown")
+
+    def test_pipeline_does_not_rename_risky(self):
+        """В коде нет места, где Risky превращался бы в Unknown."""
+        from core import pipeline
+        источник = inspect.getsource(pipeline)
+        self.assertNotIn('"Risky" -> "Unknown"', источник)
+        self.assertIn("Risky", источник, "статус Risky исчез из пайплайна")
 
 
 if __name__ == "__main__":

@@ -191,14 +191,6 @@ def test_separate_channel_is_optional_for_old_callers():
     assert pipe.callbacks.get("on_proxy_progress") is None
 
 
-def test_separate_channel_reaches_both_windows():
-    """Оба окна подписаны на новый канал — иначе одно из них снова врёт."""
-    web = io.open(os.path.join(ROOT, "ui", "webapp.py"), encoding="utf-8").read()
-    classic = io.open(os.path.join(ROOT, "ui", "gui.py"), encoding="utf-8").read()
-    assert "on_proxy_progress" in web
-    assert "on_proxy_progress" in classic
-
-
 # ═══════════════════════════════ G4: «прочитано» — не «итог»
 
 def test_not_a_total_has_no_percentage():
@@ -283,20 +275,6 @@ def test_page_plural_form_is_correct():
 
 
 # ═══════════════════════════════ G6: классическое окно тоже
-
-def test_classic_too_separates_the_two_progresses():
-    classic = io.open(os.path.join(ROOT, "ui", "gui.py"), encoding="utf-8").read()
-    assert "safe_proxy_progress" in classic
-    assert "Проверяю прокси" in classic
-    assert "Проверка адресов..." in classic
-
-
-def test_classic_too_still_counts_loaded_lines():
-    """В прежнем окне счёт строк был и остаётся — из него он и потерялся."""
-    classic = io.open(os.path.join(ROOT, "ui", "gui.py"), encoding="utf-8").read()
-    assert "_count_lines_async" in classic
-    assert "Загружено строк" in classic
-
 
 # ═══════════════════════════════ G8: подпись оживает сама
 

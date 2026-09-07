@@ -391,7 +391,9 @@ def test_readme_commands_actually_exist():
     """Каждая обещанная команда должна существовать в коде."""
     assert os.path.exists(os.path.join(ROOT, "main.py"))
     assert os.path.exists(os.path.join(ROOT, "cli.py"))
-    assert "--classic" in read("main.py"), "флага --classic нет в точке входа"
+    # Флага --classic больше нет: старое окно удалено 06.09.2026, окно одно.
+    assert "--classic" not in read("main.py"), (
+        "старое окно удалено, а флаг остался — обещание без реализации")
 
     cli = read("cli.py")
     for sub in ("validate", "subtract", "merge", "intersect"):
