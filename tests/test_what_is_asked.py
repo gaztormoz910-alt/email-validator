@@ -28,7 +28,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.canary import CANARY_MARK              # noqa: E402
 from core.network import NetworkValidator        # noqa: E402
 
-ЗАГРУЖЕНО = "sachinjaiswal.ca@corp-example.test"
+# Домен выдуманный, но зона у него НАСТОЯЩАЯ (.com), а не `.test`.
+#
+# Раньше здесь стояло `corp-example.test`, и это было верно по RFC 2606 —
+# зона `.test` для того и зарезервирована. Но 06.09.2026 валидатор научился
+# выносить по таким зонам честный приговор «домена нет и быть не может», и
+# проверка перестала доходить до того, что она на самом деле сторожит:
+# спрашиваем ли мы у сервера ИМЕННО ЗАГРУЖЕННЫЙ адрес. Сеть здесь всё равно
+# подменена заглушкой, поэтому зона роли не играет — важно лишь, чтобы
+# вердикт не выносился раньше времени.
+ЗАГРУЖЕНО = "sachinjaiswal.ca@corp-example-t.com"
 
 
 class _Сервер(object):
@@ -75,7 +84,7 @@ def _прогнать(правило, адрес=ЗАГРУЖЕНО):
     nv._mx_delay = lambda mx: 0.0
     nv.country_for_domain = lambda domain, mx_host="": ""
     nv.check_dns_health = lambda d, mx_record="": {"score": 0}
-    nv.get_mx_records = lambda d: ["mx.corp-example.test"]
+    nv.get_mx_records = lambda d: ["mx.corp-example-t.com"]
     nv._make_smtp_connection = lambda proxy=None: _Сервер(журнал, правило)
     return nv.check_email(адрес), журнал
 
@@ -113,7 +122,7 @@ def test_asked_domain_is_not_swapped():
 
 def test_asked_mailbox_name_is_not_rewritten():
     """Имя ящика тоже не переписывается — ни регистр, ни точки."""
-    смешанный = "John.Smith@corp-example.test"
+    смешанный = "John.Smith@corp-example-t.com"
     _итог, журнал = _прогнать(
         lambda e: (250, "2.1.5 OK") if e == смешанный else (550, "5.1.1 no"),
         адрес=смешанный)
