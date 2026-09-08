@@ -22,6 +22,14 @@
 import os
 import sys
 
+# Без этого скрипт падает в консоли cp1252 на первом же русском символе
+# и работает только там, где вручную выставлен PYTHONIOENCODING.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # Страны, ради которых всё затевается: рынки EU, US и СНГ плюс крупные азиатские.
 COUNTRIES = [
     "US", "GB", "DE", "FR", "IT", "ES", "NL", "BE", "PL", "CZ", "SK", "HU",

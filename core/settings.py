@@ -16,10 +16,11 @@ import io
 import json
 import os
 import threading
+from core.paths import data_path
 
 # Рядом с данными, а не в домашней папке: программу носят на флешке вместе с
 # базами, и настройки логично держать там же.
-SETTINGS_PATH = os.path.join("data", "settings.json")
+SETTINGS_PATH = data_path("settings.json")
 
 DEFAULTS = {
     # Пустая строка = «где всегда». Положите сюда путь внутри синхронизируемой

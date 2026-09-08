@@ -11,6 +11,7 @@ import threading
 
 from core.parser_pipeline import GLOBAL_VERIFIED_DOMAINS
 from core.provider import classify_domain, is_free_mail_domain
+from core.paths import data_path
 
 
 # Веса сигналов.
@@ -45,7 +46,7 @@ DEFAULT_WEIGHTS = {
     "parked_domain": -30,
 }
 
-WEIGHTS_PATH = os.path.join("data", "scoring_weights.json")
+WEIGHTS_PATH = data_path("scoring_weights.json")
 
 _weights = dict(DEFAULT_WEIGHTS)
 _weights_lock = threading.Lock()

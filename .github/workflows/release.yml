@@ -1,0 +1,137 @@
+name: build-installer
+
+on:
+  push:
+    tags: ['v*']
+  # Кнопка "Run workflow": собрать и проверить, ничего не публикуя.
+  workflow_dispatch:
+
+permissions:
+  # Нужно, чтобы создать релиз и залить в него файл.
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          # PyInstaller пинуется в requirements.txt — там же, где его
+          # видит tools/check_deps.py. Второе место для того же числа
+          # означало бы, что CI однажды соберёт не той версией.
+          pip install -r requirements.txt
+          python -m spacy download en_core_web_sm
+
+      - name: Определить версию
+        id: ver
+        shell: pwsh
+        run: |
+          $v = if ('${{ github.ref_type }}' -eq 'tag') { '${{ github.ref_name }}' -replace '^v', '' } else { '0.0.0' }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Записать версию в единственный источник
+        run: python tools/set_version.py ${{ steps.ver.outputs.version }}
+
+      - name: Пересобрать иконку из мастера
+        # Иконка собирается ЗДЕСЬ, а не берётся готовой: так .ico в релизе
+        # физически не может разойтись с assets/MailFact.png.
+        run: |
+          python tools/make_icon.py
+          python tools/check_icon.py
+
+      - name: Собрать .exe
+        run: python -m PyInstaller --noconfirm --clean --log-level WARN MailFact.spec
+
+      - name: Проверить зависимости внутри сборки
+        run: python tools/check_deps.py --dist dist/MailFact
+
+      - name: Настоящий прогон внутри собранной программы
+        shell: pwsh
+        run: |
+          # Запуск окна не доказывает почти ничего: словари имён, модель
+          # spaCy, корпус wordsegment и запись sqlite подключаются позже.
+          # --selftest проходит тот же путь, что основной сценарий.
+          $p = Start-Process -FilePath "dist\MailFact\MailFact.exe" `
+               -ArgumentList "--selftest","selftest.log" -PassThru -Wait
+          if (Test-Path "selftest.log") { Get-Content "selftest.log" }
+          if ($p.ExitCode -ne 0) { throw "selftest вернул $($p.ExitCode)" }
+
+      - name: Запустить окно
+        shell: pwsh
+        run: |
+          # БЕЗ ЭТОГО ШАГА можно выпустить релиз, который не стартует:
+          # PyInstaller не падает на отсутствующей зависимости, он просто её
+          # не кладёт, и программа умирает уже у пользователя.
+          $p = Start-Process -FilePath "dist\MailFact\MailFact.exe" -PassThru
+          Start-Sleep -Seconds 30
+          $p.Refresh()
+          if ($p.HasExited) { throw "программа завершилась сама, код $($p.ExitCode)" }
+          $title = $p.MainWindowTitle
+          Stop-Process -Id $p.Id -Force
+          Write-Host "заголовок окна: '$title'"
+          # PyInstaller показывает трассировку в окне с заголовком
+          # "Unhandled exception in script" — проверка ловит именно это.
+          if ($title -notlike 'MailFact*') { throw "неожиданный заголовок окна: '$title'" }
+
+      - name: Собрать установщик
+        shell: pwsh
+        run: |
+          # На windows-latest Inno Setup обычно уже стоит; если образ сменится
+          # и его не окажется — ставим сами, чтобы workflow не развалился молча.
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe не найден" }
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" MailFact.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+      - name: Проверить установщик
+        shell: pwsh
+        run: |
+          $f = "installer\MailFact-setup.exe"
+          if (-not (Test-Path $f)) { throw "нет файла $f" }
+          $mb = [math]::Round((Get-Item $f).Length / 1MB, 1)
+          Write-Host "установщик: $mb MB"
+          # Порог по факту сборки: спайси и словари имён весят своё, и
+          # установщик меньше сотни мегабайт означал бы, что половина не
+          # попала внутрь.
+          if ($mb -lt 60) { throw "установщик подозрительно мал: $mb MB" }
+
+      - name: Проверить установленную копию
+        shell: pwsh
+        run: |
+          # Ставим молча ИЗ СОБРАННОГО установщика и смотрим на то, что
+          # получилось: иконка, версия, окно, размеры иконок окна.
+          python tools/check_installed.py --setup "installer\MailFact-setup.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MailFact-setup
+          path: installer/MailFact-setup.exe
+
+      - name: Опубликовать релиз
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MailFact ${{ steps.ver.outputs.version }}
+          files: installer/MailFact-setup.exe
+          body: |
+            **Windows 10/11, 64-bit.** Скачайте `MailFact-setup.exe` ниже и запустите —
+            Python и все библиотеки внутри, ставить отдельно ничего не нужно.
+
+            При первом запуске Windows покажет синий экран «Windows защитила ваш
+            компьютер». Это ожидаемо для любого установщика без платной цифровой
+            подписи: нажмите **Подробнее** → **Выполнить в любом случае**.
+
+            Программа устанавливается в профиль пользователя, права администратора
+            не требуются.

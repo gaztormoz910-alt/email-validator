@@ -34,11 +34,12 @@ import os
 import sqlite3
 import threading
 import time
+from core.paths import data_path
 
 __all__ = ["LongTermMemory", "DEFAULT_PATH",
            "CATCHALL_TTL_HOURS", "PROFILE_TTL_HOURS"]
 
-DEFAULT_PATH = os.path.join("data", "longterm.sqlite")
+DEFAULT_PATH = data_path("longterm.sqlite")
 
 # Сколько живёт ответ про catch-all. Домен, принимающий что угодно, таким и
 # остаётся годами — но месяц выбран сознательно: настройку могли поменять, а

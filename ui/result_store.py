@@ -47,6 +47,7 @@ import tempfile
 import threading
 import time
 from array import array
+from core.paths import data_dir as data_dir_of_app
 
 
 # Отображаемый статус -> группа, которой он управляется в фильтрах.
@@ -373,7 +374,7 @@ class ResultStore:
 
     @staticmethod
     def _storage_dir():
-        for candidate in ("data", tempfile.gettempdir()):
+        for candidate in (data_dir_of_app(), tempfile.gettempdir()):
             try:
                 os.makedirs(candidate, exist_ok=True)
                 if os.access(candidate, os.W_OK):

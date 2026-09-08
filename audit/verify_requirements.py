@@ -33,6 +33,7 @@ for _stream in (sys.stdout, sys.stderr):
 # именно на этом расхождении список зависимостей обычно и врёт.
 IMPORT_TO_PACKAGE = {
     "dns": "dnspython",
+    "PIL": "Pillow",
     "socks": "PySocks",
     "names_dataset": "names-dataset",
     "gender_guesser": "gender-guesser",
