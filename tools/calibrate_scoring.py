@@ -49,6 +49,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.scoring import DEFAULT_WEIGHTS, WEIGHTS_PATH
 
+# Без этого скрипт падает в консоли cp1252 на первом же русском символе
+# и работает только там, где вручную выставлен PYTHONIOENCODING.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # Меньше этого числа наблюдений в группе — сигнал не калибруется.
 MIN_SAMPLES = 50
 

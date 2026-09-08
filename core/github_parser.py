@@ -3,6 +3,7 @@ import os
 import json
 import urllib.request
 import urllib.error
+from core.paths import data_dir as data_dir_of_app
 
 
 class BlacklistDownloader:
@@ -18,8 +19,10 @@ class BlacklistDownloader:
     # битым (страница ошибки, обрыв связи) и НЕ затираем рабочий список.
     MIN_PLAUSIBLE_DOMAINS = 100
 
-    def __init__(self, data_dir="data"):
-        self.data_dir = data_dir
+    def __init__(self, data_dir=None):
+        # См. core/paths.py: списки лежат в пишущейся папке рядом с .exe,
+        # потому что этот класс их туда же и перезаписывает.
+        self.data_dir = data_dir or data_dir_of_app()
         if not os.path.exists(self.data_dir):
             os.makedirs(self.data_dir)
 

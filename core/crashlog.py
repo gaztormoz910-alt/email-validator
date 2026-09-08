@@ -29,13 +29,14 @@ import io
 import os
 import threading
 import traceback
+from core.paths import data_path
 
 __all__ = ["log_crash", "install_hooks", "recent_crashes", "crash_log_path",
            "CRASH_LOG_PATH", "MAX_BYTES"]
 
 # Рядом с кэшем и долгой памятью: всё, что программа пишет про себя, лежит в
 # одной папке, и владельцу не приходится искать по всему проекту.
-CRASH_LOG_PATH = os.path.join("data", "crash.log")
+CRASH_LOG_PATH = data_path("crash.log")
 
 # Потолок файла. Двух мегабайт хватает на сотни трассировок — больше для
 # разбора всё равно не читают, а расти без предела журналу нельзя.

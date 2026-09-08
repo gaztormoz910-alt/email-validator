@@ -27,8 +27,9 @@
 import os
 import sqlite3
 import threading
+from core.paths import data_path
 
-DEFAULT_STATE_PATH = os.path.join("data", "run_state.sqlite")
+DEFAULT_STATE_PATH = data_path("run_state.sqlite")
 
 # Сколько ключей копится в памяти перед записью пачкой. Одиночный INSERT на
 # каждый адрес упирается в диск и становится узким местом сам по себе.

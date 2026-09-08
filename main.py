@@ -64,6 +64,12 @@ def run_web():
               "Поставьте его командой:\n\n    pip install pywebview\n")
         raise SystemExit(1)
 
+    # Имя приложения для панели задач. Обязано стоять ДО создания окна:
+    # после Windows уже сгруппировала окно под чужим идентификатором, и
+    # при запуске из исходников на панели висела бы иконка python.exe.
+    from core.winicon import set_app_user_model_id
+    set_app_user_model_id("MailFact.App")
+
     from ui.webapp import run
 
     # --selftest-close N: открыть окно и закрыть его через N секунд. Нужен
@@ -79,6 +85,15 @@ def run_web():
 
 
 def main():
+    # --selftest ЛОГ: пройти настоящий путь основного сценария на трёх адресах
+    # и выйти с кодом 0/1. Нужен потому, что открывшееся окно не доказывает
+    # почти ничего: словари имён, модель spaCy, корпус wordsegment и запись
+    # sqlite подключаются позже и ломаются уже у пользователя.
+    for i, arg in enumerate(sys.argv):
+        if arg == "--selftest":
+            путь = sys.argv[i + 1] if i + 1 < len(sys.argv) else "selftest.log"
+            from core.selftest import run as selftest_run
+            raise SystemExit(selftest_run(путь))
     run_web()
 
 
