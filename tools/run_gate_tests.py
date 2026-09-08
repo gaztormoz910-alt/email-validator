@@ -26,6 +26,16 @@ import re
 import subprocess
 import sys
 
+# Без этого скрипт падает в консоли cp1252 на первом же русском
+# символе и работает только там, где вручную выставлен
+# PYTHONIOENCODING. Проверка, зависящая от кодировки конкретной
+# консоли, ничего не проверяет.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # Консоль Windows по умолчанию не в UTF-8, а пояснения к провалу здесь
 # по-русски: без этого раннер падает на собственном сообщении об ошибке.
 for _stream in (sys.stdout, sys.stderr):

@@ -49,8 +49,14 @@ from ui.result_store import normalize_filters
 from core.encoding import open_text
 from core.baseops import csv_row, export_encoding
 
+from core.paths import app_version, resource_path, seed_data
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+# Через resource_path, а не от __file__: в собранном .exe модуль лежит внутри
+# архива, и относительный путь к разметке ведёт в никуда.
+WEB_DIR = resource_path("ui", "web")
+
+APP_NAME = "MailFact"
 
 PAGE_SIZE = 100
 
@@ -1834,8 +1840,12 @@ def run(selftest_close=None):
     api = ValidatorApi()
     _server, port, token = start_api_server(api)
 
+    # Поставляемые списки кладутся в пишущуюся папку до первого обращения к
+    # ним: иначе первый же запуск установленной копии не найдёт своих данных.
+    seed_data()
+
     window = webview.create_window(
-        "Email Validator Pro",
+        f"{APP_NAME} {app_version()}",
         f"http://127.0.0.1:{port}/?token={token}",
         width=1440, height=900, min_size=(900, 620),
         background_color="#0A0E14",
@@ -1875,6 +1885,11 @@ def run(selftest_close=None):
                 pass
 
         threading.Thread(target=_закрыть_потом, daemon=True).start()
+
+    # Иконку ставим после старта: HWND появляется только когда движок
+    # WebView2 создаст окно, и до этого ставить её просто некуда.
+    from core.winicon import apply_when_shown
+    apply_when_shown(resource_path("assets", "MailFact.ico"))
 
     try:
         webview.start(storage_path=_storage_path(), private_mode=False)

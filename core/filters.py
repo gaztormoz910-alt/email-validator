@@ -2,6 +2,7 @@
 import os
 
 from core.encoding import open_text
+from core.paths import data_dir as data_dir_of_app
 
 # Файлы в data/, которые НЕ являются чёрными списками.
 #
@@ -69,8 +70,11 @@ BLACKLIST_SENTINELS = _known_live_domains()
 
 
 class SpamFilter:
-    def __init__(self, data_dir="data", log_callback=None):
-        self.data_dir = data_dir
+    def __init__(self, data_dir=None, log_callback=None):
+        # None, а не "data": относительная строка зависела бы от текущего
+        # каталога запуска, а у ярлыка из меню «Пуск» он не тот, что у
+        # программы. data_dir() отдаёт папку рядом с .exe.
+        self.data_dir = data_dir or data_dir_of_app()
         self.blacklist_domains = set()  # Хеш-множество для O(1) поиска
         self.rejected_files = []        # Списки, не прошедшие санити-контракт
         self._log = log_callback

@@ -31,6 +31,7 @@ from core.provider import (classify_domain, country_from_domain,
 from core.heuristics import (extract_birth_year, looks_machine_generated,
                              is_parked_domain, is_role_based)
 from core.parser_pipeline import GLOBAL_VERIFIED_DOMAINS
+from core.paths import data_path
 
 
 # Причины Unknown, которые стоит перепроверить: они говорят о сбое НАШЕЙ стороны
@@ -865,7 +866,7 @@ class ValidationPipeline:
         # без него сотни бесплатных сервисов считаются корпоративными и
         # получают +5, которого не получает gmail.com.
         try:
-            free_path = os.path.join("data", "free_providers.txt")
+            free_path = data_path("free_providers.txt")
             if os.path.exists(free_path):
                 with open(free_path, "r", encoding="utf-8") as f:
                     added = extend_free_domains(line.strip() for line in f
