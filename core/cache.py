@@ -28,9 +28,10 @@ import os
 import sqlite3
 import threading
 import datetime
+from core.paths import data_path
 
 
-DEFAULT_CACHE_PATH = os.path.join("data", "validation_cache.sqlite")
+DEFAULT_CACHE_PATH = data_path("validation_cache.sqlite")
 
 # Только эти два статуса — доказательства. Остальные говорят о нашей стороне.
 CACHEABLE_STATUSES = ("Valid", "Invalid/Bounce")

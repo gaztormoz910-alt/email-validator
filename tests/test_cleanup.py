@@ -229,11 +229,20 @@ def test_static_check_actually_runs():
     handle.write("def f():\n    return это_имя_не_определено\n")
     handle.close()
     try:
+        # Кодировку ДОЧЕРНЕГО процесса задаём явно. Имя в образце
+        # кириллическое, и на консоли cp1252 pyflakes падает с
+        # UnicodeEncodeError, пытаясь его напечатать: stdout приходит пустым,
+        # и контроль объявляет провал там, где всё в порядке. То есть без
+        # этой строки проверка меряет кодировку консоли, а не работу
+        # pyflakes — и зелёная она только там, где PYTHONIOENCODING выставлен
+        # руками. Замерено: с cp1252 stdout пуст, в stderr UnicodeEncodeError.
+        окружение = dict(os.environ, PYTHONIOENCODING="utf-8")
         result = subprocess.run(
             [sys.executable, "-m", "pyflakes", handle.name],
             cwd=ROOT, capture_output=True, text=True,
-            encoding="utf-8", errors="replace")
-        assert "undefined name" in (result.stdout or ""), result.stdout
+            encoding="utf-8", errors="replace", env=окружение)
+        assert "undefined name" in (result.stdout or ""), (
+            "stdout=%r stderr=%r" % (result.stdout, result.stderr[-400:]))
     finally:
         os.unlink(handle.name)
 
