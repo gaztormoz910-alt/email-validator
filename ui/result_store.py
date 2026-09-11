@@ -248,8 +248,15 @@ class ResultStore:
         self._drop_repeats = bool(drop_repeats)
         # Нужны для проверки «этот ящик уже показан»: в БД такой поиск идёт по
         # индексу, а вот про несохранённую пачку она ещё не знает.
-        self._pending_keys = set()
-        self._memory_keys = set()
+        # Не множества, а СЛОВАРИ ключ -> группа. Множества хранили только
+        # факт «ящик показан», и при повторе с другим статусом append
+        # возвращал группу НОВОГО статуса, хотя в таблице оставалась старая
+        # строка. В журнале окна это давало «DEAD ivan@…» рядом со строкой
+        # VALID в таблице — ровно та рассинхронизация, на которую владелец
+        # жаловался. Собственная же строка документации append обещала
+        # обратное: «возвращаем его прежнюю группу».
+        self._pending_keys = {}
+        self._memory_keys = {}
 
         self._open(path)
 
@@ -403,7 +410,7 @@ class ResultStore:
     # --- запись ---------------------------------------------------------
 
     def _already_shown(self, key):
-        """Показан ли уже этот ящик. Вызывается под захваченным локом.
+        """Группа уже показанного ящика или None. Под захваченным локом.
 
         Пояс поверх подтяжек. Дедуп входа делает конвейер, но если результат
         по одному адресу придёт дважды по любой другой причине, владелец
@@ -412,17 +419,19 @@ class ResultStore:
         индексу.
         """
         if not self._drop_repeats or not key:
-            return False
-        if key in self._pending_keys or key in self._memory_keys:
-            return True
+            return None
+        for где in (self._pending_keys, self._memory_keys):
+            if key in где:
+                return где[key]
         if self._conn is None:
-            return False
+            return None
         try:
             cursor = self._conn.execute(
-                "SELECT 1 FROM rows WHERE email_lc = ? LIMIT 1", (key,))
-            return cursor.fetchone() is not None
+                "SELECT grp FROM rows WHERE email_lc = ? LIMIT 1", (key,))
+            строка = cursor.fetchone()
+            return строка[0] if строка else None
         except Exception:
-            return False
+            return None
 
     def append(self, email, status, reason, mx, data):
         """Добавляет строку и обновляет индексы. Возвращает её группу.
@@ -434,8 +443,12 @@ class ResultStore:
         group = group_of(status)
         key = str(email or "").strip().lower()
         with self._lock:
-            if self._already_shown(key):
-                return group
+            прежняя = self._already_shown(key)
+            if прежняя is not None:
+                # Отдаём ГРУППУ УЖЕ ЛЕЖАЩЕЙ строки, а не нового статуса:
+                # вызывающий по ней подписывает строку журнала, и она должна
+                # совпадать с тем, что человек видит в таблице.
+                return прежняя
             position = self._total
             self._total += 1
             self._index[group].append(position)
@@ -447,7 +460,7 @@ class ResultStore:
                 self._memory_rows[position] = {
                     "email": email, "status": status, "reason": reason,
                     "mx": mx, "data": payload}
-                self._memory_keys.add(key)
+                self._memory_keys[key] = group
                 return group
 
             try:
@@ -459,7 +472,7 @@ class ResultStore:
                 group, _score_of(payload),
                 _facet_of(payload, "country"), _facet_of(payload, "gender"),
                 _provider_of(email), key))
-            self._pending_keys.add(key)
+            self._pending_keys[key] = group
             if len(self._pending) >= FLUSH_EVERY:
                 self._flush_locked()
         return group
@@ -489,7 +502,7 @@ class ResultStore:
                 self._memory_rows[position] = {
                     "email": email, "status": status, "reason": reason,
                     "mx": mx, "data": _loads(blob)}
-                self._memory_keys.add(str(email or "").strip().lower())
+                self._memory_keys[str(email or "").strip().lower()] = row[6]
             self._pending.clear()
             self._pending_keys.clear()
             self._writes_ok = False
