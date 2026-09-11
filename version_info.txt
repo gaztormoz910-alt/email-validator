@@ -2,8 +2,8 @@
 # Windows требует РОВНО четыре числа: 1.0.0 превращается в (1, 0, 0, 0).
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 2, 1, 0),
-    prodvers=(1, 2, 1, 0),
+    filevers=(1, 3, 0, 0),
+    prodvers=(1, 3, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,11 +17,11 @@ VSVersionInfo(
         '040904B0',
         [StringStruct('CompanyName', 'MailFact'),
          StringStruct('FileDescription', 'MailFact — проверка существования почтовых ящиков'),
-         StringStruct('FileVersion', '1.2.1'),
+         StringStruct('FileVersion', '1.3.0'),
          StringStruct('InternalName', 'MailFact'),
          StringStruct('OriginalFilename', 'MailFact.exe'),
          StringStruct('ProductName', 'MailFact'),
-         StringStruct('ProductVersion', '1.2.1')])
+         StringStruct('ProductVersion', '1.3.0')])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]
