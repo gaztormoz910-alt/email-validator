@@ -29,6 +29,9 @@ data/validation_cache.sqlite-shm
 # Журнал сбоев. НЕ коммитить: в трассировке лежат адреса из твоей базы —
 # они попадают туда как аргументы функций и как содержимое переменных.
 data/crash.log
+# Журнал чужих сообщений: заводится, когда у программы нет потоков
+# вывода (сборка с console=False). Как и crash.log — местный файл.
+data/stdout.log
 
 data/run_state.sqlite
 data/run_state.sqlite-wal

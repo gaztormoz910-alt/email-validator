@@ -20,7 +20,6 @@
 import os
 import sys
 import sqlite3
-import tracemalloc
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -36,14 +35,72 @@ def fill(store, count, status="Valid"):
              "country": "US", "provider": "Gmail"})
 
 
-def peak_mb(work):
-    tracemalloc.start()
-    try:
-        work()
-        _current, peak = tracemalloc.get_traced_memory()
-        return peak / (1024 * 1024)
-    finally:
-        tracemalloc.stop()
+КОРЕНЬ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Код замерщика. Живёт строкой, потому что исполняется в ДРУГОМ процессе.
+ЗАМЕРЩИК = chr(10).join([
+    "import sys, tracemalloc",
+    "sys.path.insert(0, %r)" % КОРЕНЬ,
+    "from ui.result_store import ResultStore",
+    "режим, сколько = sys.argv[1], int(sys.argv[2])",
+    "",
+    "def заполнить(хранилище, н):",
+    "    for i in range(н):",
+    "        хранилище.append('user%d@example.com' % i, 'Valid', '250 OK',",
+    "                         'mx.example.com',",
+    "                         {'engagement_score': 80, 'name': 'User %d' % i,",
+    "                          'gender': 'male', 'country': 'US',",
+    "                          'provider': 'Gmail'})",
+    "",
+    "def на_диске(н):",
+    "    хранилище = ResultStore()",
+    "    try:",
+    "        заполнить(хранилище, н)",
+    "    finally:",
+    "        хранилище.close()",
+    "",
+    "def в_озу(н):",
+    "    строки = []",
+    "    for i in range(н):",
+    "        строки.append({'email': 'user%d@example.com' % i,",
+    "                       'status': 'Valid', 'reason': '250 OK',",
+    "                       'mx': 'mx.example.com',",
+    "                       'data': {'engagement_score': 80,",
+    "                                'name': 'User %d' % i, 'gender': 'male',",
+    "                                'country': 'US', 'provider': 'Gmail'}})",
+    "    return len(строки)",
+    "",
+    "работа = на_диске if режим == 'store' else в_озу",
+    "работа(2000)   # прогрев: одноразовые импорты мимо замера",
+    "tracemalloc.start()",
+    "работа(сколько)",
+    "_т, пик = tracemalloc.get_traced_memory()",
+    "tracemalloc.stop()",
+    "print(пик / 1048576.0)",
+])
+
+
+def пик_в_потомке(режим, сколько):
+    """Пик памяти в ОТДЕЛЬНОМ процессе. Возвращает мегабайты.
+
+    ПОЧЕМУ НЕ ЗДЕСЬ ЖЕ. tracemalloc считает выделения ВСЕГО процесса, а не
+    проверяемого кода. В одиночку тест зелёный, а в полном наборе к моменту
+    его запуска живы фоновые потоки предыдущих тестов, и их выделения
+    попадают в тот же пик.
+
+    Замерено 11.09.2026: полный набор дал 9.51 МБ на 50 000 строк, а тот же
+    замер в чистом процессе — 0.62 МБ. Проверка краснела не на хранилище, а
+    на чужих потоках, то есть меряла не то, что заявляла, и зависела от
+    порядка запуска. Отдельный процесс убирает и чужие потоки, и разогретые
+    импорты: замер становится про хранилище.
+    """
+    import subprocess
+
+    вышло = subprocess.run(
+        [sys.executable, "-X", "utf8", "-c", ЗАМЕРЩИК, режим, str(сколько)],
+        cwd=КОРЕНЬ, capture_output=True, text=True, timeout=900)
+    assert вышло.returncode == 0, вышло.stderr
+    return float(вышло.stdout.strip().splitlines()[-1])
 
 
 class TestMemoryIsBounded(unittest.TestCase):
@@ -55,14 +112,10 @@ class TestMemoryIsBounded(unittest.TestCase):
     CAP_MB = 12
 
     def test_peak_memory_stays_under_cap(self):
-        def work():
-            store = ResultStore()
-            try:
-                fill(store, self.ROWS)
-            finally:
-                store.close()
-
-        peak = peak_mb(work)
+        # Замер в отдельном процессе — по той же причине, что и ниже:
+        # tracemalloc считает выделения всего процесса, включая чужие
+        # фоновые потоки, оставшиеся от предыдущих тестов набора.
+        peak = пик_в_потомке("store", self.ROWS)
         per_row = peak * 1024 * 1024 / self.ROWS
         self.assertLess(
             peak, self.CAP_MB,
@@ -75,46 +128,31 @@ class TestMemoryIsBounded(unittest.TestCase):
         Без него предыдущая проверка была бы зелёной и в том случае, если
         tracemalloc перестал что-либо мерить.
         """
-        def lazy():
-            store = ResultStore()
-            try:
-                fill(store, self.ROWS)
-            finally:
-                store.close()
-
-        def eager():
-            rows = []
-            for i in range(self.ROWS):
-                rows.append({"email": f"user{i}@example.com", "status": "Valid",
-                             "reason": "250 OK", "mx": "mx.example.com",
-                             "data": {"engagement_score": 80,
-                                      "name": f"User {i}", "gender": "male",
-                                      "country": "US", "provider": "Gmail"}})
-            return len(rows)
-
-        on_disk = peak_mb(lazy)
-        in_ram = peak_mb(eager)
+        on_disk = пик_в_потомке("store", self.ROWS)
+        in_ram = пик_в_потомке("ram", self.ROWS)
         self.assertGreater(
             in_ram, on_disk * 3,
             f"хранение словарями заняло {in_ram:.1f} МБ против {on_disk:.1f} МБ "
             "у дискового — замер не различает эти два пути")
 
     def test_memory_does_not_scale_with_row_count(self):
-        def make(count):
-            def work():
-                store = ResultStore()
-                try:
-                    fill(store, count)
-                finally:
-                    store.close()
-            return work
-
-        small = peak_mb(make(5_000))
-        large = peak_mb(make(50_000))
+        small = пик_в_потомке("store", 5_000)
+        large = пик_в_потомке("store", 50_000)
         self.assertLess(
             large, max(small * 4, 4),
             f"строк стало в 10 раз больше, пик вырос с {small:.2f} до "
             f"{large:.2f} МБ — память зависит от размера базы")
+
+    def test_positive_control_measurement_sees_growth(self):
+        """Контроль к замерщику: рост он ОБЯЗАН замечать.
+
+        Иначе «не выросло» означало бы сломанный замер. Словарями те же
+        строки лежат в ОЗУ целиком, и пик обязан вырасти вместе с их числом.
+        """
+        мало = пик_в_потомке("ram", 5_000)
+        много = пик_в_потомке("ram", 50_000)
+        self.assertGreater(много, мало * 4,
+                           f"замерщик не видит роста: {мало:.2f} -> {много:.2f} МБ")
 
 
 class TestContentSurvivesTheDisk(unittest.TestCase):

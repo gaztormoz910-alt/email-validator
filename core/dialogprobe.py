@@ -58,9 +58,15 @@ def run(путь_лога):
     каталог = os.path.dirname(os.path.abspath(путь_лога))
     if каталог:
         os.makedirs(каталог, exist_ok=True)
+    # ПОТОКИ НЕ ТРОГАЕМ. Прошлая версия делала здесь
+    # `sys.stdout = лог; sys.stderr = лог` — и этим УНИЧТОЖАЛА проверяемое
+    # условие: чужой логгер получал настоящий поток вместо отсутствующего, и
+    # сбой, который проба искала, переставал происходить именно из-за неё.
+    # Проба была зелёной ровно потому, что чинила то, что ищет.
+    #
+    # Свой журнал ведём отдельной ручкой. Программа при этом остаётся ровно в
+    # том состоянии, в каком её видит человек.
     лог = io.open(путь_лога, "w", encoding="utf-8", newline="")
-    sys.stdout = лог
-    sys.stderr = лог
 
     def пиши(т):
         лог.write(str(т) + "\n")
@@ -77,13 +83,33 @@ def run(путь_лога):
         пиши("  версия: %s, собран: %s" % (app_version(), is_frozen()))
         пиши("  HOMEPATH: %r" % os.environ.get("HOMEPATH"))
         пиши("  HOMEDRIVE: %r" % os.environ.get("HOMEDRIVE"))
-        пиши("  stdout был None: %s" % (sys.__stdout__ is None))
+        # Состояние потоков — то, из-за чего всё и ломалось. Пишем как есть.
+        for имя in ("stdout", "stderr"):
+            поток = getattr(sys, имя, None)
+            пиши("  sys.%s: %r (пишет: %s)"
+                 % (имя, type(поток).__name__ if поток is not None else None,
+                    hasattr(поток, "write")))
+            try:
+                (поток.write("") if поток is not None else None)
+                пиши("     запись в %s: без ошибки" % имя)
+            except Exception as беда:
+                пиши("     ЗАПИСЬ В %s ПАДАЕТ: %s: %s"
+                     % (имя, type(беда).__name__, беда))
+                итог["код"] = 1
+                итог["почему"] = ("вывод сломан: запись в sys.%s даёт %s"
+                                  % (имя, type(беда).__name__))
+        пиши("  исходные: __stdout__=%s __stderr__=%s"
+             % (sys.__stdout__ is None, sys.__stderr__ is None))
 
         apply_no_throttle()
         quiet_chromium()
         import webview
 
-        пиши("  webview.OPEN_DIALOG: %r" % getattr(webview, "OPEN_DIALOG", "НЕТ"))
+        # СПРАШИВАЕМ НЫНЕШНИЙ API. Обращение к webview.OPEN_DIALOG само по
+        # себе писало предупреждение в несуществующий поток — то есть
+        # диагностика воспроизводила бы тот сбой, который ищет.
+        пиши("  FileDialog.OPEN: %r"
+             % getattr(getattr(webview, "FileDialog", None), "OPEN", "НЕТ"))
 
         api = ValidatorApi()
         _server, порт, токен = start_api_server(api)

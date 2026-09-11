@@ -14,6 +14,47 @@
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# ПОТОКИ ВЫВОДА — САМЫМ ПЕРВЫМ ДЕЙСТВИЕМ, ДО ЛЮБЫХ ДРУГИХ ИМПОРТОВ.
+#
+# У собранной с console=False программы sys.stdout и sys.stderr равны None.
+#
+# Замерено 11.09.2026 на релизе 1.1.8. webview.OPEN_DIALOG оказался не
+# константой, а свойством модуля: при каждом обращении оно пишет
+# предупреждение об устаревании через logging. Дальше — тонкость, которую
+# легко описать неверно, поэтому она здесь дословно.
+#
+# САМ ПО СЕБЕ None БЕЗОПАСЕН. logging.Handler.handleError начинается с
+# `if raiseExceptions and sys.stderr:` и при None молча ничего не делает.
+# Ронял ДРУГОЙ поток — тот, что ЕСТЬ, но при записи падает. И создавала его
+# строка ниже: StderrFilter(None) — объект истинный по `if`, а write у него
+# бросает AttributeError. handleError доходил до sys.stderr.write, ловил там
+# только OSError, и AttributeError уезжал наружу — тому, кто всего лишь
+# позвал функцию. В окне это становилось ответом 500, и не работали ВСЕ
+# ЧЕТЫРЕ диалога: выбор базы, две выгрузки и выбор папки.
+#
+# Замер (tests/test_nostream.py, отдельный процесс):
+#     stderr=None          -> НЕ УПАЛО
+#     stderr=Фильтр(None)  -> AttributeError: 'NoneType' object ... 'write'
+# и код возврата процесса 120: сбросить сломанные потоки на выходе CPython
+# тоже не смог.
+#
+# Раньше всех, потому что логгеры чужих библиотек захватывают sys.stderr в
+# момент своего импорта: поток, подставленный позже, до них уже не дойдёт.
+try:
+    from core.nullstream import ensure_streams
+
+    try:
+        from core.paths import data_dir as _папка_данных
+
+        ensure_streams(куда=_папка_данных())
+    except Exception:
+        ensure_streams()
+except Exception:
+    # Без потоков программа обязана хотя бы попытаться запуститься.
+    pass
+
 
 class StderrFilter:
     """Глушит болтовню dnspython про потерянные UDP-пакеты.
@@ -29,14 +70,28 @@ class StderrFilter:
         noisy = ("expected message id:", "ignoring response from", "dropped")
         if any(marker in msg for marker in noisy):
             return
-        self.original_stderr.write(msg)
+        # Своя защита, даже после ensure_streams. Фильтр оборачивает ЧУЖОЙ
+        # поток, и если тот окажется негодным, падать обязан не он, а ничего:
+        # задача фильтра — убрать шум, а не решать судьбу программы.
+        поток = self.original_stderr
+        if поток is None or not hasattr(поток, "write"):
+            return
+        try:
+            поток.write(msg)
+        except Exception:
+            pass
 
     def flush(self):
-        self.original_stderr.flush()
+        поток = self.original_stderr
+        if поток is None or not hasattr(поток, "flush"):
+            return
+        try:
+            поток.flush()
+        except Exception:
+            pass
 
 
 sys.stderr = StderrFilter(sys.stderr)
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Перехватчики аварий ставятся ПЕРВЫМ делом — до импорта интерфейсов и до
 # создания окна. Сбой при самой загрузке модулей тоже должен оставить след:
