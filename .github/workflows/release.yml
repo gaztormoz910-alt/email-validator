@@ -82,6 +82,22 @@ jobs:
           if (Test-Path "selftest.log") { Get-Content "selftest.log" }
           if ($p.ExitCode -ne 0) { throw "selftest вернул $($p.ExitCode)" }
 
+      - name: Проверить диалог выбора файла
+        shell: pwsh
+        run: |
+          # САМ диалог не проверяло ничто: selftest подменяет его результат,
+          # а проверка окна только смотрит на заголовок. Владелец нажал
+          # кнопку в собранной программе и получил «choose: 500» — и это
+          # дошло до него только потому, что здесь ничего не стояло.
+          $p = Start-Process -FilePath "dist\MailFact\MailFact.exe" `
+               -ArgumentList "--selftest-dialog","dialog.log" -PassThru -Wait
+          if (Test-Path "dialog.log") { Get-Content "dialog.log" }
+          if ($p.ExitCode -ne 0) {
+            $tail = if (Test-Path "dialog.log") { (Get-Content "dialog.log" -Tail 10) -join '~' } else { 'журнала нет' }
+            Write-Host "::error title=Диалог выбора файла::$tail"
+            throw "проба диалога вернула $($p.ExitCode)"
+          }
+
       - name: Запустить окно
         shell: pwsh
         run: |
