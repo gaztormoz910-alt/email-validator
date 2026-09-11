@@ -388,6 +388,41 @@ class ValidationPipeline:
             self._http_alive_cache[domain] = False
         return False
 
+    def _подсказать_опечатку(self, email, data, fix_typos):
+        """Кладёт подсказку об опечатке РЯДОМ с вердиктом, не меняя его.
+
+        ЗАЧЕМ ОТДЕЛЬНО ОТ ОСНОВНОГО ПУТИ. Разбор опечатки живёт после SMTP и
+        срабатывает на «нет MX». Домен-опечатка из списка одноразовых до него
+        не доходит: вердикт выносится раньше, по списку. Замерено 11.09.2026,
+        когда списки наконец заработали: user@gmial.com стал
+        «Trap/Disposable» без единого слова о том, что человек метил в
+        gmail.com. Вердикт верный, а след настоящего контакта терялся.
+
+        ВЕРДИКТ НЕ МЕНЯЕТСЯ НИКОГДА. Подмена адреса подсказкой однажды уже
+        приводила к тому, что в колонке «Годен» оказывалась строка, которой
+        владелец не загружал: отправив по ней, он написал бы ЧУЖОМУ человеку.
+        Здесь только два поля рядом с вердиктом — решение за владельцем.
+
+        Лишней сессии почти не стоит: suggest_domain_fix отдаёт подсказку
+        только для настоящих опечаток известных почтовиков, а их единицы.
+        """
+        if not fix_typos or self.cleaner is None or self.network is None:
+            return
+        try:
+            suggestion = self.cleaner.suggest_domain_fix(email)
+        except Exception:
+            return
+        if not suggestion or suggestion == email:
+            return
+        data["suggested_email"] = suggestion
+        try:
+            data["suggested_status"] = self.network.check_email(
+                suggestion).get("status", "")
+        except Exception:
+            # Не удалось спросить — подсказка остаётся без подтверждения.
+            # Это честнее, чем выбросить её целиком: адрес виден владельцу.
+            data["suggested_status"] = ""
+
     def _enrich_offline(self, email, data, status_display, enable_ai):
         """Обогащение для адреса, который до сервера не дойдёт.
 
@@ -1396,6 +1431,12 @@ class ValidationPipeline:
                                          "бросить")
                 data["provider_name"] = "Disposable"
                 data["domain_type"] = "Disposable"
+                # ПОДСКАЗКА ОБ ОПЕЧАТКЕ НЕ ТЕРЯЕТСЯ. Домены-опечатки вроде
+                # gmial.com стоят в списках одноразовых по праву: их заводят
+                # ради обмана. Но для владельца это ещё и след настоящего
+                # контакта — человек хотел написать на gmail.com. Вердикт
+                # «слать нельзя» остаётся, а подсказка кладётся рядом.
+                self._подсказать_опечатку(email, data, fix_typos)
                 self._enrich_offline(email, data, "Trap/Disposable", enable_ai)
                 self._emit(email, "Trap/Disposable", "Disposable Email Domain", "N/A", data)
                 return
@@ -1411,6 +1452,9 @@ class ValidationPipeline:
                     data["provider_type"] = "Disposable (внешний список)"
                     data["provider_name"] = "Disposable"
                     data["domain_type"] = "Disposable"
+                    # Та же причина, что и шагом выше: вердикт остаётся, а
+                    # след настоящего контакта не выбрасывается.
+                    self._подсказать_опечатку(email, data, fix_typos)
                     self._enrich_offline(email, data, "Trap/Disposable", enable_ai)
                     self._emit(email, "Trap/Disposable", "External Blacklist Match", "N/A", data)
                     return
