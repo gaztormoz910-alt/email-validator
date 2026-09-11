@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""Сборка MailFact в папку (onedir).
+"""Сборка MailFact в папку (onedir). Одна спека на Windows, macOS и Linux.
 
 ПОЧЕМУ onedir, А НЕ onefile. onefile при КАЖДОМ запуске распаковывает всю
 сборку во временную папку: это секунды ожидания перед появлением окна и
@@ -12,10 +12,29 @@
 адрес. Выбросить spaCy ради размера значило бы молча изменить вердикты в
 собранной программе по сравнению с запуском из исходников — то есть выдать
 пользователю не ту программу, которую проверяли.
+
+ПРО ТРИ ПЛАТФОРМЫ. PyInstaller НЕ УМЕЕТ кросс-сборку: под каждую ОС собирает
+она сама. Поэтому здесь одна спека с ветвлениями, а три сборки делают три
+раннера в .github/workflows/release.yml.
+
+Что различается по платформам и почему:
+
+  * Windows — движок окна WebView2 через pythonnet (`clr`). На macOS и Linux
+    такого модуля нет вовсе, и просить его в hiddenimports значит уронить
+    сборку на ровном месте.
+  * macOS — иконка формата .icns и обёртка .app (BUNDLE). WKWebView встроен
+    в саму ОС, доставлять нечего.
+  * Linux — движка окна в системе может не быть ни одного. Бэкенд Qt берётся
+    внутрь сборки, чтобы программа не требовала системных пакетов.
 """
+import sys
+
 from PyInstaller.utils.hooks import collect_all
 
 ИМЯ = "MailFact"
+ОКНА = sys.platform == "win32"
+ЯБЛОКО = sys.platform == "darwin"
+ПИНГВИН = sys.platform.startswith("linux")
 
 datas = [
     ("assets", "assets"),
@@ -38,10 +57,6 @@ binaries = []
 # Импорты, которых PyInstaller не видит статическим анализом: они делаются
 # лениво внутри функций либо подбираются по имени в рантайме.
 hiddenimports = [
-    # Движок окна. Бэкенд выбирается по платформе уже на старте.
-    "webview.platforms.winforms",
-    "webview.platforms.edgechromium",
-    "clr",
     # SOCKS-прокси для SMTP: импортируется как `socks` внутри функций.
     "socks",
     # dnspython подбирает обработчики типов записей по имени.
@@ -58,12 +73,32 @@ hiddenimports = [
     "duckduckgo_search",
 ]
 
+# Бэкенд окна — свой на каждой платформе.
+if ОКНА:
+    hiddenimports += ["webview.platforms.winforms",
+                      "webview.platforms.edgechromium",
+                      "clr"]
+elif ЯБЛОКО:
+    hiddenimports += ["webview.platforms.cocoa"]
+elif ПИНГВИН:
+    # Порядок важен: сначала Qt, потом GTK. Qt берётся внутрь сборки и
+    # работает без системных пакетов, GTK — запасной путь для тех, у кого
+    # WebKitGTK в системе уже есть.
+    hiddenimports += ["webview.platforms.qt", "webview.platforms.gtk"]
+
 # Пакеты, которые возят с собой данные (модели, словари, .json): без
 # collect_all собранная программа падает на старте, не найдя своих файлов.
-for pkg in ("webview", "names_dataset", "gender_guesser", "wordsegment",
-            "spacy", "thinc", "en_core_web_sm", "srsly", "catalogue",
-            "cymem", "preshed", "murmurhash", "blis", "wasabi", "weasel",
-            "confection", "langcodes"):
+ПАКЕТЫ = ["webview", "names_dataset", "gender_guesser", "wordsegment",
+          "spacy", "thinc", "en_core_web_sm", "srsly", "catalogue",
+          "cymem", "preshed", "murmurhash", "blis", "wasabi", "weasel",
+          "confection", "langcodes"]
+if ПИНГВИН:
+    # Движок окна для Linux целиком внутрь: иначе программа потребует
+    # системный WebKitGTK, а «полноценно установить на любой ПК» означает
+    # именно что ничего доставлять руками не надо.
+    ПАКЕТЫ += ["PyQt6", "PyQt6.QtWebEngineWidgets", "qtpy"]
+
+for pkg in ПАКЕТЫ:
     try:
         d, b, h = collect_all(pkg)
     except Exception:
@@ -92,16 +127,27 @@ a = Analysis(
     # их через try/except, а модели en_core_web_sm нужен только numpy+blis.
     # pycountry (20 МБ) НЕ исключаем: это настоящая зависимость names_dataset.
     excludes=["matplotlib", "scipy", "pandas", "pytest", "IPython", "jedi",
-              "zmq", "tornado", "notebook", "jupyter", "PyQt5", "PyQt6",
+              "zmq", "tornado", "notebook", "jupyter", "PyQt5",
               "PySide2", "PySide6", "tkinter", "test", "unittest",
               "torch", "torchvision", "torchaudio", "tensorflow",
               "transformers", "spacy_transformers", "sklearn",
               "scikit_learn", "boto3", "botocore", "playwright",
               "huggingface_hub", "tokenizers", "safetensors", "datasets",
-              "sentencepiece", "jax", "cupy", "PIL", "cv2"],
+              "sentencepiece", "jax", "cupy", "PIL", "cv2"]
+    # PyQt6 исключаем везде, КРОМЕ Linux: там он и есть движок окна.
+    + ([] if ПИНГВИН else ["PyQt6"]),
     noarchive=False,
 )
 pyz = PYZ(a.pure)
+
+# Иконка своя на каждой платформе. Linux иконку в исполняемый файл не
+# вшивает вовсе — она берётся из .desktop-файла.
+if ОКНА:
+    иконка = "assets/MailFact.ico"
+elif ЯБЛОКО:
+    иконка = "assets/MailFact.icns"
+else:
+    иконка = None
 
 exe = EXE(
     pyz,
@@ -113,11 +159,12 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    # console=False: у окна на WebView2 своего терминала быть не должно.
+    # console=False: у окна на веб-стеке своего терминала быть не должно.
     console=False,
     disable_windowed_traceback=False,
-    icon="assets/MailFact.ico",
-    version="version_info.txt",
+    icon=иконка,
+    # Ресурс версии — понятие Windows. На других платформах его нет.
+    version="version_info.txt" if ОКНА else None,
 )
 
 coll = COLLECT(
@@ -129,3 +176,23 @@ coll = COLLECT(
     upx_exclude=[],
     name=ИМЯ,
 )
+
+if ЯБЛОКО:
+    # .app — единственная форма, которую macOS считает программой: без неё
+    # не будет ни иконки в Dock, ни запуска двойным кликом.
+    app = BUNDLE(
+        coll,
+        name=ИМЯ + ".app",
+        icon="assets/MailFact.icns",
+        bundle_identifier="com.mailfact.app",
+        info_plist={
+            "CFBundleName": ИМЯ,
+            "CFBundleDisplayName": ИМЯ,
+            "CFBundleShortVersionString": open("VERSION").read().strip(),
+            "CFBundleVersion": open("VERSION").read().strip(),
+            # Окно рисуется, а не просто считает: без этого macOS запустит
+            # программу как фоновую службу и окна не покажет.
+            "LSBackgroundOnly": False,
+            "NSHighResolutionCapable": True,
+        },
+    )
