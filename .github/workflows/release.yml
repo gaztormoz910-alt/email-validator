@@ -342,6 +342,13 @@ jobs:
           exit $RC
 
       - name: Открыть окно под виртуальным экраном
+        env:
+          # Qt WebEngine — это Chromium. В контейнере раннера его песочница
+          # не поднимается, и без этих флагов он молча не стартует. В
+          # ПОСТАВЛЯЕМОЙ программе их нет: отключать песочницу у человека
+          # ради удобства проверки нельзя, это его безопасность.
+          QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox --disable-gpu --disable-dev-shm-usage"
+          QT_QPA_PLATFORM: xcb
         run: |
           # Selftest доказывает, что собрался ДВИЖОК. Окно он не открывает
           # вовсе, поэтому про сам интерфейс не говорит ничего. Здесь
@@ -349,21 +356,31 @@ jobs:
           # заголовок читается у окна, найденного ПО PID — искать по
           # ожидаемому тексту значило бы заранее исключить случай, когда
           # вместо окна вылезла ошибка.
+          #
+          # Причина провала уходит в аннотацию: «exit code 1» одинаков и
+          # когда программа умерла, и когда окна просто не нашлось, а лог
+          # сборки у публичного репозитория требует входа.
           xvfb-run -a --server-args="-screen 0 1440x900x24" bash -c '
             ./dist/MailFact/MailFact &
             APPPID=$!
-            sleep 40
+            sleep 50
             if ! kill -0 $APPPID 2>/dev/null; then
-              echo "программа завершилась сама"; exit 1
+              echo "::error title=Окно Linux::программа завершилась сама, не дождавшись окна"
+              exit 1
             fi
-            TITLE=$(xdotool search --pid $APPPID --onlyvisible --name "." \
-                  getwindowname %@ 2>/dev/null | head -1)
+            echo "--- все окна процесса ---"
+            for W in $(xdotool search --pid $APPPID 2>/dev/null); do
+              echo "  $W [$(xdotool getwindowname $W 2>/dev/null)]"
+            done
+            TITLE=$(xdotool search --pid $APPPID --onlyvisible --name "." getwindowname %@ 2>/dev/null | head -1)
             kill $APPPID 2>/dev/null || true
             echo "заголовок окна: [$TITLE]"
             case "$TITLE" in
               MailFact*) echo "окно открылось"; exit 0 ;;
-              "")        echo "окна нет вовсе"; exit 1 ;;
-              *)         echo "неожиданный заголовок"; exit 1 ;;
+              "")        echo "::error title=Окно Linux::окна с заголовком не нашлось, движок $PYWEBVIEW_GUI"
+                         exit 1 ;;
+              *)         echo "::error title=Окно Linux::неожиданный заголовок [$TITLE]"
+                         exit 1 ;;
             esac
           '
 
