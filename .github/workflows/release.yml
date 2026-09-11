@@ -361,11 +361,15 @@ jobs:
           # когда программа умерла, и когда окна просто не нашлось, а лог
           # сборки у публичного репозитория требует входа.
           xvfb-run -a --server-args="-screen 0 1440x900x24" bash -c '
-            ./dist/MailFact/MailFact &
+            # Вывод программы уводим в файл: у сборки без консоли он
+            # иначе теряется целиком, и причину смерти не увидеть.
+            ./dist/MailFact/MailFact > app.log 2>&1 &
             APPPID=$!
             sleep 50
             if ! kill -0 $APPPID 2>/dev/null; then
-              echo "::error title=Окно Linux::программа завершилась сама, не дождавшись окна"
+              echo "--- вывод программы ---"
+              cat app.log 2>/dev/null || echo "вывода нет"
+              echo "::error title=Окно Linux::умерла сама: $(tail -15 app.log 2>/dev/null | paste -sd '~' - || echo пусто)"
               exit 1
             fi
             echo "--- все окна процесса ---"
