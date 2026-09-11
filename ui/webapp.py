@@ -346,7 +346,19 @@ class ValidatorApi:
         for path in paths:
             # Проверяется КАЖДЫЙ файл, а не первый: владелец выбирает их
             # пачкой, и прокси среди пяти баз иначе проедут незамеченными.
-            verdict = input_guard.check_file(path, expected) if expected else {"ok": True}
+            #
+            # Весь разбор ОДНОГО файла обёрнут: неожиданная беда на нём не
+            # имеет права обвалить весь запрос. Иначе один странный файл из
+            # пяти выбранных отменяет загрузку остальных четырёх, а человек
+            # видит голый код ошибки вместо имени виноватого файла.
+            try:
+                verdict = (input_guard.check_file(path, expected)
+                           if expected else {"ok": True})
+            except Exception as беда:
+                refused.append("Не удалось разобрать %s (%s: %s)"
+                               % (os.path.basename(path),
+                                  type(беда).__name__, беда))
+                continue
             if not verdict["ok"]:
                 refused.append(verdict["reason"])
                 continue
@@ -395,7 +407,23 @@ class ValidatorApi:
             # владелец видел бы порчу там, где её нет.
             with open_text(path) as handle:
                 return handle.read()
-        except OSError:
+        except Exception as беда:
+            # ЛОВИМ ВСЁ, а не только OSError.
+            #
+            # input_guard.check_file читает ВЫБОРКУ первых строк, а здесь файл
+            # читается ЦЕЛИКОМ. Один плохой байт в середине большой базы
+            # проходит проверку и взрывается тут: UnicodeDecodeError — это
+            # ValueError, не OSError, и он улетал наружу необработанным. Мост
+            # отвечал 500, окно показывало «choose: 500», и человек не мог
+            # загрузить файл вообще, не понимая почему.
+            #
+            # Не показать файл в поле ввода — не беда: он остаётся источником
+            # и уходит в проверку целиком, потоковым чтением, которое к
+            # плохим байтам устойчиво. Беда — молча отказать в загрузке.
+            self._on_log("[INFO] %s в поле ввода не показан (%s: %s), "
+                         "но в проверку пойдёт целиком."
+                         % (os.path.basename(path), type(беда).__name__, беда),
+                         "info")
             return None
 
     def paste(self, payload):
@@ -1285,8 +1313,16 @@ class ValidatorApi:
         if stack:
             body += "\n" + stack
         log_crash("окно", body, context=where or None)
-        self._on_log("[DEAD] Сбой в окне: %s. Записано в %s"
-                     % (message, crash_log_path()), "dead")
+
+        # В ЖУРНАЛ ТОЙ ВКЛАДКИ, ГДЕ СБОЙ И СЛУЧИЛСЯ. Раньше сюда шёл только
+        # _on_log, то есть журнал проверки базы: владелец нажимал кнопку во
+        # вкладке «Сбор адресов», а ошибка вылезала в соседней. Выглядело
+        # это так, будто ломается не то, что он трогал, — и он потратил
+        # время, разбираясь, при чём тут валидатор.
+        куда = (self._parser_log if str(payload.get("mode") or "") == "parser"
+                else self._on_log)
+        куда("[DEAD] Сбой в окне: %s. Записано в %s"
+             % (message, crash_log_path()), "dead")
         return {"ok": True, "path": crash_log_path()}
 
     def parser_copy(self, payload=None):
