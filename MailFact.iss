@@ -87,3 +87,105 @@ Filename: "{app}\{#AppNameStr}.exe"; Description: "Запустить {#AppNameS
 ; неизвестно, и без этого раздела осталось бы на диске после удаления.
 Type: filesandordirs; Name: "{app}\data"
 Type: dirifempty;     Name: "{app}"
+
+[Code]
+{ ------------------------------------------------------------------------
+  WebView2 Runtime — движок, которым рисуется окно программы.
+
+  ЗАЧЕМ ЭТО ЗДЕСЬ. В Windows 11 рантайм есть всегда, в Windows 10 — не
+  обязательно. Без него окно не открывается вовсе: человек ставит программу,
+  запускает, и ничего не происходит. Установщик обязан закрыть эту дыру сам,
+  а не оставлять её пользователю.
+
+  Проверка идёт по реестру, как советует сама Microsoft: ключ клиента
+  EdgeUpdate с GUID рантайма, значение pv. Пустое значение и "0.0.0.0"
+  означают «не установлен» — так помечается снесённый рантайм.
+
+  Ключ смотрим В ТРЁХ местах: 64-битная ветка машины, 32-битная ветка машины
+  и ветка пользователя. Рантайм ставится по-разному в зависимости от того,
+  были ли права администратора, и проверка одного места дала бы ложное
+  «не установлен» на машине, где он есть.
+  ------------------------------------------------------------------------ }
+
+const
+  WV2_GUID = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  WV2_URL = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703';
+
+function WebView2Version(Root: Integer; const Key: String): String;
+begin
+  Result := '';
+  if not RegQueryStringValue(Root, Key, 'pv', Result) then
+    Result := '';
+  if Result = '0.0.0.0' then
+    Result := '';
+end;
+
+function WebView2Installed(): Boolean;
+var
+  V: String;
+begin
+  V := WebView2Version(HKEY_LOCAL_MACHINE,
+    'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\' + WV2_GUID);
+  if V = '' then
+    V := WebView2Version(HKEY_LOCAL_MACHINE,
+      'SOFTWARE\Microsoft\EdgeUpdate\Clients\' + WV2_GUID);
+  if V = '' then
+    V := WebView2Version(HKEY_CURRENT_USER,
+      'SOFTWARE\Microsoft\EdgeUpdate\Clients\' + WV2_GUID);
+  Result := V <> '';
+  if Result then
+    Log('WebView2 Runtime найден, версия ' + V)
+  else
+    Log('WebView2 Runtime НЕ найден ни в одной из трёх веток реестра');
+end;
+
+{ Ключ /FORCEWEBVIEW2 существует только для проверки: он заставляет пройти
+  ветку доставки рантайма на машине, где рантайм уже стоит. Иначе эту ветку
+  нельзя было бы испытать вообще — только на чистой Windows 10, которой у
+  разработчика нет. Обычному пользователю ключ не нужен и не мешает. }
+function ForceWebView2(): Boolean;
+begin
+  Result := ExpandConstant('{param:FORCEWEBVIEW2|0}') <> '0';
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  BootFile: String;
+  ExitCode: Integer;
+begin
+  Result := '';
+  if WebView2Installed() and (not ForceWebView2()) then
+    exit;
+
+  BootFile := ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe');
+  Log('Качаю загрузчик WebView2: ' + WV2_URL);
+  try
+    { Хеш не задаём: Microsoft обновляет загрузчик, и зафиксированная сумма
+      сломала бы установку у всех при первом же их обновлении. }
+    DownloadTemporaryFile(WV2_URL, 'MicrosoftEdgeWebview2Setup.exe', '', nil);
+  except
+    { Нет интернета или ссылка не ответила. Это НЕ повод отменять установку:
+      программа поставится, а про рантайм скажет сама при запуске. Молчать
+      здесь нельзя — человек должен знать, что осталось доделать. }
+    Log('Скачать загрузчик WebView2 не удалось: ' + GetExceptionMessage);
+    if not WizardSilent() then
+      MsgBox('Не удалось скачать компонент Microsoft WebView2 — похоже, нет'
+        + ' связи с интернетом.' + #13#10#13#10
+        + 'MailFact установится, но окно может не открыться.' + #13#10
+        + 'Поставьте компонент вручную, он бесплатный:' + #13#10
+        + 'https://developer.microsoft.com/microsoft-edge/webview2/',
+        mbInformation, MB_OK);
+    exit;
+  end;
+
+  Log('Ставлю WebView2 Runtime');
+  if not Exec(BootFile, '/silent /install', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+  begin
+    Log('Загрузчик WebView2 не запустился');
+    exit;
+  end;
+  Log('Загрузчик WebView2 вернул код ' + IntToStr(ExitCode));
+  { Код возврата смотрим, но установку из-за него НЕ отменяем: даже без
+    рантайма человеку лучше получить установленную программу с понятным
+    сообщением, чем откат на середине. }
+end;
