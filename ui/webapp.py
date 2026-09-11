@@ -61,6 +61,27 @@ APP_NAME = "MailFact"
 PAGE_SIZE = 100
 
 
+def _тип_диалога(имя):
+    """Константа диалога по НЫНЕШНЕМУ API pywebview.
+
+    `webview.OPEN_DIALOG` и соседи — не константы, а СВОЙСТВА МОДУЛЯ: каждое
+    обращение пишет предупреждение об устаревании через logging. У собранной
+    программы потоков вывода нет, запись падала с AttributeError, и он уезжал
+    наружу — так ломались все четыре диалога. Нынешний `FileDialog.OPEN`
+    ничего не печатает.
+
+    Запасной путь оставлен для старых версий pywebview, где перечисления ещё
+    нет: там мы сознательно берём устаревшее имя, потому что другого нет.
+    """
+    import webview
+
+    перечисление = getattr(webview, "FileDialog", None)
+    if перечисление is not None and hasattr(перечисление, имя):
+        return getattr(перечисление, имя)
+    return getattr(webview, {"OPEN": "OPEN_DIALOG", "SAVE": "SAVE_DIALOG",
+                             "FOLDER": "FOLDER_DIALOG"}[имя])
+
+
 class ValidatorApi:
     """То, что страница может попросить у питона.
 
@@ -322,11 +343,10 @@ class ValidatorApi:
     # ------------------------------------------------------ источники --
     def _pick_files(self, title):
         """Родной диалог выбора файлов. Пустой ответ — пользователь передумал."""
-        import webview
         if self.window is None:
             return []
         chosen = self.window.create_file_dialog(
-            webview.OPEN_DIALOG, allow_multiple=True,
+            _тип_диалога("OPEN"), allow_multiple=True,
             file_types=("Списки (*.txt;*.csv)", "Все файлы (*.*)"))
         return list(chosen or [])
 
@@ -991,11 +1011,10 @@ class ValidatorApi:
         """Выгрузка в фоне: на многомиллионной базе она идёт минутами."""
         if self._export_busy:
             return {"ok": False, "error": "Выгрузка уже идёт"}
-        import webview
         if self.window is None:
             return {"ok": False, "error": "Окно недоступно"}
         target = self.window.create_file_dialog(
-            webview.SAVE_DIALOG, save_filename="valid_emails.csv")
+            _тип_диалога("SAVE"), save_filename="valid_emails.csv")
         if not target:
             return {"ok": False, "cancelled": True}
         path = target if isinstance(target, str) else target[0]
@@ -1334,7 +1353,6 @@ class ValidatorApi:
 
     def parser_export(self, payload=None):
         """Сохранение найденного. Запись идёт в фоне: список бывает большим."""
-        import webview
         if self.window is None:
             return {"ok": False, "error": "Окно недоступно"}
         with self._lock:
@@ -1343,7 +1361,7 @@ class ValidatorApi:
             return {"ok": False, "error": "Пока нечего сохранять"}
 
         path = self.window.create_file_dialog(
-            webview.SAVE_DIALOG, save_filename="parsed_emails.txt",
+            _тип_диалога("SAVE"), save_filename="parsed_emails.txt",
             file_types=("Текст (*.txt)", "CSV (*.csv)"))
         if not path:
             return {"ok": False, "error": ""}
@@ -1382,10 +1400,9 @@ class ValidatorApi:
         if key not in ("country", "gender", "provider"):
             return {"ok": False, "error": "Неизвестный признак: %s" % key}
 
-        import webview
         if self.window is None:
             return {"ok": False, "error": "Окно недоступно"}
-        chosen = self.window.create_file_dialog(webview.FOLDER_DIALOG)
+        chosen = self.window.create_file_dialog(_тип_диалога("FOLDER"))
         if not chosen:
             return {"ok": False, "cancelled": True}
         folder = chosen if isinstance(chosen, str) else chosen[0]
@@ -1549,6 +1566,21 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(200, body, ctype)
 
     def do_POST(self):
+        # ТЕЛО ЗАПРОСА ВЫЧИТЫВАЕТСЯ ВСЕГДА — даже когда ответом будет отказ.
+        #
+        # Иначе соединение закрывается с непрочитанными байтами, Windows
+        # отвечает на это сбросом (RST), и клиент получает
+        # ConnectionAbortedError [WinError 10053] ВМЕСТО нашего 403. То есть
+        # причину отказа не видит никто: ни человек, ни проверка.
+        #
+        # Замерено 11.09.2026: тест про отказ без токена падал именно так —
+        # не «сервер не отказал», а «отказ не доехал».
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            сырое = self.rfile.read(length) if length else b""
+        except Exception:
+            сырое = b""
+
         if not self._authorised():
             self._send(403, json.dumps({"error": "forbidden"}))
             return
@@ -1576,8 +1608,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}") if length else {}
+            payload = json.loads(сырое or b"{}")
         except Exception:
             payload = {}
 
