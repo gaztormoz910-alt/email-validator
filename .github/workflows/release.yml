@@ -276,6 +276,21 @@ jobs:
           pip install -r requirements.txt
           python -m spacy download en_core_web_sm
 
+      - name: Проверить, что движок окна вообще встал
+        run: |
+          # Ставится он по маркеру `sys_platform == "linux"` из requirements.
+          # Если маркер не сработал или колёс под этот Python нет, PyQt6 не
+          # встанет, и узнать об этом на шаге сборки было бы поздно: она
+          # молча собрала бы программу без окна. Замерено на прогоне 1.1.5.
+          set +e
+          OUT=$(python -c "import PyQt6, qtpy; from PyQt6 import QtWebEngineWidgets as W; print('Qt есть:', PyQt6.__file__); print('WebEngine есть:', W.__name__)" 2>&1); RC=$?
+          echo "$OUT"
+          pip list 2>/dev/null | grep -i -E "pyqt|qtpy" || echo "в списке пакетов Qt не видно"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Движок окна Linux::$(echo "$OUT" | tail -8 | paste -sd '~' -)"
+            exit $RC
+          fi
+
       - name: Определить версию
         id: ver
         run: |
@@ -309,7 +324,14 @@ jobs:
           fi
 
       - name: Собрать программу
-        run: python -m PyInstaller --noconfirm --clean --log-level WARN MailFact.spec
+        run: |
+          set +e
+          OUT=$(python -m PyInstaller --noconfirm --clean --log-level WARN MailFact.spec 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Сборка Linux::$(echo "$OUT" | tail -15 | paste -sd '~' -)"
+            exit $RC
+          fi
 
       - name: Проверить зависимости внутри сборки
         run: |
