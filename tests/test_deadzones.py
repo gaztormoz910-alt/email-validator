@@ -12,6 +12,7 @@ SERVFAIL и сбой прокси — это НАША неудача, и хор�
 нельзя. Обе правки существуют ровно затем, чтобы отделить первое от второго,
 и половина проверок ниже сторожит именно вторую половину этого правила.
 """
+import pytest
 import unittest
 
 import dns.resolver
@@ -133,6 +134,7 @@ class _Резолвер:
         raise dns.exception.Timeout()
 
 
+@pytest.mark.настоящий_mx_hosts_alive
 class TestХостИзMXНеСуществует(unittest.TestCase):
     """MX-запись живёт в DNS отдельно от сервера, на который указывает.
 
