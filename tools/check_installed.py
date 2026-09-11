@@ -277,9 +277,12 @@ def main():
         #
         # LocalAppData той уборке не подлежит. MAILFACT_WORK позволяет
         # указать другое место — на чужой машине путь другой.
+        # НЕ LocalAppData: python из Microsoft Store его не видит.
+        # Замерено 12.09.2026 — у него виртуализованный вид файловой системы,
+        # и созданной там папки он не находит вовсе. Профиль пользователя
+        # видят и python, и node, и bash.
         корень = os.environ.get("MAILFACT_WORK") or os.path.join(
-            os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
-            "MailFact-work")
+            os.path.expanduser("~"), "MailFact-work")
         врем = os.path.join(корень, "check")
         os.makedirs(врем, exist_ok=True)
         установщик = args.setup

@@ -329,16 +329,33 @@ def test_control_reaper_with_nothing_new_does_nothing():
 
 
 def test_control_reaper_survives_without_psutil():
-    """Без psutil уборщик молчит, а не роняет закрытие программы.
+    """Без psutil уборщик не роняет закрытие программы.
 
     Он зовётся последним, когда работа уже сделана: исключение отсюда стало
     бы последним, что владелец увидит.
+
+    ПРОВЕРКА ПЕРЕНАЦЕЛЕНА 12.09.2026. Раньше здесь стояло
+    `assert reaper.snapshot() == 0` — то есть закреплялось, что без psutil
+    уборщик СЛЕПОЙ. Это было правдой, пока перепись процессов шла через
+    psutil, и стоило владельцу двадцати трёх секунд на каждом запуске: на его
+    машине 4038 процессов, и psutil открывал их по одному.
+
+    Теперь на Windows перепись делает один системный вызов, и psutil для неё
+    не нужен вовсе. Требовать ноля значило бы требовать вернуть медленный
+    способ обратно.
     """
     reaper = WebViewReaper()
     сохранён = sys.modules.get("psutil")
     sys.modules["psutil"] = None        # импорт даст ImportError
     try:
-        assert reaper.snapshot() == 0
+        сколько = reaper.snapshot()
+        assert isinstance(сколько, int), "снимок обязан вернуть число"
+        if sys.platform == "win32":
+            # На Windows перепись psutil не нужна: она обязана работать.
+            assert isinstance(reaper.до, set)
+        else:
+            assert сколько == 0, "без psutil вне Windows переписи нет"
+        # Уборка без psutil молчит и не падает при любом раскладе.
         assert reaper.reap() == 0
     finally:
         if сохранён is None:
