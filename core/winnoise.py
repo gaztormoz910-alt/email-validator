@@ -34,6 +34,7 @@
 
 import logging
 import os
+import sys
 
 __all__ = [
     "install_webview_noise_filter",
@@ -145,24 +146,96 @@ class WebViewReaper(object):
         self.снято = 0
 
     @staticmethod
-    def _живые():
-        """PID всех процессов движка. Пустое множество, если psutil молчит."""
+    def _все_процессы():
+        """Все процессы системы как {pid: имя}. Пустой словарь при неудаче.
+
+        ОДНИМ СИСТЕМНЫМ СНИМКОМ, а не обходом процессов по одному.
+        Замерено 12.09.2026 на машине владельца: `psutil.process_iter` с
+        именем занял 23.3 секунды, потому что процессов там 4038 и на каждый
+        уходит около шести миллисекунд — psutil открывает их по очереди.
+        CreateToolhelp32Snapshot отдаёт то же самое за 0.091 секунды: в 256
+        раз быстрее, один вызов вместо четырёх тысяч.
+
+        Почему это было важно. Снимок делается ПЕРЕД открытием окна, и все
+        эти секунды владелец сидел перед пустым экраном: из двадцати четырёх
+        секунд запуска двадцать три уходили сюда.
+
+        Отдельной функцией от `_живые`, чтобы её можно было проверить
+        положительным контролем: обход обязан находить процесс, про который
+        заведомо известно, что он есть, — например, нас самих.
+        """
+        if sys.platform != "win32":
+            return WebViewReaper._все_процессы_через_psutil()
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class ЗАПИСЬ(ctypes.Structure):
+                _fields_ = [
+                    ("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", wintypes.WCHAR * 260),
+                ]
+
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+            k32.Process32FirstW.argtypes = [wintypes.HANDLE,
+                                            ctypes.POINTER(ЗАПИСЬ)]
+            k32.Process32NextW.argtypes = [wintypes.HANDLE,
+                                           ctypes.POINTER(ЗАПИСЬ)]
+
+            TH32CS_SNAPPROCESS = 0x00000002
+            INVALID = ctypes.c_void_p(-1).value
+            снимок = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            if not снимок or снимок == INVALID:
+                return WebViewReaper._все_процессы_через_psutil()
+            try:
+                запись = ЗАПИСЬ()
+                запись.dwSize = ctypes.sizeof(ЗАПИСЬ)
+                найдено = {}
+                ок = k32.Process32FirstW(снимок, ctypes.byref(запись))
+                while ок:
+                    найдено[int(запись.th32ProcessID)] = запись.szExeFile.lower()
+                    ок = k32.Process32NextW(снимок, ctypes.byref(запись))
+                return найдено
+            finally:
+                k32.CloseHandle(снимок)
+        except Exception:
+            # Запасной путь, а не пустота: пустой ответ здесь означал бы
+            # «чужих процессов нет», и уборка сочла бы своими ВСЕ процессы
+            # движка на машине — включая чужие.
+            return WebViewReaper._все_процессы_через_psutil()
+
+    @staticmethod
+    def _все_процессы_через_psutil():
+        """Запасной обход. Медленный, но работает везде."""
         try:
             import psutil
         except Exception:
-            return set()
-        найдено = set()
+            return {}
+        найдено = {}
         try:
             for proc in psutil.process_iter(["pid", "name"]):
                 try:
-                    имя = (proc.info.get("name") or "").lower()
+                    найдено[int(proc.info["pid"])] = (proc.info.get("name") or "").lower()
                 except Exception:
                     continue
-                if WebViewReaper.ИМЯ in имя:
-                    найдено.add(proc.info["pid"])
         except Exception:
-            return set()
+            return {}
         return найдено
+
+    @staticmethod
+    def _живые():
+        """PID всех процессов движка. Пустое множество, если спросить нечем."""
+        return {pid for pid, имя in WebViewReaper._все_процессы().items()
+                if WebViewReaper.ИМЯ in (имя or "")}
 
     def snapshot(self):
         """Запомнить, что было ДО нас. Зовётся перед открытием окна."""

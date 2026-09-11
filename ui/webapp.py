@@ -28,12 +28,14 @@
 же ResultStore, что и прежнее окно.
 """
 
+import ctypes
 import hashlib
 import io
 import json
 import mimetypes
 import os
 import secrets
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1897,19 +1899,25 @@ def run(selftest_close=None):
     """
     # ДО импорта webview: WebView2 читает переменную окружения в момент
     # создания движка, и выставленная позже она уже ни на что не влияет.
+    from core.timing import включено, отметить, записать
+
     apply_no_throttle()
     # Туда же — уровень логов Chromium. Он пишет в stderr сам, мимо logging
     # Python, и через фильтр его не поймать.
     quiet_chromium()
+    отметить("настройки движка")
 
     import webview
 
     api = ValidatorApi()
+    отметить("ValidatorApi()")
     _server, port, token = start_api_server(api)
+    отметить("мост поднят")
 
     # Поставляемые списки кладутся в пишущуюся папку до первого обращения к
     # ним: иначе первый же запуск установленной копии не найдёт своих данных.
     seed_data()
+    отметить("поставляемые списки на месте")
 
     # ЗАГОЛОВОК — ТОЛЬКО ИМЯ, БЕЗ ВЕРСИИ.
     #
@@ -1925,6 +1933,7 @@ def run(selftest_close=None):
         background_color="#0A0E14",
     )
     api.window = window
+    отметить("окно создано")
 
     # Красная стена при старте — это одно сообщение pywebview с трассировкой
     # .NET на девять строк. Показываем вместо неё одну строку по-русски и
@@ -1932,6 +1941,7 @@ def run(selftest_close=None):
     # печатает как раньше: фильтр трогает ровно это сообщение.
     install_webview_noise_filter(
         on_hint=lambda текст: api._on_log("[WARN] " + текст, "trap"))
+    отметить("фильтр шума движка")
 
     api._on_log("[INFO] Валидатор готов к работе.", "info")
     api._on_log("[INFO] Выберите базу адресов и список прокси.", "info")
@@ -1941,12 +1951,15 @@ def run(selftest_close=None):
     # приходилось по журналу событий Windows — который про поломку ВНУТРИ
     # процесса не знает ничего.
     _announce_past_crashes(api)
+    отметить("разбор прошлых аварий")
     WindowWatchdog(api).start()
+    отметить("сторож окна")
 
     # Кого не трогать при уборке: всё, что уже крутилось до нас. Снимок
     # обязан быть СЕЙЧАС — после старта наши и чужие процессы неразличимы.
     reaper = WebViewReaper()
     reaper.snapshot()
+    отметить("снимок чужих процессов движка")
 
     if selftest_close:
         # Закрываем окно из отдельного потока: webview.start() владеет
@@ -1964,7 +1977,31 @@ def run(selftest_close=None):
     # WebView2 создаст окно, и до этого ставить её просто некуда.
     from core.winicon import apply_when_shown
     apply_when_shown(resource_path("assets", "MailFact.ico"))
+    отметить("иконка поставлена в очередь")
 
+    if включено():
+        # Последняя отметка — по СОБЫТИЮ «показано», а не по возврату из
+        # create_window: окно создаётся мгновенно, а показывается позже, и
+        # владелец ждёт именно показа.
+        def _замер_до_показа():
+            try:
+                window.events.shown.wait(180)
+            except Exception:
+                pass
+            отметить("окно показалось")
+            try:
+                записать(os.environ.get("MAILFACT_TIMING_FILE", "timing.log"))
+            except Exception:
+                pass
+            try:
+                window.destroy()
+            except Exception:
+                pass
+
+        threading.Thread(target=_замер_до_показа, daemon=True,
+                         name="замер").start()
+
+    отметить("перед webview.start")
     try:
         webview.start(storage_path=_storage_path(), private_mode=False)
     finally:
@@ -1975,6 +2012,5 @@ def run(selftest_close=None):
 
 
 if __name__ == "__main__":
-    import sys
     sys.path.insert(0, ROOT)
     run()

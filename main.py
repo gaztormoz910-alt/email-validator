@@ -13,6 +13,11 @@
 """
 import os
 import sys
+import time
+
+# Момент старта берём ПЕРВОЙ строкой кода: всё, что позже, уже часть запуска,
+# и отсчёт от более поздней точки спрятал бы часть времени от замера.
+_МОМЕНТ_СТАРТА = time.perf_counter()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -110,6 +115,20 @@ except Exception:
     pass
 
 
+def _включить_замер():
+    """Включает отметки времени, если попросили ключом --timing.
+
+    Отдельной функцией, потому что звать её надо ДО первого тяжёлого импорта,
+    а разбор остальных ключей живёт в main().
+    """
+    for i, arg in enumerate(sys.argv):
+        if arg == "--timing":
+            from core.timing import включить
+            включить(_МОМЕНТ_СТАРТА)
+            return sys.argv[i + 1] if i + 1 < len(sys.argv) else "timing.log"
+    return None
+
+
 def run_web():
     """Окно на веб-стеке. При отсутствии pywebview честно объясняет, что делать."""
     # На Linux движок окна выбирается ДО импорта pywebview: он читает эту
@@ -123,6 +142,9 @@ def run_web():
     if sys.platform.startswith("linux"):
         os.environ.setdefault("PYWEBVIEW_GUI", "qt")
 
+    from core.timing import отметить
+
+    отметить("до import webview")
     try:
         import webview  # noqa: F401
     except ImportError:
@@ -133,10 +155,14 @@ def run_web():
     # Имя приложения для панели задач. Обязано стоять ДО создания окна:
     # после Windows уже сгруппировала окно под чужим идентификатором, и
     # при запуске из исходников на панели висела бы иконка python.exe.
+    отметить("import webview")
+
     from core.winicon import set_app_user_model_id
     set_app_user_model_id("MailFact.App")
+    отметить("имя для панели задач")
 
     from ui.webapp import run
+    отметить("import ui.webapp")
 
     # --selftest-close N: открыть окно и закрыть его через N секунд. Нужен
     # проверке про осиротевшие процессы движка, см. .unlazy/round2.
@@ -151,6 +177,14 @@ def run_web():
 
 
 def main():
+    # --timing ФАЙЛ: пройти обычный путь запуска, записав отметки времени на
+    # каждом шаге, и закрыть окно, как только оно показалось. Нужен потому,
+    # что снаружи видно только «двадцать четыре секунды», а какой шаг их съел
+    # — не видно вовсе.
+    путь_замера = _включить_замер()
+    if путь_замера:
+        os.environ["MAILFACT_TIMING_FILE"] = путь_замера
+
     # --version ФАЙЛ: записать свой номер версии в файл и выйти.
     #
     # ЗАЧЕМ ОТДЕЛЬНЫЙ КЛЮЧ. Версия больше не показывается в заголовке окна —
