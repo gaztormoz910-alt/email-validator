@@ -195,37 +195,50 @@ def test_aborted_control_real_failure_still_recorded(bridge, log):
 
 # ══════════════════════════ B3: объявление не кричит
 
-def test_announce_does_not_shout(log):
-    """О ПРОШЛОЙ аварии сообщается спокойно и одной строкой."""
+def test_announce_says_nothing_in_the_window(log):
+    """О ПРОШЛОЙ аварии в окне не сообщается вовсе.
+
+    ПУТЬ ЭТОГО ТРЕБОВАНИЯ. Сначала было красное полотно, потом одна спокойная
+    строка с меткой INFO, теперь — тишина. 11.09.2026 владелец сказал прямо:
+    «не надо мне лишние логи отображать». Сообщение о ВЧЕРАШНЕЙ аварии
+    встречало его на пустом месте, когда прямо сейчас ничего не сломалось, и
+    сделать с ним он всё равно ничего не мог.
+
+    Проверка не удалена, а перевёрнута: раньше сторожила формулировку, теперь
+    сторожит отсутствие строки при сохранной записи на диске.
+    """
     from ui.webapp import _announce_past_crashes
 
     crashlog.log_crash("рабочий поток", "вчерашняя авария", ValueError("x"))
     api = ValidatorApi()
+    # Считает — значит запись видит. Пустое окно не оттого, что искать нечего.
     assert _announce_past_crashes(api) == 1
 
     rows = api.log_tail()["log"]
-    assert len(rows) == 1, "объявление растянуто на %d строк" % len(rows)
-    assert rows[0]["tag"] == "info", "прошлая авария помечена как текущая"
-    assert "[DEAD]" not in rows[0]["text"]
-    assert crash_path_in(rows[0]["text"]), "не сказано, где смотреть"
+    assert rows == [], "в окне снова появилась строка: %r" % (rows,)
 
 
 def crash_path_in(text):
     return crashlog.crash_log_path() in text
 
 
-def test_announce_control_still_says_something(log):
-    """Контроль: спокойно — не значит молча.
+def test_announce_control_the_record_survives(log):
+    """Контроль: тишина в окне — не потеря улики.
 
-    Владелец должен узнать о вчерашней аварии, иначе журнал бесполезен.
+    Если бы вместе с выводом исчезла и запись на диске, разбирать аварию
+    стало бы нечем, а сторож превратился бы в украшение.
     """
     from ui.webapp import _announce_past_crashes
 
     crashlog.log_crash("мост", "падение обработчика", ValueError("x"))
     api = ValidatorApi()
-    _announce_past_crashes(api)
-    text = " ".join(row["text"] for row in api.log_tail()["log"])
-    assert "сбо" in text.lower(), "о сбое не сказано вовсе"
+    assert _announce_past_crashes(api) >= 1
+    assert crashlog.recent_crashes(within_hours=24), "запись о сбое потерялась"
+    # Сверяем по САМОМУ ФАЙЛУ: recent_crashes отдаёт только заголовки записей,
+    # и по ним не видно, та ли это авария.
+    файл = io.open(crashlog.crash_log_path(), encoding="utf-8",
+                   errors="replace").read()
+    assert "падение обработчика" in файл, "запись есть, но не та"
 
 
 # ══════════════════════════ B4: пустых записей не бывает
