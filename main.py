@@ -100,6 +100,15 @@ def main():
     # и выйти с кодом 0/1. Нужен потому, что открывшееся окно не доказывает
     # почти ничего: словари имён, модель spaCy, корпус wordsegment и запись
     # sqlite подключаются позже и ломаются уже у пользователя.
+    # --selftest-dialog ЛОГ: поднять настоящее окно и проверить САМ диалог
+    # выбора файла. Обычный самотест подменяет его результат и до него не
+    # достаёт, а сломался у владельца именно он.
+    for i, arg in enumerate(sys.argv):
+        if arg == "--selftest-dialog":
+            путь = sys.argv[i + 1] if i + 1 < len(sys.argv) else "dialog.log"
+            from core.dialogprobe import run as проба_диалога
+            raise SystemExit(проба_диалога(путь))
+
     for i, arg in enumerate(sys.argv):
         if arg == "--selftest":
             путь = sys.argv[i + 1] if i + 1 < len(sys.argv) else "selftest.log"

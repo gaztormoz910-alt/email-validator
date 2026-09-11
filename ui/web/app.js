@@ -19,7 +19,22 @@ async function api(method, payload = {}) {
     headers: { "Content-Type": "application/json", "X-Token": TOKEN },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(`${method}: ${res.status}`);
+  if (!res.ok) {
+    // ТЕКСТ ОШИБКИ ЧИТАЕТСЯ, А НЕ ВЫБРАСЫВАЕТСЯ. Раньше здесь стояло
+    // `${method}: ${res.status}`, и владелец видел «choose: 500» — код без
+    // единого слова о причине. Причина при этом лежала прямо в теле ответа:
+    // питон отдаёт {"error": "ТипИсключения: текст"}. Разбирать такой сбой
+    // можно было только по журналу, а журнал живёт рядом с программой и
+    // исчезает вместе с ней.
+    let причина = "";
+    try {
+      const тело = await res.json();
+      причина = String((тело && тело.error) || "");
+    } catch {
+      /* тело могло быть не json — тогда остаётся один код, и это честно */
+    }
+    throw new Error(причина ? `${method}: ${причина}` : `${method}: ${res.status}`);
+  }
   return res.json();
 }
 
@@ -40,6 +55,24 @@ function reportClientCrash(message, where, stack) {
   // первую запись.
   if (crashReports >= 20) return;
   crashReports += 1;
+
+  // Вкладка, на которой случился сбой. Без неё ВСЕ сообщения окна уезжали в
+  // журнал валидатора: владелец нажимал кнопку во вкладке «Сбор адресов», а
+  // ошибка появлялась в соседней, и выглядело это так, будто ломается не то,
+  // что он трогал.
+  //
+  // Своя try вокруг ОДНОГО чтения, и вот почему. `ui` объявлена через `const`
+  // ниже по файлу, а сбой может случиться ещё при первом выполнении скрипта —
+  // до этой строки. Обращение к `const` из его мёртвой зоны бросает
+  // ReferenceError, причём даже `typeof`. Без этой ловушки отчёт о сбое сам
+  // стал бы сбоем и не уехал бы вовсе.
+  let вкладка = "";
+  try {
+    вкладка = (ui && ui.mode) ? String(ui.mode) : "";
+  } catch {
+    /* до объявления ui вкладки просто нет — отчёт уходит без неё */
+  }
+
   try {
     fetch("/api/client_error", {
       method: "POST",
@@ -48,6 +81,7 @@ function reportClientCrash(message, where, stack) {
         message: String(message || "").slice(0, 500),
         where: String(where || "").slice(0, 300),
         stack: String(stack || "").slice(0, 4000),
+        mode: вкладка,
       }),
     }).catch(() => {});
   } catch {
@@ -1018,9 +1052,20 @@ async function tick() {
 function bindDrop(dropId, kind) {
   const el = $(dropId);
   el.addEventListener("click", async () => {
-    const data = await api("choose", { kind });
-    showSources(data);
-    if (data.error) toast(data.error, "bad");
+    // ОШИБКА ЛОВИТСЯ ЗДЕСЬ, а не улетает необработанным отказом обещания.
+    // Раньше сбой выбора файла доходил до владельца в виде красной строки
+    // «Сбой в окне: [отказ обещания] Error: choose: 500» — то есть как
+    // поломка ПРОГРАММЫ, хотя человек всего лишь нажал кнопку. Сообщение
+    // должно объяснять, что случилось с ЕГО действием, и там же, где он это
+    // действие совершил.
+    try {
+      const data = await api("choose", { kind });
+      showSources(data);
+      if (data.error) toast(data.error, "bad");
+    } catch (err) {
+      const текст = (err && err.message) ? err.message : String(err);
+      toast("Не удалось выбрать файл: " + текст, "bad");
+    }
   });
   el.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); el.click(); }
@@ -1036,11 +1081,25 @@ function bindDrop(dropId, kind) {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = async () => {
-      const data = await api("paste", { kind, text: String(reader.result || "") });
-      showSources(data);
-      // Перетаскивание проходит ту же проверку, что и вставка: файл, брошенный
-      // не в ту зону, — самый частый способ перепутать списки.
-      toast(data.error || `Загружено: ${file.name}`, data.error ? "bad" : "ok");
+      // Ловушка по той же причине, что и у кнопки: без неё сбой уезжает
+      // необработанным отказом обещания и приходит к владельцу как «сбой
+      // окна» вместо понятного «файл не загрузился, вот почему».
+      try {
+        const data = await api("paste", { kind, text: String(reader.result || "") });
+        showSources(data);
+        // Перетаскивание проходит ту же проверку, что и вставка: файл, брошенный
+        // не в ту зону, — самый частый способ перепутать списки.
+        toast(data.error || `Загружено: ${file.name}`, data.error ? "bad" : "ok");
+      } catch (err) {
+        const текст = (err && err.message) ? err.message : String(err);
+        toast(`Не удалось загрузить ${file.name}: ${текст}`, "bad");
+      }
+    };
+    reader.onerror = () => {
+      // Файл может не прочитаться и самим браузером — например, если его
+      // удалили или он занят. Молчать здесь нельзя: человек бросил файл и
+      // вправе узнать, что ничего не вышло.
+      toast(`Не удалось прочитать ${file.name}`, "bad");
     };
     reader.readAsText(file);
   });
@@ -1167,10 +1226,22 @@ pasteModal.querySelector("form").addEventListener("submit", async (event) => {
 
   // Правка заменяет содержимое поля целиком, а не добавляется к нему: иначе
   // исправленный список лёг бы поверх старого, и оба ушли бы в проверку.
-  if (sourceText[pasteKind] !== null && sourceText[pasteKind] !== "") {
-    await api("clear", { kind: pasteKind });
+  // Ошибка показывается В САМОМ ОКНЕ ВСТАВКИ, где человек и нажал кнопку.
+  // Без ловушки она улетала необработанным отказом обещания, окно вставки
+  // оставалось открытым как ни в чём не бывало, а красная строка про «сбой
+  // окна» появлялась в журнале за ним.
+  let data;
+  try {
+    if (sourceText[pasteKind] !== null && sourceText[pasteKind] !== "") {
+      await api("clear", { kind: pasteKind });
+    }
+    data = await api("paste", { kind: pasteKind, text });
+  } catch (err) {
+    const текст = (err && err.message) ? err.message : String(err);
+    setText($("#pasteError"), "Не удалось добавить: " + текст);
+    show($("#pasteError"), true);
+    return;
   }
-  const data = await api("paste", { kind: pasteKind, text });
   showSources(data);
   if (data.error) {
     // Проверку делает питон, а не страница: два разных разбора одних и тех
