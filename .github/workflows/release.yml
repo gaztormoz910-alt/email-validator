@@ -200,9 +200,20 @@ jobs:
         run: |
           # Тот же путь основного сценария, что на Windows. Дисплея не
           # требует: окно здесь не открывается вовсе.
+          #
+          # set +e обязателен. Оболочка шагов GitHub запускается с -e, и без
+          # него падение программы обрывало бы шаг ДО вывода журнала: причину
+          # провала было бы не увидеть вообще. Ровно это и случилось на
+          # прогоне 1.1.1, где macOS упал молча.
+          set +e
           ./dist/MailFact.app/Contents/MacOS/MailFact --selftest selftest.log
           КОД=$?
-          cat selftest.log || true
+          echo "--- журнал прогона ---"
+          cat selftest.log 2>/dev/null || echo "журнал не создан"
+          if [ $КОД -ne 0 ]; then
+            # Лог сборки требует входа, аннотация — нет.
+            echo "::error title=Прогон macOS::$(tail -12 selftest.log 2>/dev/null | paste -sd '~' - || echo 'журнала нет')"
+          fi
           exit $КОД
 
       - name: Поднять окно
@@ -301,13 +312,33 @@ jobs:
         run: python -m PyInstaller --noconfirm --clean --log-level WARN MailFact.spec
 
       - name: Проверить зависимости внутри сборки
-        run: python tools/check_deps.py --dist dist/MailFact
+        run: |
+          set +e
+          ВЫВОД=$(python tools/check_deps.py --dist dist/MailFact 2>&1); КОД=$?
+          echo "$ВЫВОД"
+          if [ $КОД -ne 0 ]; then
+            echo "::error title=Зависимости Linux::$(echo "$ВЫВОД" | tail -12 | paste -sd '~' -)"
+            exit $КОД
+          fi
 
       - name: Настоящий прогон внутри собранной программы
         run: |
+          # Тот же путь основного сценария, что на Windows. Дисплея не
+          # требует: окно здесь не открывается вовсе.
+          #
+          # set +e обязателен. Оболочка шагов GitHub запускается с -e, и без
+          # него падение программы обрывало бы шаг ДО вывода журнала: причину
+          # провала было бы не увидеть вообще. Ровно это и случилось на
+          # прогоне 1.1.1, где macOS упал молча.
+          set +e
           ./dist/MailFact/MailFact --selftest selftest.log
           КОД=$?
-          cat selftest.log || true
+          echo "--- журнал прогона ---"
+          cat selftest.log 2>/dev/null || echo "журнал не создан"
+          if [ $КОД -ne 0 ]; then
+            # Лог сборки требует входа, аннотация — нет.
+            echo "::error title=Прогон Linux::$(tail -12 selftest.log 2>/dev/null | paste -sd '~' - || echo 'журнала нет')"
+          fi
           exit $КОД
 
       - name: Открыть окно под виртуальным экраном
