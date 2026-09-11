@@ -59,11 +59,11 @@ jobs:
         shell: bash
         run: |
           set +e
-          ВЫВОД=$(python tools/check_icon.py 2>&1); КОД=$?
-          echo "$ВЫВОД"
-          if [ $КОД -ne 0 ]; then
-            echo "::error title=Иконка::$(echo "$ВЫВОД" | tail -12 | paste -sd '~' -)"
-            exit $КОД
+          OUT=$(python tools/check_icon.py 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Иконка::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
           fi
 
       - name: Собрать .exe
@@ -186,11 +186,11 @@ jobs:
         shell: bash
         run: |
           set +e
-          ВЫВОД=$(python tools/check_icon.py 2>&1); КОД=$?
-          echo "$ВЫВОД"
-          if [ $КОД -ne 0 ]; then
-            echo "::error title=Иконка::$(echo "$ВЫВОД" | tail -12 | paste -sd '~' -)"
-            exit $КОД
+          OUT=$(python tools/check_icon.py 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Иконка::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
           fi
 
       - name: Собрать .app
@@ -207,14 +207,14 @@ jobs:
           # прогоне 1.1.1, где macOS упал молча.
           set +e
           ./dist/MailFact.app/Contents/MacOS/MailFact --selftest selftest.log
-          КОД=$?
+          RC=$?
           echo "--- журнал прогона ---"
           cat selftest.log 2>/dev/null || echo "журнал не создан"
-          if [ $КОД -ne 0 ]; then
+          if [ $RC -ne 0 ]; then
             # Лог сборки требует входа, аннотация — нет.
             echo "::error title=Прогон macOS::$(tail -12 selftest.log 2>/dev/null | paste -sd '~' - || echo 'журнала нет')"
           fi
-          exit $КОД
+          exit $RC
 
       - name: Поднять окно
         run: |
@@ -225,21 +225,21 @@ jobs:
           # НЕ падает: при отсутствующей библиотеке или сломанном .app она
           # умерла бы за первые секунды.
           ./dist/MailFact.app/Contents/MacOS/MailFact &
-          ПИД=$!
+          APPPID=$!
           sleep 40
-          if ! kill -0 $ПИД 2>/dev/null; then
-            wait $ПИД; echo "программа завершилась сама, код $?"; exit 1
+          if ! kill -0 $APPPID 2>/dev/null; then
+            wait $APPPID; echo "программа завершилась сама, код $?"; exit 1
           fi
-          kill $ПИД 2>/dev/null || true
+          kill $APPPID 2>/dev/null || true
           echo "программа прожила 40 секунд с поднятым интерфейсом"
 
       - name: Собрать .dmg
         run: |
           hdiutil create -volname "MailFact" -srcfolder "dist/MailFact.app" \
             -ov -format UDZO "MailFact-macos.dmg"
-          МБ=$(du -m MailFact-macos.dmg | cut -f1)
-          echo "dmg: ${МБ} MB"
-          if [ "$МБ" -lt 60 ]; then echo "dmg подозрительно мал"; exit 1; fi
+          SIZE_MB=$(du -m MailFact-macos.dmg | cut -f1)
+          echo "dmg: ${SIZE_MB} MB"
+          if [ "$SIZE_MB" -lt 60 ]; then echo "dmg подозрительно мал"; exit 1; fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -301,11 +301,11 @@ jobs:
         shell: bash
         run: |
           set +e
-          ВЫВОД=$(python tools/check_icon.py 2>&1); КОД=$?
-          echo "$ВЫВОД"
-          if [ $КОД -ne 0 ]; then
-            echo "::error title=Иконка::$(echo "$ВЫВОД" | tail -12 | paste -sd '~' -)"
-            exit $КОД
+          OUT=$(python tools/check_icon.py 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Иконка::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
           fi
 
       - name: Собрать программу
@@ -314,11 +314,11 @@ jobs:
       - name: Проверить зависимости внутри сборки
         run: |
           set +e
-          ВЫВОД=$(python tools/check_deps.py --dist dist/MailFact 2>&1); КОД=$?
-          echo "$ВЫВОД"
-          if [ $КОД -ne 0 ]; then
-            echo "::error title=Зависимости Linux::$(echo "$ВЫВОД" | tail -12 | paste -sd '~' -)"
-            exit $КОД
+          OUT=$(python tools/check_deps.py --dist dist/MailFact 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Зависимости Linux::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
           fi
 
       - name: Настоящий прогон внутри собранной программы
@@ -332,14 +332,14 @@ jobs:
           # прогоне 1.1.1, где macOS упал молча.
           set +e
           ./dist/MailFact/MailFact --selftest selftest.log
-          КОД=$?
+          RC=$?
           echo "--- журнал прогона ---"
           cat selftest.log 2>/dev/null || echo "журнал не создан"
-          if [ $КОД -ne 0 ]; then
+          if [ $RC -ne 0 ]; then
             # Лог сборки требует входа, аннотация — нет.
             echo "::error title=Прогон Linux::$(tail -12 selftest.log 2>/dev/null | paste -sd '~' - || echo 'журнала нет')"
           fi
-          exit $КОД
+          exit $RC
 
       - name: Открыть окно под виртуальным экраном
         run: |
@@ -351,16 +351,16 @@ jobs:
           # вместо окна вылезла ошибка.
           xvfb-run -a --server-args="-screen 0 1440x900x24" bash -c '
             ./dist/MailFact/MailFact &
-            ПИД=$!
+            APPPID=$!
             sleep 40
-            if ! kill -0 $ПИД 2>/dev/null; then
+            if ! kill -0 $APPPID 2>/dev/null; then
               echo "программа завершилась сама"; exit 1
             fi
-            ЗАГ=$(xdotool search --pid $ПИД --onlyvisible --name "." \
+            TITLE=$(xdotool search --pid $APPPID --onlyvisible --name "." \
                   getwindowname %@ 2>/dev/null | head -1)
-            kill $ПИД 2>/dev/null || true
-            echo "заголовок окна: [$ЗАГ]"
-            case "$ЗАГ" in
+            kill $APPPID 2>/dev/null || true
+            echo "заголовок окна: [$TITLE]"
+            case "$TITLE" in
               MailFact*) echo "окно открылось"; exit 0 ;;
               "")        echo "окна нет вовсе"; exit 1 ;;
               *)         echo "неожиданный заголовок"; exit 1 ;;
@@ -399,9 +399,9 @@ jobs:
           в папку data рядом с собой. Удалить программу — удалить эту папку.
           README
           tar -czf MailFact-linux-x86_64.tar.gz -C dist MailFact
-          МБ=$(du -m MailFact-linux-x86_64.tar.gz | cut -f1)
-          echo "архив: ${МБ} MB"
-          if [ "$МБ" -lt 60 ]; then echo "архив подозрительно мал"; exit 1; fi
+          SIZE_MB=$(du -m MailFact-linux-x86_64.tar.gz | cut -f1)
+          echo "архив: ${SIZE_MB} MB"
+          if [ "$SIZE_MB" -lt 60 ]; then echo "архив подозрительно мал"; exit 1; fi
 
       - uses: actions/upload-artifact@v4
         with:
