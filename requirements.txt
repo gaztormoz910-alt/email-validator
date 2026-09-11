@@ -12,7 +12,17 @@ PySocks>=1.7.1            # import socks — SOCKS4/5 и HTTP CONNECT для SMT
 dnspython>=2.6.0          # import dns — MX, PTR, DNSBL, DoH
 
 # --- Интерфейс ---
-pywebview>=5.0            # окно на веб-стеке (WebView2) — то, что открывается по умолчанию
+pywebview>=5.0            # окно на веб-стеке — то, что открывается по умолчанию
+
+# Движок окна для Linux. Замерено через importlib.metadata.requires('pywebview'):
+# на Windows он сам тянет pythonnet, на macOS — pyobjc (WKWebView встроен в
+# саму систему), а на Linux НЕ ТЯНЕТ НИЧЕГО. Без бэкенда окно там не
+# открывается вовсе. Берём Qt, а не GTK, потому что Qt целиком уезжает внутрь
+# сборки, а GTK потребовал бы от человека системный пакет WebKitGTK — то есть
+# ровно то «доставьте руками», которого быть не должно.
+PyQt6>=6.6; sys_platform == "linux"
+PyQt6-WebEngine>=6.6; sys_platform == "linux"
+QtPy>=2.4; sys_platform == "linux"
 psutil>=5.9.0             # определение числа потоков по железу
 
 # --- Обогащение данными ---

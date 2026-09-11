@@ -1,5 +1,9 @@
 name: build-installer
 
+# ТРИ ОС, ТРИ РАННЕРА. PyInstaller не умеет кросс-сборку: под каждую систему
+# собирает она сама. Поэтому здесь три независимые работы, а четвёртая
+# складывает их результаты в один релиз.
+
 on:
   push:
     tags: ['v*']
@@ -7,15 +11,18 @@ on:
   workflow_dispatch:
 
 permissions:
-  # Нужно, чтобы создать релиз и залить в него файл.
+  # Нужно, чтобы создать релиз и залить в него файлы.
   contents: write
 
 jobs:
-  build:
+
+  # ======================================================================
+  # WINDOWS — установщик .exe
+  # ======================================================================
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -46,10 +53,6 @@ jobs:
         # 1.0.0 — файлы разошлись на один байт контейнера при НУЛЕВОМ
         # отличии пикселей во всех десяти кадрах), и проверка sha256 иконки
         # у пользователя падала на ровном месте.
-        #
-        # check_icon.py даёт ту же гарантию без этой беды: он сверяет каждый
-        # кадр .ico с мастером .png покадрово и по яркости. Устаревший .ico
-        # он поймает, а байты остаются теми же, что в репозитории.
         run: python tools/check_icon.py
 
       - name: Собрать .exe
@@ -63,7 +66,6 @@ jobs:
         run: |
           # Запуск окна не доказывает почти ничего: словари имён, модель
           # spaCy, корпус wordsegment и запись sqlite подключаются позже.
-          # --selftest проходит тот же путь, что основной сценарий.
           $p = Start-Process -FilePath "dist\MailFact\MailFact.exe" `
                -ArgumentList "--selftest","selftest.log" -PassThru -Wait
           if (Test-Path "selftest.log") { Get-Content "selftest.log" }
@@ -72,9 +74,6 @@ jobs:
       - name: Запустить окно
         shell: pwsh
         run: |
-          # БЕЗ ЭТОГО ШАГА можно выпустить релиз, который не стартует:
-          # PyInstaller не падает на отсутствующей зависимости, он просто её
-          # не кладёт, и программа умирает уже у пользователя.
           $p = Start-Process -FilePath "dist\MailFact\MailFact.exe" -PassThru
           Start-Sleep -Seconds 30
           $p.Refresh()
@@ -82,15 +81,11 @@ jobs:
           $title = $p.MainWindowTitle
           Stop-Process -Id $p.Id -Force
           Write-Host "заголовок окна: '$title'"
-          # PyInstaller показывает трассировку в окне с заголовком
-          # "Unhandled exception in script" — проверка ловит именно это.
           if ($title -notlike 'MailFact*') { throw "неожиданный заголовок окна: '$title'" }
 
       - name: Собрать установщик
         shell: pwsh
         run: |
-          # На windows-latest Inno Setup обычно уже стоит; если образ сменится
-          # и его не окажется — ставим сами, чтобы workflow не развалился молча.
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) {
             choco install innosetup -y --no-progress
@@ -107,36 +102,287 @@ jobs:
           if (-not (Test-Path $f)) { throw "нет файла $f" }
           $mb = [math]::Round((Get-Item $f).Length / 1MB, 1)
           Write-Host "установщик: $mb MB"
-          # Порог по факту сборки: спайси и словари имён весят своё, и
-          # установщик меньше сотни мегабайт означал бы, что половина не
-          # попала внутрь.
           if ($mb -lt 60) { throw "установщик подозрительно мал: $mb MB" }
 
-      - name: Проверить установленную копию
+      - name: Проверить, что установщик умеет доставлять WebView2
         shell: pwsh
         run: |
-          # Ставим молча ИЗ СОБРАННОГО установщика и смотрим на то, что
-          # получилось: иконка, версия, окно, размеры иконок окна.
-          python tools/check_installed.py --setup "installer\MailFact-setup.exe"
+          # Раннер — Windows Server, рантайм там обычно уже стоит, и обычная
+          # установка ветку доставки не прошла бы вовсе. Ключ /FORCEWEBVIEW2
+          # заставляет её пройти, и в журнале установки видно, скачался ли
+          # загрузчик и с каким кодом он завершился. Без этого шага ветка,
+          # ради которой всё и делалось, не проверялась бы никогда.
+          $log = "$env:TEMP\wv2.log"
+          $p = Start-Process -FilePath "installer\MailFact-setup.exe" `
+               -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART",
+                             "/FORCEWEBVIEW2=1","/LOG=$log",
+                             "/DIR=$env:TEMP\wv2check" -PassThru -Wait
+          if (-not (Test-Path $log)) { throw "установщик не оставил журнала" }
+          $text = Get-Content $log -Raw
+          if ($text -notmatch 'Качаю загрузчик WebView2') { throw "ветка доставки WebView2 не выполнялась" }
+          if ($text -notmatch 'Загрузчик WebView2 вернул код') { throw "загрузчик WebView2 не запускался" }
+          Select-String -Path $log -Pattern 'WebView2' | ForEach-Object { $_.Line }
+          if ($p.ExitCode -ne 0) { throw "установка вернула $($p.ExitCode)" }
+
+      - name: Проверить установленную копию
+        run: python tools/check_installed.py --setup "installer\MailFact-setup.exe"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MailFact-setup
+          name: windows
           path: installer/MailFact-setup.exe
 
-      - name: Опубликовать релиз
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+  # ======================================================================
+  # macOS — .app внутри .dmg
+  # ======================================================================
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m spacy download en_core_web_sm
+
+      - name: Определить версию
+        id: ver
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            V="${{ github.ref_name }}"; V="${V#v}"
+          else
+            V="0.0.0"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Записать версию в единственный источник
+        run: python tools/set_version.py ${{ steps.ver.outputs.version }}
+
+      - name: Сверить иконку с мастером
+        run: python tools/check_icon.py
+
+      - name: Собрать .app
+        run: python -m PyInstaller --noconfirm --clean --log-level WARN MailFact.spec
+
+      - name: Настоящий прогон внутри собранной программы
+        run: |
+          # Тот же путь основного сценария, что на Windows. Дисплея не
+          # требует: окно здесь не открывается вовсе.
+          ./dist/MailFact.app/Contents/MacOS/MailFact --selftest selftest.log
+          КОД=$?
+          cat selftest.log || true
+          exit $КОД
+
+      - name: Поднять окно
+        run: |
+          # Слабее, чем на Windows и Linux, и это named honestly: заголовок
+          # окна на macOS читается только через AppleScript с разрешением на
+          # управление компьютером, которого у раннера нет. Поэтому здесь
+          # доказывается ровно одно — программа поднимает графический стек и
+          # НЕ падает: при отсутствующей библиотеке или сломанном .app она
+          # умерла бы за первые секунды.
+          ./dist/MailFact.app/Contents/MacOS/MailFact &
+          ПИД=$!
+          sleep 40
+          if ! kill -0 $ПИД 2>/dev/null; then
+            wait $ПИД; echo "программа завершилась сама, код $?"; exit 1
+          fi
+          kill $ПИД 2>/dev/null || true
+          echo "программа прожила 40 секунд с поднятым интерфейсом"
+
+      - name: Собрать .dmg
+        run: |
+          hdiutil create -volname "MailFact" -srcfolder "dist/MailFact.app" \
+            -ov -format UDZO "MailFact-macos.dmg"
+          МБ=$(du -m MailFact-macos.dmg | cut -f1)
+          echo "dmg: ${МБ} MB"
+          if [ "$МБ" -lt 60 ]; then echo "dmg подозрительно мал"; exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: MailFact-macos.dmg
+
+  # ======================================================================
+  # LINUX — архив с программой и ярлыком
+  # ======================================================================
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Системные библиотеки для движка окна
+        # Qt WebEngine приезжает внутри сборки, но опирается на несколько
+        # системных библиотек уровня ОС. Ставим их на раннере, чтобы проверка
+        # окна была настоящей, а не пропущенной.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb xdotool libnss3 libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libxdamage1 libxrandr2 libasound2t64 libgbm1 || \
+          sudo apt-get install -y -qq xvfb xdotool libnss3 libxkbcommon-x11-0 libasound2
+
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m spacy download en_core_web_sm
+
+      - name: Определить версию
+        id: ver
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            V="${{ github.ref_name }}"; V="${V#v}"
+          else
+            V="0.0.0"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Записать версию в единственный источник
+        run: python tools/set_version.py ${{ steps.ver.outputs.version }}
+
+      - name: Сверить иконку с мастером
+        run: python tools/check_icon.py
+
+      - name: Собрать программу
+        run: python -m PyInstaller --noconfirm --clean --log-level WARN MailFact.spec
+
+      - name: Проверить зависимости внутри сборки
+        run: python tools/check_deps.py --dist dist/MailFact
+
+      - name: Настоящий прогон внутри собранной программы
+        run: |
+          ./dist/MailFact/MailFact --selftest selftest.log
+          КОД=$?
+          cat selftest.log || true
+          exit $КОД
+
+      - name: Открыть окно под виртуальным экраном
+        run: |
+          # Selftest доказывает, что собрался ДВИЖОК. Окно он не открывает
+          # вовсе, поэтому про сам интерфейс не говорит ничего. Здесь
+          # программа поднимается по-настоящему на виртуальном экране, и
+          # заголовок читается у окна, найденного ПО PID — искать по
+          # ожидаемому тексту значило бы заранее исключить случай, когда
+          # вместо окна вылезла ошибка.
+          xvfb-run -a --server-args="-screen 0 1440x900x24" bash -c '
+            ./dist/MailFact/MailFact &
+            ПИД=$!
+            sleep 40
+            if ! kill -0 $ПИД 2>/dev/null; then
+              echo "программа завершилась сама"; exit 1
+            fi
+            ЗАГ=$(xdotool search --pid $ПИД --onlyvisible --name "." \
+                  getwindowname %@ 2>/dev/null | head -1)
+            kill $ПИД 2>/dev/null || true
+            echo "заголовок окна: [$ЗАГ]"
+            case "$ЗАГ" in
+              MailFact*) echo "окно открылось"; exit 0 ;;
+              "")        echo "окна нет вовсе"; exit 1 ;;
+              *)         echo "неожиданный заголовок"; exit 1 ;;
+            esac
+          '
+
+      - name: Собрать архив с ярлыком
+        run: |
+          cp assets/MailFact.png dist/MailFact/MailFact.png
+          cat > dist/MailFact/MailFact.desktop <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=MailFact
+          Comment=Проверка существования почтовых ящиков
+          Exec=MailFact
+          Icon=MailFact
+          Terminal=false
+          Categories=Network;Email;
+          DESKTOP
+          cat > dist/MailFact/УСТАНОВКА.txt <<'README'
+          MailFact для Linux
+          ==================
+
+          Ставить ничего не нужно: программа лежит целиком в этой папке.
+
+              ./MailFact
+
+          Чтобы появился ярлык в меню приложений:
+
+              mkdir -p ~/.local/share/applications ~/.local/share/icons
+              cp MailFact.png ~/.local/share/icons/
+              sed "s|Exec=MailFact|Exec=$PWD/MailFact|" MailFact.desktop \
+                  > ~/.local/share/applications/MailFact.desktop
+
+          Данные (кэш проверок, настройки, списки доменов) программа пишет
+          в папку data рядом с собой. Удалить программу — удалить эту папку.
+          README
+          tar -czf MailFact-linux-x86_64.tar.gz -C dist MailFact
+          МБ=$(du -m MailFact-linux-x86_64.tar.gz | cut -f1)
+          echo "архив: ${МБ} MB"
+          if [ "$МБ" -lt 60 ]; then echo "архив подозрительно мал"; exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: MailFact-linux-x86_64.tar.gz
+
+  # ======================================================================
+  # РЕЛИЗ — один тег, три файла
+  # ======================================================================
+  release:
+    needs: [windows, macos, linux]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: артефакты
+
+      - name: Что собралось
+        run: ls -lR артефакты
+
+      - name: Определить версию
+        id: ver
+        run: |
+          V="${{ github.ref_name }}"; V="${V#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
         with:
           name: MailFact ${{ steps.ver.outputs.version }}
-          files: installer/MailFact-setup.exe
+          files: |
+            артефакты/windows/MailFact-setup.exe
+            артефакты/macos/MailFact-macos.dmg
+            артефакты/linux/MailFact-linux-x86_64.tar.gz
           body: |
-            **Windows 10/11, 64-bit.** Скачайте `MailFact-setup.exe` ниже и запустите —
-            Python и все библиотеки внутри, ставить отдельно ничего не нужно.
+            Проверка существования почтовых ящиков. Python и все библиотеки
+            внутри — ставить отдельно ничего не нужно.
 
-            При первом запуске Windows покажет синий экран «Windows защитила ваш
-            компьютер». Это ожидаемо для любого установщика без платной цифровой
-            подписи: нажмите **Подробнее** → **Выполнить в любом случае**.
+            | Система | Файл | Как ставить |
+            |---|---|---|
+            | Windows 10/11, 64-bit | `MailFact-setup.exe` | запустить, установка идёт в профиль пользователя без прав администратора |
+            | macOS 13+ (Apple Silicon) | `MailFact-macos.dmg` | открыть, перетащить MailFact в «Программы» |
+            | Linux x86_64 | `MailFact-linux-x86_64.tar.gz` | распаковать, запустить `./MailFact`; внутри лежит `УСТАНОВКА.txt` |
 
-            Программа устанавливается в профиль пользователя, права администратора
-            не требуются.
+            **Про предупреждения системы.** Цифровой подписи у сборок нет —
+            она платная. Windows покажет синий экран «Windows защитила ваш
+            компьютер»: **Подробнее** -> **Выполнить в любом случае**. macOS
+            скажет «не удаётся проверить разработчика»: правая кнопка по
+            программе -> **Открыть**.
+
+            **Windows.** Установщик сам доставит компонент Microsoft WebView2,
+            если его нет в системе — на Windows 11 он есть всегда, на
+            Windows 10 не обязательно.
+
+            **Чего не будет вне Windows.** Два движка сбора адресов из вкладки
+            «Сбор адресов» — «AOL (Tor)» и «Yahoo (Tor)» — работают только на
+            Windows: Tor лежит в проекте бинарниками под неё. Остальные движки
+            и вся проверка почты работают везде одинаково.
