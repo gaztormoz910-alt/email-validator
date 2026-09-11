@@ -326,6 +326,19 @@ def test_utf8_live_answer_comes_from_the_server(monkeypatch):
     monkeypatch.setattr(v, "get_mx_records", lambda d: ["mx.example"])
     monkeypatch.setattr(v, "is_catch_all_domain", lambda d, mx: False)
     monkeypatch.setattr(v, "stealth_smtp_ping", fake_ping)
+    # ЖИВОСТЬ MX ТОЖЕ ПОДМЕНЯЕМ, иначе тест мерит не то, что заявляет.
+    #
+    # Замерено 11.09.2026: в одиночку этот тест падал, а в полном наборе
+    # проходил. Причина не в коде: имя «mx.example» не существует, DNS честно
+    # отвечает NXDOMAIN, и check_email выносит invalid ЕЩЁ ДО того, как
+    # посмотрит на ответ сессии. Это правильное поведение продукта — домен с
+    # несуществующим MX-сервером почту принять не может. Но проверка здесь про
+    # ДРУГОЕ: про честный ответ «сервер не объявил SMTPUTF8». Оставлять в ней
+    # неуправляемый запрос к DNS значит зависеть от чужого кэша и от сети.
+    #
+    # None, а не True: «проверить не удалось» — ровно то состояние, при
+    # котором вердикт остаётся тем, что дала сессия.
+    monkeypatch.setattr(v, "mx_hosts_alive", lambda mx: None)
     result = v.check_email("иван@почта.рф")
 
     assert seen.get("email"), "адрес до сессии не доехал"

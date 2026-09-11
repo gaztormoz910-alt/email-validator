@@ -268,7 +268,19 @@ def main():
         if exe:
             запустить_и_посмотреть(exe)
     else:
-        врем = os.path.join(os.environ.get("TEMP", "."), "mailfact-check")
+        # РАБОЧАЯ ПАПКА НАМЕРЕННО НЕ В %TEMP%.
+        #
+        # Замерено 11.09.2026: уборка Windows снесла её прямо посреди работы —
+        # вместе со скачанным установщиком и распакованной копией. Хуже самой
+        # пропажи было то, как это выглядело: запись в исчезнувшую папку дала
+        # ошибку, которую легко принять за провал проверки.
+        #
+        # LocalAppData той уборке не подлежит. MAILFACT_WORK позволяет
+        # указать другое место — на чужой машине путь другой.
+        корень = os.environ.get("MAILFACT_WORK") or os.path.join(
+            os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+            "MailFact-work")
+        врем = os.path.join(корень, "check")
         os.makedirs(врем, exist_ok=True)
         установщик = args.setup
         if not установщик:
