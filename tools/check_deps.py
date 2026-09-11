@@ -113,10 +113,17 @@ def модули_в_pyz(exe):
 
 
 def модули_в_internal(папка):
-    """Расширения и пакеты, лежащие на диске рядом со сборкой."""
+    """Расширения и пакеты, лежащие на диске рядом со сборкой.
+
+    Раскладка разная: у Windows и Linux это `_internal` рядом с программой,
+    у macOS — `Contents/Frameworks` внутри `.app`. Смотрим все варианты, а не
+    один: пропущенная папка означала бы «модуля нет» там, где он есть.
+    """
     имена = set()
-    внутри = os.path.join(папка, "_internal")
-    корни = [папка] + ([внутри] if os.path.isdir(внутри) else [])
+    варианты = [os.path.join(папка, "_internal"),
+                os.path.join(папка, "Contents", "Frameworks"),
+                os.path.join(папка, "Contents", "Resources")]
+    корни = [папка] + [в for в in варианты if os.path.isdir(в)]
     for корень in корни:
         try:
             записи = os.listdir(корень)
@@ -140,10 +147,21 @@ def main():
     args = p.parse_args()
 
     папка = os.path.abspath(args.dist)
-    exe = os.path.join(папка, ИМЯ + ".exe")
-    if not os.path.exists(exe):
-        print("нет сборки:", exe)
+    # Имя исполняемого файла зависит от системы: расширение .exe есть только
+    # у Windows. Зашитое ".exe" означало бы, что на Linux и macOS проверка
+    # всегда отвечает «нет сборки» и падает, ничего не проверив, — что и
+    # случилось на прогоне 1.1.1.
+    кандидаты = [os.path.join(папка, ИМЯ + ".exe"), os.path.join(папка, ИМЯ)]
+    # macOS кладёт программу внутрь .app — путь там свой.
+    кандидаты.append(os.path.join(папка, ИМЯ + ".app", "Contents", "MacOS", ИМЯ))
+    exe = next((к for к in кандидаты
+                if os.path.isfile(к) and os.access(к, os.X_OK)), None)
+    if exe is None:
+        print("нет сборки, искал:")
+        for к in кандидаты:
+            print("   -", к)
         return 1
+    print("исполняемый файл:", exe)
 
     нужны = импорты_проекта()
     print("сторонних модулей в исходниках: %d" % len(нужны))
