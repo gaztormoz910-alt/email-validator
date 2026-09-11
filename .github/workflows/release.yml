@@ -263,12 +263,23 @@ jobs:
         # системных библиотек уровня ОС. Ставим их на раннере, чтобы проверка
         # окна была настоящей, а не пропущенной.
         run: |
+          # libegl1 и libgl1 добавлены по ЗАМЕРУ, а не на всякий случай: на
+          # прогоне 1.1.6 импорт QtWebEngineWidgets падал с
+          # «ImportError: libEGL.so.1: cannot open shared object file».
+          # Это СИСТЕМНАЯ графическая библиотека, а не Qt-шная: положить её
+          # внутрь сборки нельзя, она обязана соответствовать драйверу
+          # видео на конкретной машине. На Linux с рабочим столом она есть.
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb xdotool libnss3 libxkbcommon-x11-0 \
-            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
-            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
-            libxdamage1 libxrandr2 libasound2t64 libgbm1 || \
-          sudo apt-get install -y -qq xvfb xdotool libnss3 libxkbcommon-x11-0 libasound2
+          sudo apt-get install -y -qq xvfb xdotool
+          sudo apt-get install -y -qq libegl1 libgl1 libopengl0
+          sudo apt-get install -y -qq libxkbcommon-x11-0 libnss3 libdbus-1-3
+          sudo apt-get install -y -qq libxcb-cursor0 libxcb-icccm4 libxcb-image0
+          sudo apt-get install -y -qq libxcb-keysyms1 libxcb-randr0 libxcb-shape0
+          sudo apt-get install -y -qq libxcb-render-util0 libxcb-xinerama0
+          sudo apt-get install -y -qq libxcomposite1 libxdamage1 libxrandr2
+          sudo apt-get install -y -qq libxtst6 libxi6 libfontconfig1 libgbm1
+          # Имя пакета звука разное в разных выпусках — пробуем оба.
+          sudo apt-get install -y -qq libasound2t64 || sudo apt-get install -y -qq libasound2
 
       - name: Установить зависимости
         run: |
@@ -430,6 +441,17 @@ jobs:
           Ставить ничего не нужно: программа лежит целиком в этой папке.
 
               ./MailFact
+
+          ЧЕГО МОЖЕТ НЕ ХВАТИТЬ. Окно рисуется движком Qt WebEngine, он
+          лежит внутри архива. Но опирается он на системные графические
+          библиотеки, которые внутрь класть нельзя: они обязаны
+          соответствовать драйверу видеокарты конкретной машины. На любом
+          Linux с рабочим столом они уже стоят. Если окно не открылось:
+
+              sudo apt install libegl1 libgl1 libxkbcommon-x11-0 libnss3
+              sudo apt install libxcb-cursor0 libdbus-1-3 libfontconfig1
+
+          (Debian и Ubuntu; в Fedora те же имена через dnf)
 
           Чтобы появился ярлык в меню приложений:
 
