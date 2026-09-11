@@ -344,7 +344,15 @@ def verify_lists():
 
     # Опечатки в домене
     cleaner = EmailCleaner()
-    eq(cleaner.clean_email("john@gamil.com"), "john@gmail.com", "опечатка gamil.com")
+    # ЧИСТИЛЬЩИК БОЛЬШЕ НЕ ПЕРЕПИСЫВАЕТ ДОМЕН, и это решение владельца, а не
+    # регрессия. Подмена домена однажды уже испортила базу: адрес уезжал к
+    # другому почтовику, а вердикт выносился о ЧУЖОМ ящике. С 03.09.2026
+    # правило другое — исправление опечатки остаётся ПОДСКАЗКОЙ, вердикт
+    # выносится об адресе, который человек загрузил. Это же сторожат
+    # tests/test_round2.py::test_no_silent_swap_typo_fix_is_only_a_suggestion
+    # и гейт L3 ledger-а canary.
+    eq(cleaner.clean_email("john@gamil.com"), "john@gamil.com",
+       "домен подменён вопреки правилу «только подсказка»")
     eq(cleaner.clean_email("john@yandex.rublahblah"), "john@yandex.ru", "мусор после TLD")
     # Очистка детерминирована: порядок обхода set не должен на неё влиять
     once = cleaner.clean_email("john@hotmial.com")
