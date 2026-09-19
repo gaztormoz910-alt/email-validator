@@ -1639,6 +1639,34 @@ class ValidationPipeline:
                           reason=res.get("reason", ""))
                     return False   # вердикта нет, прогресс не двигаем
 
+                # Ловушка антивирусного вендора: MX домена ведёт на honeypot
+                # (Trend Micro Email Security, FireEye, Agari), и движок
+                # НАМЕРЕННО туда не пошёл — попасть в их чёрный список дороже
+                # любого вердикта. Значит про ящик не сказано ничего.
+                #
+                # Раньше этот статус не знала ни одна из двух лестниц ниже, и
+                # он проваливался в `else`, то есть в «Invalid/Bounce»: адрес
+                # объявлялся несуществующим без единого запроса к серверу,
+                # получал скор 0 с подписью «SMTP подтвердил, что ящика нет»
+                # и уезжал в кэш на девяносто суток. Между тем за таким
+                # шлюзом стоит обычная корпоративная почта, и ящики там
+                # живые. «Trap/Disposable» — это «писать нельзя», а не
+                # «ящика нет», и в кэш такой статус не кладётся вовсе
+                # (см. CACHEABLE_STATUSES в core/cache.py).
+                if raw_status == "trap":
+                    data["engagement_score"] = 0
+                    data["engagement_grade"] = "Dead"
+                    data["provider_type"] = "AV Vendor"
+                    уверенность, основание = verdict_confidence(
+                        "trap", res.get("reason", ""))
+                    data["verdict_confidence"] = уверенность
+                    data["verdict_basis"] = основание
+                    self._enrich_offline(email, data, "Trap/Disposable", enable_ai)
+                    self._emit(email, "Trap/Disposable", res.get("reason", ""),
+                               res.get("mx_record", "N/A"), data)
+                    state.mark_done(normalize_for_dedup(email))
+                    return
+
                 if raw_status == "valid":
                     status_display = "Valid"
                 elif raw_status == "catchall":
@@ -1647,9 +1675,17 @@ class ValidationPipeline:
                     status_display = "Risky"
                 elif raw_status == "unknown":
                     status_display = "Unknown"
-                else:
+                elif raw_status == "invalid":
                     status_display = "Invalid/Bounce"
-                
+                else:
+                    # ЗАПАСНОЙ ВЫХОД ВЕДЁТ В «НЕ ПРОВЕРЕНО», А НЕ В ПРИГОВОР.
+                    #
+                    # Здесь стоял `else: Invalid/Bounce`, то есть любой статус,
+                    # которого лестница не знает, хоронил адрес. Так и случилось
+                    # с `trap`. Правило общее: незнакомое слово — это отсутствие
+                    # доказательства, а не доказательство отсутствия.
+                    status_display = "Unknown"
+
                 # Копим статистику по домену для пост-анализа catch-all
                 try:
                     dom_key = email.rsplit("@", 1)[1].lower()
@@ -1747,6 +1783,11 @@ class ValidationPipeline:
         # строк. Плюс журнал даёт возобновление — «Стоп» больше не выбрасывает
         # проделанную работу.
         state = RunState(run_id_for(email_sources), resume=resume)
+        # Новый проход по файлу — новый дедуп. Журнал вердиктов при этом цел:
+        # проверенное по-прежнему пропускается, а прочитанное-но-непроверенное
+        # возвращается в работу вместо того, чтобы молча числиться дублем.
+        # Подробно — у RunState.reset_seen.
+        state.reset_seen()
         self.state = state
         if resume and state.resumed_count:
             self.callbacks['on_log'](
@@ -1942,8 +1983,16 @@ class ValidationPipeline:
                         status_display = "Unknown"
                     elif raw_status == "unknown":
                         status_display = "Unknown"
-                    else:
+                    elif raw_status == "trap":
+                        # То же, что и на основном проходе: ловушка вендора —
+                        # это «писать нельзя», а не «ящика нет».
+                        status_display = "Trap/Disposable"
+                    elif raw_status == "invalid":
                         status_display = "Invalid/Bounce"
+                    else:
+                        # Незнакомый статус — отсутствие доказательства.
+                        # Подробнее у такой же лестницы основного прохода.
+                        status_display = "Unknown"
                     
                     # Что именно ушло в RCPT TO. Показывается в карточке
                     # адреса строкой «Проверен как». Поле читалось окном и не
