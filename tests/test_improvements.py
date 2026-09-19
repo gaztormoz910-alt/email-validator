@@ -4,6 +4,10 @@
 Порядок здесь тот же, что и в работе: сначала то, что прямо влияет на
 точность (чистый IP и чёрные списки), потом надёжность, потом удобство.
 """
+# Исходник конвейера собирается по ВСЕМ его модулям: после разделения
+# на примеси половина кода лежит не в core/pipeline.py, и чтение
+# одного файла молча проверяло бы не то. См. tests/исходники.py.
+from исходники import исходник_конвейера
 import datetime
 import io
 import os
@@ -140,10 +144,7 @@ def test_spamhaus_is_actually_wired_into_the_run():
     В рабочем прогоне резолвер никто не задавал, и крупнейший чёрный список
     молчал. Проверяется именно вызов из конвейера.
     """
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "core", "pipeline.py")
-    with io.open(path, encoding="utf-8") as handle:
-        source = handle.read()
+    source = исходник_конвейера()
 
     assert "set_spamhaus_resolver" in source, "конвейер не включает Spamhaus"
     assert "spamhaus_resolvers" in source, "адрес резолвера ниоткуда не берётся"
@@ -155,10 +156,7 @@ def test_spamhaus_is_enabled_after_the_validator_exists():
     Вызов, поставленный раньше, молча не сработал бы — ровно та же беда,
     которую мы и чиним.
     """
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "core", "pipeline.py")
-    with io.open(path, encoding="utf-8") as handle:
-        source = handle.read()
+    source = исходник_конвейера()
 
     assert source.index("self.network = NetworkValidator") < \
         source.index("set_spamhaus_resolver")
@@ -166,10 +164,7 @@ def test_spamhaus_is_enabled_after_the_validator_exists():
 
 def test_spamhaus_explains_itself_when_off():
     """Молчание зоны должно быть объяснено, а не выглядеть как всё в порядке."""
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "core", "pipeline.py")
-    with io.open(path, encoding="utf-8") as handle:
-        source = handle.read()
+    source = исходник_конвейера()
 
     # Формулировка стала точнее: вместо «публичные он не обслуживает» теперь
     # назван сам код отказа, который зона возвращает, — по нему владелец
@@ -190,10 +185,7 @@ def test_spamhaus_resolvers_read_from_settings():
 
 def test_invariant_all_results_go_through_one_door():
     """Счётчик, размазанный по семи веткам, разойдётся на первой же правке."""
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "core", "pipeline.py")
-    with io.open(path, encoding="utf-8") as handle:
-        source = handle.read()
+    source = исходник_конвейера()
 
     # Прямой вызов остаётся ровно один — внутри самой двери.
     assert source.count("self.callbacks['on_result'](") == 1
@@ -218,10 +210,7 @@ def test_invariant_counts_what_actually_left():
 
 def test_invariant_reports_a_loss():
     """Расхождение обязано быть названо вслух, а не оставлено в счётчиках."""
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "core", "pipeline.py")
-    with io.open(path, encoding="utf-8") as handle:
-        source = handle.read()
+    source = исходник_конвейера()
 
     assert "ПОТЕРЯНО АДРЕСОВ" in source
     # И обратный случай: показали больше, чем приняли.
@@ -234,10 +223,7 @@ def test_invariant_reports_a_loss():
 
 def test_twostage_cheap_checks_run_before_smtp():
     """Порядок веток в обработке адреса — это и есть двухуровневость."""
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "core", "pipeline.py")
-    with io.open(path, encoding="utf-8") as handle:
-        source = handle.read()
+    source = исходник_конвейера()
 
     disposable = source.index("Шаг 1.1: Проверка на одноразовый")
     cache = source.index("Шаг 2: Кэш прошлых прогонов")
@@ -385,10 +371,7 @@ def test_sharedcache_defaults_to_the_usual_place():
 
 
 def test_sharedcache_pipeline_uses_the_setting():
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "core", "pipeline.py")
-    with io.open(path, encoding="utf-8") as handle:
-        source = handle.read()
+    source = исходник_конвейера()
 
     assert "from core.settings import cache_path" in source
     assert "ResultCache(path=chosen)" in source
@@ -396,10 +379,7 @@ def test_sharedcache_pipeline_uses_the_setting():
 
 def test_sharedcache_says_when_it_is_shared():
     """Общий кэш должен быть заметен: иначе непонятно, откуда чужие вердикты."""
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "core", "pipeline.py")
-    with io.open(path, encoding="utf-8") as handle:
-        source = handle.read()
+    source = исходник_конвейера()
 
     assert "Общий кэш" in source
 

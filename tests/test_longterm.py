@@ -11,6 +11,10 @@ catch-all домена (три RCPT в отдельной сессии на КА
 права ни врать, ни мешать**. Протухшая запись не применяется, недоступная
 база не роняет прогон, свежий факт вытесняет запомненный.
 """
+# Исходник конвейера собирается по ВСЕМ его модулям: после
+# разделения на примеси половина кода лежит не в core/pipeline.py,
+# и чтение одного файла молча проверяло бы не то. См. tests/исходники.py.
+from исходники import исходник_конвейера
 import os
 import sys
 import time
@@ -135,7 +139,7 @@ def test_profile_pipeline_skips_what_it_remembers():
 
     from core import pipeline
 
-    source = inspect.getsource(pipeline)
+    source = исходник_конвейера()
     assert "recall_proxy_profiles(live_proxies)" in source
     assert "fresh_needed = [p for p in live_proxies if p not in remembered]" in source
 

@@ -98,15 +98,54 @@ _NOISE = {"mail", "email", "www", "web", "smtp", "corp", "inc", "llc", "ltd",
           "gmbh", "group", "online", "site", "shop", "store", "app", "team"}
 
 
+def _зона_второго_уровня(домен, parts):
+    """Стоит ли имя организации на уровень левее обычного.
+
+    Сначала спрашиваем настоящий список публичных суффиксов Mozilla: он
+    знает не полсотни зон, а полторы тысячи, включая `msk.ru`, `ddns.net`
+    и `info.pl`. Самодельный перечень остаётся ПАРАШЮТОМ на случай, когда
+    файла списка нет (чужая сборка, битая распаковка) — тогда работаем как
+    раньше, а не перестаём работать вовсе.
+    """
+    # Мусор на входе — «зоны второго уровня нет», а не падение: функцию
+    # обстреливает фаззинг набора, и исключение отсюда означало бы, что
+    # обогащение роняет рабочий поток, а адрес молча выпадает из выдачи.
+    if not isinstance(домен, str) or not isinstance(parts, (list, tuple)):
+        return False, 1
+    parts = [ч for ч in parts if isinstance(ч, str)]
+    if len(parts) < 2:
+        return False, 1
+    try:
+        from core.public_suffix import правил_прочитано, публичный_суффикс
+        if правил_прочитано():
+            # `публичный_суффикс` отвечает на вопрос «является ли ЭТО имя
+            # зоной», а не «какая зона у этого домена». Поэтому идём справа
+            # налево и берём САМУЮ ДЛИННУЮ часть, которая зоной является:
+            # у `company.msk.ru` это `msk.ru`, у `tekveo.com` — `com`.
+            глубина = 0
+            for сколько in range(1, len(parts)):
+                if публичный_суффикс(".".join(parts[-сколько:])):
+                    глубина = сколько
+            if глубина:
+                return len(parts) > глубина, глубина
+    except Exception:
+        pass
+    if ".".join(parts[-2:]) in _SECOND_LEVEL:
+        return len(parts) >= 3, 2
+    return False, 1
+
+
 def _registrable_name(domain):
     """Имя организации из домена. Пусто, если выделить нечего."""
     if not isinstance(domain, str):
         return ""
-    parts = [p for p in domain.strip().lower().strip(".").split(".") if p]
+    низ = domain.strip().lower().strip(".")
+    parts = [p for p in низ.split(".") if p]
     if len(parts) < 2:
         return ""
-    if len(parts) >= 3 and ".".join(parts[-2:]) in _SECOND_LEVEL:
-        name = parts[-3]
+    левее, глубина = _зона_второго_уровня(низ, parts)
+    if левее:
+        name = parts[-(глубина + 1)]
     else:
         name = parts[-2]
     # Поддомен почтовика: mail.company.com -> company

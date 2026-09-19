@@ -19,6 +19,10 @@ CustomTkinter и поднимал его целиком. Окно удалено
 объявить о завершении. Механизм, который это чинил, удалён вместе с окном,
 которое им страдало.
 """
+# Исходник конвейера собирается по ВСЕМ его модулям: после
+# разделения на примеси половина кода лежит не в core/pipeline.py,
+# и чтение одного файла молча проверяло бы не то. См. tests/исходники.py.
+from исходники import исходник_конвейера
 import inspect
 import unittest
 
@@ -112,7 +116,7 @@ class TestRiskyKeepsItsOwnName(unittest.TestCase):
     def test_pipeline_does_not_rename_risky(self):
         """В коде нет места, где Risky превращался бы в Unknown."""
         from core import pipeline
-        источник = inspect.getsource(pipeline)
+        источник = исходник_конвейера()
         self.assertNotIn('"Risky" -> "Unknown"', источник)
         self.assertIn("Risky", источник, "статус Risky исчез из пайплайна")
 
