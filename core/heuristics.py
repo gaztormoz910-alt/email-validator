@@ -159,6 +159,48 @@ def looks_machine_generated(email: str) -> bool:
     return suspicious >= 2
 
 
+def _маркер_парковки_совпал(host: str, marker: str) -> bool:
+    """Совпал ли маркер парковки ПО ГРАНИЦЕ МЕТКИ, а не буквами внутри слова.
+
+    Раньше здесь стояло простое `marker in host`, и оно ловило чужие слова.
+    Замерено на файлах владельца: 52 817 различных доменов, 21 из них признан
+    припаркованным по совпадению подстроки — `givaudan.com` и `brownjordan.com`
+    из-за маркера `dan.com`, `psav.com` и `wsav.com` из-за `sav.com`,
+    `nationalescrow.com` из-за `escrow.com`. Все они — работающие компании.
+
+    На вердикт это не влияет (статус не меняется), но влияет на КОЛОНКУ, по
+    которой владелец сортирует базу перед рассылкой: припаркованный домен
+    получает штраф к скору, и живая компания уезжала вниз списка.
+
+    Правило простое и без списка исключений: имя хоста — это последовательность
+    меток через точку, и маркер обязан совпасть с целыми метками.
+    """
+    # Мусор на входе — это «не совпало», а не падение. Функцию зовут из
+    # рабочих потоков, где исключение проглатывается уровнем выше и адрес
+    # молча выпадает из выдачи. Поймано фаззингом набора (test_robustness).
+    if not isinstance(host, str) or not isinstance(marker, str):
+        return False
+    if not marker:
+        return False
+    # Маркеры с косой чертой (`namecheap.com/parking`) не совпадают ни с одним
+    # именем хоста: в DNS косой черты не бывает. Обрезать их до доменной части
+    # НЕЛЬЗЯ — `domaincontrol.com` это обычный DNS GoDaddy, на нём живут сотни
+    # тысяч рабочих доменов, и такая «починка» пометила бы их все.
+    if "/" in marker:
+        return False
+    метки = host.split(".")
+    части = marker.split(".")
+    if len(части) > 1:
+        # Маркер — доменное имя: ищем его целыми метками подряд, в любом месте
+        # хоста (`parking.godaddy` встречается и не на конце).
+        ширина = len(части)
+        return any(метки[i:i + ширина] == части
+                   for i in range(len(метки) - ширина + 1))
+    # Маркер — одно слово (`sedoparking`, `hugedomains`): оно обязано быть
+    # целой меткой, а не куском чужой.
+    return marker in метки
+
+
 def is_parked_domain(mx_record) -> bool:
     """True, если почта домена ведёт на парковочный сервис (домен продаётся).
 
@@ -177,8 +219,8 @@ def is_parked_domain(mx_record) -> bool:
     for record in records:
         if not isinstance(record, str) or not record or record == "N/A":
             continue
-        low = record.lower()
-        if any(host in low for host in PARKING_HOSTS):
+        low = record.lower().strip().rstrip(".")
+        if any(_маркер_парковки_совпал(low, host) for host in PARKING_HOSTS):
             return True
     return False
 

@@ -51,6 +51,11 @@ datas = [
     # Данные, лежащие внутри пакетов рядом с кодом.
     ("core/english_words.txt", "core"),
     ("core/parser/names_by_country.txt", "core/parser"),
+    # Список публичных суффиксов Mozilla. Читается core/public_suffix.py и
+    # решает, где кончается чужая зона и начинается чей-то домен. Без него
+    # очистка перестанет узнавать настоящие зоны и снова начнёт резать
+    # `mycompany.deloitte` до `mycompany.de` — см. core/public_suffix.py.
+    ("core/public_suffix_list.dat", "core"),
 ]
 binaries = []
 
