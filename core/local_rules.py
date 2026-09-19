@@ -102,7 +102,10 @@ _register(
      # Региональные домены были пропущены: правило есть, а к адресу на
      # yahoo.com.mx оно не применялось.
      "yahoo.com.ar", "yahoo.com.hk", "yahoo.com.mx", "yahoo.com.ph",
-     "yahoo.com.sg", "yahoo.dk", "yahoo.hu", "yahoo.no"),
+     "yahoo.com.sg", "yahoo.dk", "yahoo.hu", "yahoo.no",
+     # Добавлены вместе с маршрутизацией: домены числились у Yahoo в
+     # классификации, но ни в списке «нужен PTR», ни здесь их не было.
+     "yahoo.co.jp", "yahoo.in"),
     Rule("Yahoo", r"^[a-z][a-z0-9_.]*$", min_len=4, max_len=32,
          starts=r"^[a-z]",
          note="имя Yahoo начинается с буквы, длина 4-32"))

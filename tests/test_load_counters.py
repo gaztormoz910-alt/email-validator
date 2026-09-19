@@ -10,6 +10,10 @@
 — это число ФАЙЛОВ. Сколько адресов и прокси загружено, узнать было негде.
 """
 
+# Исходник конвейера собирается по ВСЕМ его модулям: после
+# разделения на примеси половина кода лежит не в core/pipeline.py,
+# и чтение одного файла молча проверяло бы не то. См. tests/исходники.py.
+from исходники import исходник_конвейера
 import io
 import os
 import sys
@@ -160,7 +164,7 @@ def test_separate_channel_for_proxy_progress():
 
     from core import pipeline
 
-    source = inspect.getsource(pipeline)
+    source = исходник_конвейера()
     call = source[source.index("live_proxies, total_seen = filter_live_proxies"):]
     call = call[:call.index(")")]
     assert "on_proxy_progress" in source

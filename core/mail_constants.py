@@ -73,10 +73,19 @@ YAHOO_DOMAINS = {
     "yahoo.es", "yahoo.it", "yahoo.com.br", "yahoo.com.ar", "yahoo.com.mx",
     "yahoo.com.au", "yahoo.com.sg", "yahoo.com.hk", "yahoo.com.ph",
     "yahoo.gr", "yahoo.ro", "yahoo.hu", "yahoo.se", "yahoo.no", "yahoo.dk",
-    "ymail.com", "rocketmail.com"
+    "ymail.com", "rocketmail.com",
+    # Те же три причины, что и у AOL выше: классификация их знала,
+    # маршрутизация — нет, и проверка по ним терялась.
+    "yahoo.ca", "yahoo.co.jp", "yahoo.in",
 }
 
-AOL_DOMAINS = {"aol.com", "aim.com", "verizon.net"}
+# `games.com` и `love.com` — тоже AOL, и PTR им нужен так же. Раньше их тут
+# не было: список классификации в core/provider.py их знал, а список
+# МАРШРУТИЗАЦИИ (этот) — нет. Расхождение двух рукописных списков стоило
+# потерянной проверки: адрес уходил через прокси без PTR, AOL отвечал
+# `550 5.7.25` на MAIL FROM, и вместо ответа о ящике выходило «не проверено».
+# Что списки больше не разойдутся, сторожит tests/test_lineaudit.py.
+AOL_DOMAINS = {"aol.com", "aim.com", "verizon.net", "games.com", "love.com"}
 
 # Провайдеры, которые режут по РЕПУТАЦИИ исходящего IP. Проверено вживую:
 # Outlook отвечает "550 5.7.1 Service unavailable, Client host [IP]",

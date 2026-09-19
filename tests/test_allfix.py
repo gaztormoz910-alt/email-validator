@@ -6,6 +6,8 @@
 пишет одну строчку в лог и уходит в «готово»; кнопка, залипшая навсегда,
 отвечает «проверка уже идёт»; таймаут DNS выглядит как отсутствие записи.
 """
+# Разрезанные модули читаются вместе с примесями. См. tests/исходники.py.
+from исходники import исходник_окна
 import ast
 import importlib.util
 import io
@@ -91,9 +93,9 @@ def test_parser_starts_every_internal_import_resolves():
 
 def test_parser_starts_launch_branch_uses_the_real_loader():
     """Именно та ветка, а не соседняя: читатель прокси зовётся по имени."""
-    from ui import webapp
-
-    source = io.open(webapp.__file__, encoding="utf-8").read()
+    # Сбор адресов переехал в ui/webapp_parser.py; читаем окно целиком,
+    # вместе с примесями, иначе проверка ищет не там.
+    source = исходник_окна()
     launch = source[source.index("def parser_start"):]
     launch = launch[:launch.index("def parser_pause")]
     assert "from core.streamer import StreamLoader" in launch
