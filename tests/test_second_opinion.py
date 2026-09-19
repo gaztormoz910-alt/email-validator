@@ -19,6 +19,9 @@ example.net и example.org MX пустой (RFC 7505) — домен объяв�
 **Повтор после серого списка шёл через 90 секунд.** У postgrey выдержка по
 умолчанию пять минут: повтор раньше неё получает тот же серый ответ.
 """
+# core/network.py разрезан на примеси: читаем всю семью.
+# См. tests/исходники.py.
+from исходники import исходник_сети
 import inspect
 import os
 import sys
@@ -99,7 +102,7 @@ def test_other_ip_reaches_the_verdict_path():
     Проверка именно связи: сам механизм можно написать безупречно и не
     подключить — так уже было со SMTPUTF8.
     """
-    source = inspect.getsource(__import__("core.network", fromlist=["x"]))
+    source = исходник_сети()
     assert "first_proxy=proxy" in source
     assert "avoid_exit_of=first_proxy" in source
 
@@ -177,7 +180,7 @@ def test_silence_after_the_deadline_is_not_agreement():
 
 def test_silence_leads_to_risky_not_invalid_when_answers_differ():
     """Расхождение ответов оставляет адрес живым и называет причину."""
-    source = inspect.getsource(__import__("core.network", fromlist=["x"]))
+    source = исходник_сети()
     assert "Второй ответ противоречит первому" in source
     block = source[source.index("Второй ответ противоречит первому") - 400:]
     block = block[:400]
@@ -188,7 +191,7 @@ def test_silence_leads_to_risky_not_invalid_when_answers_differ():
 
 def test_thrift_confirmation_is_only_for_invalid():
     """На valid второе мнение не тратится: живой ящик уже доказан."""
-    source = inspect.getsource(__import__("core.network", fromlist=["x"]))
+    source = исходник_сети()
     order = source.index('if result["status"] == "valid":')
     confirm = source.index("_confirm_invalid_on_other_mx(")
     assert order < confirm, "подтверждение стоит раньше возврата valid"

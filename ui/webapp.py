@@ -28,7 +28,6 @@
 же ResultStore, что и прежнее окно.
 """
 
-import ctypes
 import hashlib
 import io
 import json
@@ -41,14 +40,12 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-from core import input_guard
 from core.parser_pipeline import SEARCH_ENGINES
 from core.winnoise import (install_webview_noise_filter,
                            quiet_chromium, WebViewReaper)
 from core.crashlog import (crash_log_path, log_crash,  # noqa: F401
                            recent_crashes)
 from ui.result_store import normalize_filters
-from core.encoding import open_text
 from core.baseops import csv_row, export_encoding
 
 from core.paths import resource_path, seed_data
@@ -63,28 +60,13 @@ APP_NAME = "MailFact"
 PAGE_SIZE = 100
 
 
-def _тип_диалога(имя):
-    """Константа диалога по НЫНЕШНЕМУ API pywebview.
-
-    `webview.OPEN_DIALOG` и соседи — не константы, а СВОЙСТВА МОДУЛЯ: каждое
-    обращение пишет предупреждение об устаревании через logging. У собранной
-    программы потоков вывода нет, запись падала с AttributeError, и он уезжал
-    наружу — так ломались все четыре диалога. Нынешний `FileDialog.OPEN`
-    ничего не печатает.
-
-    Запасной путь оставлен для старых версий pywebview, где перечисления ещё
-    нет: там мы сознательно берём устаревшее имя, потому что другого нет.
-    """
-    import webview
-
-    перечисление = getattr(webview, "FileDialog", None)
-    if перечисление is not None and hasattr(перечисление, имя):
-        return getattr(перечисление, имя)
-    return getattr(webview, {"OPEN": "OPEN_DIALOG", "SAVE": "SAVE_DIALOG",
-                             "FOLDER": "FOLDER_DIALOG"}[имя])
 
 
-class ValidatorApi:
+# Примеси рядом: источники и вкладка сбора адресов — по файлу на тему.
+from ui.webapp_sources import SourcesMixin, _тип_диалога  # noqa: E402
+from ui.webapp_parser import ParserMixin                  # noqa: E402
+
+class ValidatorApi(SourcesMixin, ParserMixin):
     """То, что страница может попросить у питона.
 
     Каждый публичный метод — одна конечная точка. Возвращают обычные
@@ -342,377 +324,16 @@ class ValidatorApi:
     def _on_proxy_profile(self, summary):
         self._proxy_summary = summary
 
-    # ------------------------------------------------------ источники --
-    def _pick_files(self, title):
-        """Родной диалог выбора файлов. Пустой ответ — пользователь передумал."""
-        if self.window is None:
-            return []
-        chosen = self.window.create_file_dialog(
-            _тип_диалога("OPEN"), allow_multiple=True,
-            file_types=("Списки (*.txt;*.csv)", "Все файлы (*.*)"))
-        return list(chosen or [])
 
-    def choose(self, payload):
-        """Выбор файлов для базы или для прокси."""
-        payload = payload if isinstance(payload, dict) else {}
-        kind = payload.get("kind")
-        target = self._bucket(kind)
-        if target is None:
-            return dict(self.sources(), error=self._BAD_KIND)
-        if self._busy():
-            return dict(self.sources(), error=self._BUSY_REFUSAL)
 
-        paths = self._pick_files(kind)
-        expected = self._EXPECTED_KIND.get(kind)
-        accepted, refused, oversized = [], [], []
-        for path in paths:
-            # Проверяется КАЖДЫЙ файл, а не первый: владелец выбирает их
-            # пачкой, и прокси среди пяти баз иначе проедут незамеченными.
-            #
-            # Весь разбор ОДНОГО файла обёрнут: неожиданная беда на нём не
-            # имеет права обвалить весь запрос. Иначе один странный файл из
-            # пяти выбранных отменяет загрузку остальных четырёх, а человек
-            # видит голый код ошибки вместо имени виноватого файла.
-            try:
-                verdict = (input_guard.check_file(path, expected)
-                           if expected else {"ok": True})
-            except Exception as беда:
-                refused.append("Не удалось разобрать %s (%s: %s)"
-                               % (os.path.basename(path),
-                                  type(беда).__name__, беда))
-                continue
-            if not verdict["ok"]:
-                refused.append(verdict["reason"])
-                continue
 
-            accepted.append(path)
-            # Небольшой файл становится ТЕКСТОМ — ровно тем же, что получилось
-            # бы от вставки руками. Дальше он и правится в поле, и уходит в
-            # движок одинаково: разницы между двумя способами загрузки больше
-            # нет.
-            text = self._read_inline(path)
-            if text is None:
-                target.append({"type": "file", "path": path})
-                oversized.append(os.path.basename(path))
-            else:
-                target.append({"type": "text", "content": text,
-                               "title": os.path.basename(path)})
 
-        if accepted:
-            self._on_log(f"[INFO] Подключено файлов: {len(accepted)}.", "info")
-            self._recount(kind)
-            self._rescan_base(kind)
-        for reason in refused:
-            self._on_log(f"[DEAD] Файл отклонён: {reason}", "dead")
-        for name in oversized:
-            self._on_log(
-                f"[INFO] {name} больше {self.INLINE_LIMIT // (1024 * 1024)} МБ — "
-                "в поле ввода не показан, но в проверку пойдёт целиком.", "info")
 
-        result = self.sources()
-        if refused:
-            result["error"] = refused[0]
-        return result
 
-    def _read_inline(self, path):
-        """Текст файла, если он не слишком велик для поля ввода.
 
-        None означает «слишком большой» — тогда файл остаётся файлом. Это не
-        отговорка: строка на десять миллионов адресов в текстовом поле вешает
-        окно, а движку она в поле и не нужна.
-        """
-        try:
-            if os.path.getsize(path) > self.INLINE_LIMIT:
-                return None
-            # Тот же определитель кодировки, что и у движка: иначе файл
-            # из Excel показывался бы в поле замещающими символами, и
-            # владелец видел бы порчу там, где её нет.
-            with open_text(path) as handle:
-                return handle.read()
-        except Exception as беда:
-            # ЛОВИМ ВСЁ, а не только OSError.
-            #
-            # input_guard.check_file читает ВЫБОРКУ первых строк, а здесь файл
-            # читается ЦЕЛИКОМ. Один плохой байт в середине большой базы
-            # проходит проверку и взрывается тут: UnicodeDecodeError — это
-            # ValueError, не OSError, и он улетал наружу необработанным. Мост
-            # отвечал 500, окно показывало «choose: 500», и человек не мог
-            # загрузить файл вообще, не понимая почему.
-            #
-            # Не показать файл в поле ввода — не беда: он остаётся источником
-            # и уходит в проверку целиком, потоковым чтением, которое к
-            # плохим байтам устойчиво. Беда — молча отказать в загрузке.
-            self._on_log("[INFO] %s в поле ввода не показан (%s: %s), "
-                         "но в проверку пойдёт целиком."
-                         % (os.path.basename(path), type(беда).__name__, беда),
-                         "info")
-            return None
 
-    def paste(self, payload):
-        """Список, вставленный текстом вместо файла."""
-        payload = payload if isinstance(payload, dict) else {}
-        kind = payload.get("kind")
-        bucket = self._bucket(kind)
-        if bucket is None:
-            return dict(self.sources(), error=self._BAD_KIND)
-        if self._busy():
-            return dict(self.sources(), error=self._BUSY_REFUSAL)
 
-        text = str(payload.get("text") or "")
-        if not text.strip():
-            return dict(self.sources(), error="Пусто — нечего добавлять.")
 
-        expected = self._EXPECTED_KIND.get(kind)
-        if expected:
-            verdict = input_guard.check_text(text, expected)
-            if not verdict["ok"]:
-                self._on_log(f"[DEAD] Вставка отклонена: {verdict['reason']}", "dead")
-                return dict(self.sources(), error=verdict["reason"])
-
-        bucket.append({"type": "text", "content": text, "title": "вставленный текст"})
-        self._recount(kind)
-        self._rescan_base(kind)
-        return self.sources()
-
-    def clear(self, payload):
-        payload = payload if isinstance(payload, dict) else {}
-        bucket = self._bucket(payload.get("kind"))
-        if bucket is None:
-            return dict(self.sources(), error=self._BAD_KIND)
-        if self._busy():
-            return dict(self.sources(), error=self._BUSY_REFUSAL)
-        bucket.clear()
-        self._recount(payload.get("kind"))
-        # И при очистке тоже: она обязана отменить отчёт, начатый для
-        # прошлого набора, иначе он допечатается уже после неё.
-        self._rescan_base(payload.get("kind"))
-        return self.sources()
-
-    @staticmethod
-    def _stat_of(path, field):
-        try:
-            info = os.stat(path)
-            return int(getattr(info, field))
-        except OSError:
-            return -1
-
-    def _recount(self, kind):
-        """Пересчитывает строки в источниках вида kind — в фоне.
-
-        Зачем фон. count_total_lines() читает файлы целиком: на списке в
-        миллионы строк это десятки секунд. В потоке, который обслуживает
-        страницу, они превратились бы в зависшее окно сразу после выбора
-        файла. Пока идёт счёт, наружу отдаётся None — страница пишет
-        «считаю…», а не ноль: ноль владелец прочитал бы как «файл пустой».
-        """
-        snapshot = list(self._sources.get(kind) or [])
-        with self._count_lock:
-            job = self._count_jobs.get(kind, 0) + 1
-            self._count_jobs[kind] = job
-            self._line_counts[kind] = 0 if not snapshot else None
-
-        if not snapshot:
-            return
-
-        def work():
-            from core.streamer import StreamLoader
-
-            try:
-                total = StreamLoader(snapshot).count_total_lines()
-            except Exception:
-                total = 0
-            with self._count_lock:
-                # Пока считали, владелец мог добавить ещё файл. Тогда наш
-                # ответ устарел, и записывать его нельзя: на экране осталось
-                # бы число от прошлого набора.
-                if self._count_jobs.get(kind) == job:
-                    self._line_counts[kind] = int(total)
-                    # Отпечаток берётся ПОСЛЕ счёта: иначе правка, случившаяся
-                    # во время чтения, осталась бы незамеченной.
-                    self._file_stamps[kind] = [
-                        (item.get("path") or "",
-                         self._stat_of(item.get("path"), "st_size"),
-                         self._stat_of(item.get("path"), "st_mtime"))
-                        for item in snapshot if item.get("type") == "file"]
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _rescan_base(self, kind):
-        """Состав базы в лог — сразу после загрузки, как в классическом окне.
-
-        Отвечает на вопрос, который владелец задаёт ДО запуска: сколько
-        адресов, каких провайдеров, что из этого проверится с текущего IP, а
-        чему нужен адрес с PTR или чистой репутацией. Ни одного сетевого
-        запроса — только чтение выборки.
-
-        ЗОВЁТСЯ ТОЛЬКО ПРИ СМЕНЕ НАБОРА ИСТОЧНИКОВ, а не из _recount.
-        _recount дёргается из sources() при каждом опросе панели, если файл
-        изменился на диске; повесить скан туда значило бы перечитывать
-        полумиллионный файл снова и снова, пока окно открыто.
-
-        Прокси и дорки не сканируются: разбивка по почтовым провайдерам для
-        них бессмысленна.
-        """
-        if kind != "emails":
-            return
-
-        snapshot = list(self._sources.get(kind) or [])
-        with self._scan_lock:
-            # Поколение растёт и при очистке: скан, начатый для прошлого
-            # набора, не должен допечатать свой отчёт после неё.
-            self._scan_job += 1
-            job = self._scan_job
-        if not snapshot:
-            return
-
-        def устарел():
-            with self._scan_lock:
-                return self._scan_job != job
-
-        def work():
-            import time as _time
-            from core.provider import (scan_base_providers, format_base_scan,
-                                       BASE_SCAN_BREATHE)
-            self._on_log("[INFO] Считаю состав базы по ВСЕМ подключённым "
-                         "источникам — это чтение без единого запроса в сеть.",
-                         "info")
-            начало = _time.monotonic()
-            try:
-                # breathe_every заставляет скан отпускать GIL. Без него этот
-                # поток — сплошной чистый Python, и панель перестаёт отвечать
-                # на опрос, хотя загрузка давно вернулась.
-                #
-                # limit НЕ ПЕРЕДАЁТСЯ намеренно: выборка бралась с начала и
-                # описывала первый файл, выдавая его состав за состав базы.
-                scan = scan_base_providers(snapshot,
-                                           breathe_every=BASE_SCAN_BREATHE,
-                                           should_stop=устарел)
-            except Exception as e:
-                self._on_log("[DEAD] Скан состава базы не удался: %s: %s"
-                             % (type(e).__name__, e), "dead")
-                return
-            if scan.get("stopped") or устарел():
-                return          # набор сменился, наш отчёт устарел
-            for line in format_base_scan(scan):
-                self._on_log(line, "info")
-            self._on_log("[INFO] Состав посчитан по ВСЕЙ базе (%d адресов) "
-                         "за %.1f с." % (scan.get("total", 0),
-                                         _time.monotonic() - начало), "info")
-
-        threading.Thread(target=work, daemon=True,
-                         name="скан-состава-базы").start()
-
-    def _files_changed_on_disk(self, kind):
-        """Изменились ли файлы этого набора с момента подсчёта.
-
-        Владелец правит базу в текстовом редакторе и удивляется, что счётчик
-        не меняется: строки посчитаны один раз при загрузке, и о правке файла
-        программа узнать неоткуда. Сравнение размера и времени правки стоит
-        одного системного вызова на файл — это не чтение, окно не подвиснет
-        даже на гигабайтном списке.
-        """
-        stamp = []
-        for source in self._sources.get(kind) or []:
-            if source.get("type") != "file":
-                continue
-            path = source.get("path") or ""
-            try:
-                info = os.stat(path)
-                stamp.append((path, int(info.st_size), int(info.st_mtime)))
-            except OSError:
-                stamp.append((path, -1, -1))
-        with self._count_lock:
-            known = self._file_stamps.get(kind)
-            self._file_stamps[kind] = stamp
-        return known is not None and known != stamp
-
-    def sources(self, payload=None):
-        """Что сейчас подключено. Считается лениво — файл не читается."""
-        # Файл мог измениться на диске после загрузки. Проверяем это на
-        # каждом опросе панели: один stat на файл, зато число на экране
-        # перестаёт врать.
-        for kind in ("emails", "proxies", "dorks", "pproxy"):
-            if self._files_changed_on_disk(kind):
-                self._on_log(
-                    "[INFO] Файл изменился на диске — пересчитываю строки.", "info")
-                self._recount(kind)
-        def describe(sources, kind):
-            if not sources:
-                return {"count": 0, "title": "Выберите файл", "detail": "",
-                        "text": "", "editable": True, "lines": 0}
-            names = [s.get("title") or os.path.basename(s["path"])
-                     if s["type"] == "file" else (s.get("title") or "вставленный текст")
-                     for s in sources]
-            title = names[0] if len(names) == 1 else f"{len(names)} источника"
-
-            # Текст для поля ввода. Он есть, только если ВСЕ источники —
-            # текстовые: показать половину и дать её править значило бы тихо
-            # потерять вторую половину при сохранении.
-            editable = all(s["type"] == "text" for s in sources)
-            text = "\n".join(s.get("content", "") for s in sources) if editable else ""
-            # `count` — сколько ФАЙЛОВ, `lines` — сколько СТРОК. Раньше
-            # наружу уходило только первое, и окно писало «13 источника» —
-            # число, по которому нельзя понять, сколько прокси загружено.
-            with self._count_lock:
-                lines = self._line_counts.get(kind, 0)
-            return {"count": len(sources), "title": title,
-                    "detail": ", ".join(names[:3]),
-                    "text": text, "editable": editable, "lines": lines}
-
-        # Прокси — НЕ обязательное условие запуска.
-        #
-        # Движок умеет идти напрямую и честно об этом предупреждает, а окно
-        # требовало прокси и дальше не пускало. Владелец загружал двадцать
-        # шесть тысяч бесплатных прокси, из которых живых оказывалось
-        # полсотни, ждал двадцать минут перебора — и до проверки почт дело не
-        # доходило вовсе. Со стороны это выглядит как «SMTP-проверки нет».
-        missing = []
-        if not self._sources["emails"]:
-            missing.append("адреса")
-        direct = not self._sources["proxies"]
-        return {
-            "emails": describe(self._sources["emails"], "emails"),
-            "proxies": describe(self._sources["proxies"], "proxies"),
-            "dorks": describe(self._sources["dorks"], "dorks"),
-            "pproxy": describe(self._sources["pproxy"], "pproxy"),
-            "ready": not missing,
-            # Прямой прогон возможен, но цена названа прямо: почтовики увидят
-            # домашний адрес владельца, а Yahoo, AOL, Outlook и iCloud с него
-            # вообще не отвечают — им нужен IP с обратным DNS и чистой
-            # репутацией.
-            "direct": direct,
-            "hint": ("Не хватает: " + " и ".join(missing) if missing
-                     else ("Всё готово — можно запускать" if not direct
-                           else "Прокси нет: проверка пойдёт с твоего IP. "
-                                "Gmail и Яндекс ответят, Yahoo/AOL/Outlook/iCloud — нет")),
-            # У сбора адресов прокси необязательны: DuckDuckGo Lite ходит
-            # напрямую, а Tor-движки поднимают собственный выход.
-            "parserReady": bool(self._sources["dorks"]),
-            "parserHint": ("Всё готово — можно собирать"
-                           if self._sources["dorks"] else "Не хватает: дорки"),
-        }
-
-    def choose_suppression(self, payload=None):
-        """Список отписок. Проверяется строже прочих.
-
-        Цена ошибки здесь выше, чем у базы: по этому списку решают, кому НЕ
-        слать. Подсунутый вместо него список прокси не вычтет никого, и
-        письмо уйдёт человеку, который прямо попросил его не трогать, —
-        а это уже жалоба на спам, а не просто лишняя проверка.
-        """
-        paths = self._pick_files("suppress")
-        if not paths:
-            self.suppress_path = None
-            return {"path": ""}
-
-        verdict = input_guard.check_file(paths[0], "email")
-        if not verdict["ok"]:
-            self._on_log(f"[DEAD] Список отписок отклонён: {verdict['reason']}", "dead")
-            return {"path": os.path.basename(self.suppress_path or ""),
-                    "error": verdict["reason"]}
-
-        self.suppress_path = paths[0]
-        return {"path": os.path.basename(self.suppress_path)}
 
     # --------------------------------------------------------- прогон --
     @staticmethod
@@ -1148,161 +769,16 @@ class ValidatorApi:
     # конвейер уже не знает.
     PARSER_ENGINES = list(SEARCH_ENGINES)
 
-    def _parser_log(self, message, tag="info"):
-        line = {"text": str(message), "tag": tag}
-        with self._lock:
-            self._parser_pending.append(line)
-            self._parser_history.append(line)
-            if len(self._parser_history) > self._history_cap:
-                del self._parser_history[:len(self._parser_history) - self._history_cap]
 
-    def _parser_progress_cb(self, current, total, pct, label="Парсинг"):
-        self._parser_progress = (int(current or 0), int(total or 0),
-                                 int(pct or 0), str(label))
 
-    def _parser_stats_cb(self, dorks_tot, dorks_done, pages, snippets, emails):
-        self._parser_stats = {"dorksTotal": int(dorks_tot or 0),
-                              "dorksDone": int(dorks_done or 0),
-                              "pages": int(pages or 0),
-                              "snippets": int(snippets or 0),
-                              "emails": int(emails or 0)}
 
-    def _parser_result_cb(self, email, dork, *args, **kwargs):
-        # Повторы отсекаются здесь: один и тот же адрес выпадает из разных
-        # дорков, и без этого он занимал бы место в списке столько раз,
-        # сколько раз попался.
-        key = str(email).strip().lower()
-        if not key:
-            return
-        with self._lock:
-            if key in self._parser_seen:
-                return
-            self._parser_seen.add(key)
-            self._parser_rows.append((str(email), str(dork or "")))
 
-    def _parser_complete_cb(self, aborted=False):
-        self._parser_state = "done"
-        self._parser_log("[Система] Сбор адресов завершён." if not aborted
-                         else "[Система] Сбор адресов остановлен.", "info")
 
-    def parser_start(self, payload):
-        if self.parser is not None and self.parser.is_alive():
-            return {"ok": False, "error": "Сбор уже идёт"}
-        if not self._sources["dorks"]:
-            return {"ok": False, "error": "Сначала загрузите дорки"}
 
-        engine = payload.get("engine") or self.PARSER_ENGINES[0]
-        if engine not in self.PARSER_ENGINES:
-            return {"ok": False, "error": "Неизвестный поисковик"}
-        threads = self._number(payload, "threads", 20, 1, 500)
-        timeout = self._number(payload, "timeout", 15, 1, 120)
 
-        with self._lock:
-            self._parser_rows = []
-            self._parser_seen = set()
-        self._parser_stats = {"dorksDone": 0, "dorksTotal": 0,
-                              "pages": 0, "snippets": 0, "emails": 0}
-        self._parser_progress = (0, 0, 0, "Парсинг")
-        self._parser_state = "running"
 
-        dork_sources = list(self._sources["dorks"])
-        proxy_sources = list(self._sources["pproxy"])
 
-        def launch():
-            """Чтение прокси и запуск — в фоне.
 
-            Файл прокси на большом пуле читается заметное время, и в потоке,
-            который обслуживает страницу, это была бы пауза между нажатием
-            кнопки и первой строчкой лога.
-            """
-            try:
-                proxies = []
-                if proxy_sources:
-                    from core.network import dedupe_proxies_stream
-                    from core.streamer import StreamLoader
-                    proxies = list(dedupe_proxies_stream(
-                        StreamLoader(proxy_sources).stream_lines()))
-
-                from core.parser_pipeline import ParserPipeline
-                pipeline = ParserPipeline(
-                    dork_sources=dork_sources,
-                    proxies=proxies,
-                    max_threads=threads,
-                    timeout=timeout,
-                    on_log=self._parser_log,
-                    on_progress=self._parser_progress_cb,
-                    on_stats_update=self._parser_stats_cb,
-                    on_result_found=self._parser_result_cb,
-                    on_complete=self._parser_complete_cb,
-                    engine_name=engine,
-                )
-                self.parser = pipeline
-                pipeline.start()
-            except Exception as exc:
-                # Молча упавший поток выглядел бы как «нажал и ничего»:
-                # состояние осталось бы running навсегда.
-                self._parser_state = "done"
-                self._parser_log("[Ошибка] Сбор не запустился: %s" % exc, "dead")
-
-        threading.Thread(target=launch, daemon=True).start()
-        return {"ok": True}
-
-    def parser_pause(self, payload=None):
-        pipeline = self.parser
-        if pipeline is None or not pipeline.is_alive():
-            return {"state": self._parser_state}
-        if pipeline._pause_event.is_set():
-            pipeline.resume()
-            self._parser_state = "running"
-            self._parser_log("[Система] Сбор возобновлён.", "info")
-        else:
-            pipeline.pause()
-            self._parser_state = "paused"
-            self._parser_log("[Система] Сбор приостановлен.", "info")
-        return {"state": self._parser_state}
-
-    def parser_stop(self, payload=None):
-        pipeline = self.parser
-        if pipeline is not None and pipeline.is_alive():
-            pipeline.stop()
-            self._parser_log("[Система] Остановка сбора.", "info")
-        self._parser_state = "done"
-        return {"state": self._parser_state}
-
-    def parser_state(self, payload=None):
-        with self._lock:
-            lines, self._parser_pending = self._parser_pending, []
-            found = len(self._parser_rows)
-        current, total, pct, label = self._parser_progress
-        alive = self.parser is not None and self.parser.is_alive()
-        stats = dict(self._parser_stats)
-        stats["found"] = found
-        return {"state": self._parser_state,
-                "running": bool(alive),
-                "engines": list(self.PARSER_ENGINES),
-                "stats": stats,
-                "progress": {"current": current, "total": total,
-                             "pct": pct, "label": label},
-                "log": lines}
-
-    def parser_log_tail(self, payload=None):
-        with self._lock:
-            self._parser_pending = []
-            return {"log": list(self._parser_history)}
-
-    def parser_page(self, payload=None):
-        """Страница найденных адресов."""
-        payload = payload or {}
-        number = max(1, int(payload.get("page") or 1))
-        with self._lock:
-            rows = list(self._parser_rows)
-        total = len(rows)
-        pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-        number = min(number, pages)
-        start = (number - 1) * PAGE_SIZE
-        chunk = rows[start:start + PAGE_SIZE]
-        return {"rows": [{"email": e, "dork": d} for e, d in chunk],
-                "page": number, "pages": pages, "total": total}
 
     def client_error(self, payload=None):
         """Сбой в САМОМ окне: ошибка JS или неперехваченный отказ обещания.
@@ -1346,47 +822,7 @@ class ValidatorApi:
              % (message, crash_log_path()), "dead")
         return {"ok": True, "path": crash_log_path()}
 
-    def parser_copy(self, payload=None):
-        limit = 200_000
-        with self._lock:
-            rows = self._parser_rows[:limit]
-        return {"text": chr(10).join(e for e, _ in rows), "count": len(rows),
-                "capped": len(rows) >= limit}
 
-    def parser_export(self, payload=None):
-        """Сохранение найденного. Запись идёт в фоне: список бывает большим."""
-        if self.window is None:
-            return {"ok": False, "error": "Окно недоступно"}
-        with self._lock:
-            rows = list(self._parser_rows)
-        if not rows:
-            return {"ok": False, "error": "Пока нечего сохранять"}
-
-        path = self.window.create_file_dialog(
-            _тип_диалога("SAVE"), save_filename="parsed_emails.txt",
-            file_types=("Текст (*.txt)", "CSV (*.csv)"))
-        if not path:
-            return {"ok": False, "error": ""}
-        path = path if isinstance(path, str) else path[0]
-
-        def write():
-            try:
-                with open(path, "w", encoding=export_encoding(path),
-                          newline="") as handle:
-                    if path.lower().endswith(".csv"):
-                        import csv
-                        writer = csv.writer(handle)
-                        writer.writerow(["email", "dork"])
-                        writer.writerows(csv_row(r) for r in rows)
-                    else:
-                        for email, _dork in rows:
-                            handle.write(email + chr(10))
-                self._parser_log("[Система] Сохранено адресов: %d." % len(rows), "info")
-            except OSError as exc:
-                self._parser_log("[Ошибка] Не удалось сохранить: %s" % exc, "dead")
-
-        threading.Thread(target=write, daemon=True).start()
-        return {"ok": True, "path": os.path.basename(path), "count": len(rows)}
 
     def export_segments(self, payload):
         """Раскладывает выборку по сегментам в отдельные файлы.

@@ -12,6 +12,10 @@
 Сеть здесь не трогается: сервер подменяется заглушкой, которая отвечает так
 же, как настоящий.
 """
+# Исходник конвейера собирается по ВСЕМ его модулям: после
+# разделения на примеси половина кода лежит не в core/pipeline.py,
+# и чтение одного файла молча проверяло бы не то. См. tests/исходники.py.
+from исходники import исходник_конвейера
 import inspect
 import os
 import sys
@@ -270,7 +274,7 @@ def test_spamhaus_missing_resolver_is_a_loud_line():
     молчит» говорится, только когда не подошёл НИ ОДИН, — то есть строка
     по-прежнему громкая, но уже заслуженная.
     """
-    source = inspect.getsource(__import__("core.pipeline", fromlist=["x"]))
+    source = исходник_конвейера()
     block = source[source.index("elif not resolvers and self.network:"):]
     block = block[:block.index("if proxy_profiles")]
     assert "autodetect_spamhaus_resolver()" in block, "даже не попробовали"
@@ -280,7 +284,7 @@ def test_spamhaus_missing_resolver_is_a_loud_line():
 
 
 def test_spamhaus_reason_is_used_by_the_pipeline():
-    source = inspect.getsource(__import__("core.pipeline", fromlist=["x"]))
+    source = исходник_конвейера()
     assert "self.network.spamhaus_refusal_reason()" in source
 
 
@@ -398,7 +402,7 @@ def test_spamhaus_pipeline_tries_autodetect_before_giving_up():
 
     from core import pipeline
 
-    source = inspect.getsource(pipeline)
+    source = исходник_конвейера()
     assert "autodetect_spamhaus_resolver()" in source
     assert "подключён сам через системный" in source
 

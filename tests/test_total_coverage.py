@@ -14,6 +14,10 @@
 #     python -m pytest -m "not slow"
 # Перед выпуском набор гоняется полностью: маркер прячет тесты от спешки,
 # а не от ответственности.
+# Разрезанные модули читаются вместе с примесями: после разделения
+# половина кода лежит не в исходном файле, и чтение одного файла
+# сделало бы проверку зелёной по ошибке. См. tests/исходники.py.
+from исходники import исходник_файла
 import pytest
 
 pytestmark = pytest.mark.slow
@@ -30,8 +34,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def source(*parts):
-    with io.open(os.path.join(ROOT, *parts), encoding="utf-8") as handle:
-        return handle.read()
+    """Текст файла; для разрезанных модулей — вместе с их примесями."""
+    return исходник_файла("/".join(parts), ROOT)
 
 
 def pipeline():

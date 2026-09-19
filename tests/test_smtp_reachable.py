@@ -20,6 +20,10 @@
 него теперь можно. Сеть в этих тестах НЕ трогается — живой прогон был
 разовым доказательством, а набор должен идти на любой машине.
 """
+# Исходник конвейера собирается по ВСЕМ его модулям: после
+# разделения на примеси половина кода лежит не в core/pipeline.py,
+# и чтение одного файла молча проверяло бы не то. См. tests/исходники.py.
+from исходники import исходник_конвейера
 import inspect
 import io
 import os
@@ -80,7 +84,7 @@ def test_exists_pipeline_actually_calls_it():
     Проверка именно этого: между «код есть» и «код работает на каждом адресе»
     была бы ровно та разница, о которой спрашивал владелец.
     """
-    source = inspect.getsource(__import__("core.pipeline", fromlist=["x"]))
+    source = исходник_конвейера()
     assert "res = self.network.check_email(email)" in source
 
 
@@ -266,7 +270,7 @@ def test_opt_in_default_is_check_everything():
 
 def test_opt_in_pipeline_reads_the_setting():
     """Конвейер берёт число из настроек, а не из константы в коде."""
-    source = inspect.getsource(__import__("core.pipeline", fromlist=["x"]))
+    source = исходник_конвейера()
     assert 'setting("proxy_enough", 0)' in source
     assert "enough=max(0, enough)" in source
 
@@ -275,20 +279,20 @@ def test_opt_in_pipeline_reads_the_setting():
 
 def test_says_how_the_proxy_sweep_ended():
     """«Найдено 54 из 26390» не отвечает на вопрос «проверятся ли мои почты»."""
-    source = inspect.getsource(__import__("core.pipeline", fromlist=["x"]))
+    source = исходник_конвейера()
     assert "живых %d из %d" in source
 
 
 def test_says_what_zero_live_proxies_means():
     """Ноль живых — это ноль вердиктов, и так и надо сказать."""
-    source = inspect.getsource(__import__("core.pipeline", fromlist=["x"]))
+    source = исходник_конвейера()
     assert "Вердиктов не будет" in source
     assert "make_vps_proxy" in source
 
 
 def test_says_when_there_are_too_few():
     """Мало прокси — отдельная беда: почтовик считает нагрузку по IP."""
-    source = inspect.getsource(__import__("core.pipeline", fromlist=["x"]))
+    source = исходник_конвейера()
     assert "Живых прокси всего" in source
 
 

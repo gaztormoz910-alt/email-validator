@@ -123,6 +123,11 @@ from core.dns_resolver import (                                   # noqa: E402
 # спрашивать и что известно про домен до всякого диалога.
 from core.bounded import BoundedCache                          # noqa: E402
 from core.proxy_pool import ProxyPoolMixin, UNKNOWN_LATENCY_MS  # noqa: E402
+# Catch-all и второе мнение — примеси рядом, по одному файлу на тему.
+# Обе работают с тем же объектом и тем же состоянием из __init__:
+# файл поделён, поведение — нет. См. шапки этих модулей.
+from core.catchall import CatchAllMixin                         # noqa: E402
+from core.second_opinion import SecondOpinionMixin              # noqa: E402
 from core.dns_checks import DnsChecksMixin                      # noqa: E402
 
 
@@ -194,7 +199,8 @@ def control_probe_address(domain):
     return "%s@%s" % (_generate_random_local("name"), domain)
 
 
-class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
+class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
+                       CatchAllMixin, SecondOpinionMixin):
     """SMTP-проверка ящика: диалог с сервером и сборка вердикта.
 
     Работа с пулом прокси и проверки по DNS живут в примесях рядом
@@ -880,148 +886,11 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
         needs_clean = domain in NEEDS_CLEAN_IP_DOMAINS
         return self._pick_best_proxy(need_ptr=needs_ptr, need_clean=needs_clean)
 
-    def is_catch_all_domain(self, domain, mx_record) -> bool:
-        """
-        Проверяет, является ли домен Catch-All (принимает любой адрес).
-        Три разных паттерна — два коротких и UUID-подобный — в ОДНОЙ сессии.
-        Результат кэшируется.
-        """
-        with self.catchall_lock:
-            if domain in self.catchall_cache:
-                return self.catchall_cache[domain]
 
-        # Ответ, выясненный в прошлый раз. Тройная проба стоит трёх RCPT в
-        # отдельной сессии НА КАЖДЫЙ домен базы: спрашивать об одном и том же
-        # при каждом запуске — это лишние сессии и лишний повод попасться на
-        # глаза почтовику ровно за тот ответ, который уже есть.
-        #
-        # У записи есть срок (см. core/longterm.py): домен мог перестать быть
-        # catch-all, и вечная память была бы хуже её отсутствия.
-        if self.memory is not None:
-            remembered = self.memory.catchall_get(domain)
-            if remembered is not None:
-                with self.catchall_lock:
-                    self.catchall_cache[domain] = remembered
-                return remembered
 
-        fakes = [
-            f"{_generate_random_local('short')}@{domain}",
-            f"{_generate_random_local('short')}@{domain}",
-            f"{_generate_random_local('uuid')}@{domain}",
-        ]
-        results = self._probe_recipients(fakes, mx_record,
-                                         proxy=self._probe_proxy_for(domain))
 
-        for result in results:
-            # Проба сорвалась (мёртвый прокси, таймаут) — вывода сделать нельзя.
-            # НЕ кэшируем: иначе catch-all домен потом молча выдаст Valid на всё.
-            #
-            # `greylisted` попал сюда позже остальных, и вот почему. Серый
-            # список — это `450 приходите позже`: сервер ОТКЛАДЫВАЕТ решение,
-            # а не отказывает получателю. Ответа о ящике в нём нет ровно так
-            # же, как в таймауте. Между тем ветка ниже читала любой не-valid
-            # как «выдуманный адрес отвергнут, значит домен не catch-all» — и
-            # записывала это в долгую память на тридцать суток. Дальше
-            # настоящий адрес того же домена приходил после выдержки, получал
-            # честный `250`, и раз домен «доказанно не catch-all», вердикт
-            # становился Valid. У домена с catch-all это ложный Valid, и
-            # владелец узнаёт правду по отскокам.
-            #
-            # Greylisting чаще всего стоит как раз на небольших корпоративных
-            # доменах — там же, где чаще всего включён и приём на любой адрес.
-            if result["status"] in ("unknown", "greylisted"):
-                # Но прежде чем сказать «не catch-all», спросим соседей по
-                # почтовому серверу. Ответ «нет» здесь опаснее всего: он
-                # отправляет несуществующие ящики домена прямиком в Valid, и
-                # владелец узнаёт правду по отскокам.
-                #
-                # Подсказка НЕ заменяет пробу: она читается только когда проба
-                # сорвалась, и только если тот же MX-хост уже оказывался
-                # catch-all у ДВУХ разных доменов. Один сосед ничего не
-                # значит — настройка у доменов на общем сервере своя.
-                if self._mx_catchall_suspected(mx_record, domain):
-                    return True
-                return False
-            # Хоть один выдуманный адрес отвергнут — домен точно не catch-all
-            if result["status"] != "valid":
-                with self.catchall_lock:
-                    self.catchall_cache[domain] = False
-                self._remember_catchall(domain, False)
-                return False
 
-        with self.catchall_lock:
-            self.catchall_cache[domain] = True
-        self._remember_catchall(domain, True)
-        self._note_mx_catchall(mx_record, domain)
-        return True
 
-    def _note_mx_catchall(self, mx_record, domain):
-        """Запоминает, что этот почтовый сервер уже принимал что угодно."""
-        host = (mx_record or "").strip().lower().rstrip(".")
-        if not host or not domain:
-            return
-        with self.catchall_lock:
-            seen = self._mx_catchall.get(host)
-            if seen is None:
-                seen = set()
-                self._mx_catchall[host] = seen
-            seen.add(domain.strip().lower())
-
-    def _mx_catchall_suspected(self, mx_record, domain):
-        """Оказывался ли этот MX-хост catch-all у ДВУХ других доменов.
-
-        Двух, а не одного: у доменов на общем сервере настройки свои, и один
-        сосед — совпадение. Возвращает только подозрение и только там, где
-        собственная проба ничего не дала.
-        """
-        host = (mx_record or "").strip().lower().rstrip(".")
-        if not host:
-            return False
-        with self.catchall_lock:
-            seen = self._mx_catchall.get(host) or set()
-            others = {d for d in seen if d != (domain or "").strip().lower()}
-        return len(others) >= 2
-
-    # Домены, у которых catch-all невозможен по устройству. Список ОДИН на
-    # весь модуль: пока он был набран прямо в ветке проверки, долгая память о
-    # нём не знала — и записывала в себя ровно то, что эта ветка через
-    # несколько строк переименовывала в тарпитинг.
-    NEVER_CATCHALL = frozenset({
-        "gmail.com", "googlemail.com", "yandex.ru", "ya.ru",
-        "icloud.com", "me.com", "mac.com",
-    })
-
-    def _is_never_catchall(self, domain):
-        """Гигант, у которого catch-all не бывает: приём выдуманного адреса
-        у него означает тарпитинг, а не настройку домена."""
-        low = str(domain or "").lower()
-        return (low in self.NEVER_CATCHALL or low in YAHOO_DOMAINS
-                or low in MICROSOFT_DOMAINS or low in AOL_DOMAINS)
-
-    def _remember_catchall(self, domain, is_catchall):
-        """Кладёт выясненный ответ в память между запусками.
-
-        Тихо: сбой памяти не имеет права влиять на проверку почты.
-
-        У гигантов catch-all не бывает: приняв выдуманный адрес, gmail.com не
-        стал принимать всё подряд — он перестал отвечать честно, потому что с
-        нашего выхода идёт перебор. Это тарпитинг, и лечится он сменой прокси.
-
-        Раньше запись делалась ДО того, как вызывающий распознавал тарпитинг,
-        и в долгой памяти оседало «gmail.com — catch-all» на тридцать суток.
-        После этого КАЖДЫЙ адрес на gmail.com в каждом следующем запуске
-        получал Unknown, не доходя до сервера, — и владелец терял на этом
-        самую большую часть любой базы, ничего не замечая: строка в логе о
-        тарпитинге была разовой, а последствие — месячным.
-        """
-        if self.memory is None:
-            return
-        if is_catchall and self._is_never_catchall(domain):
-            return
-        try:
-            self.memory.catchall_put(domain, is_catchall)
-        except Exception:
-            pass
 
     def stealth_smtp_ping(self, email: str, mx_records: list,
                           control_probe=False, avoid_exit_of=None,
@@ -1254,156 +1123,11 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin):
             self._mx_country_cache[key] = code
         return code
 
-    def _confirm_invalid_on_other_mx(self, email, decided_on, mx_records,
-                                     needs_ptr, needs_clean, want_country,
-                                     deadline, first_proxy=None, почему=None):
-        """Второе мнение о приговоре: другой сервер ЛИБО другой выходной IP.
 
-        True  — подтверждено, ящика действительно нет;
-        False — второй ответ говорит обратное, хоронить адрес нельзя;
-        None  — сверить не с чем: некому спросить или не успели по дедлайну.
 
-        Две оси, и обе нужны.
 
-        ПО СЕРВЕРАМ. У домена бывает несколько MX, настроенных по-разному:
-        запасной узел часто не знает списка ящиков и отвечает 550 на всё
-        подряд.
 
-        ПО ВЫХОДНОМУ IP. Это добавлено позже и закрывает дыру, которая была
-        больше первой: у yandex.ru, mail.ru и почти всей корпоративной почты
-        MX ОДИН, и подтверждать приговор было нечем — второе мнение не
-        спрашивалось вовсе. А отказ по репутации нашего адреса выглядит для
-        нас точно так же, как «ящика нет»: повтори мы его с того же IP, он бы
-        подтвердил сам себя.
 
-        Поэтому спрашиваем ВСЕГДА с другого выходного адреса, а сервер берём
-        другой, если он есть. Если другого IP нет — второго мнения нет, и это
-        честное None, а не молчаливое согласие.
-        """
-        # ПРИЧИНА НАЗЫВАЕТСЯ НАСТОЯЩАЯ, а не первая попавшаяся.
-        #
-        # Причин у «второго мнения нет» четыре, и владельцу печаталась всегда
-        # одна: «у домена один MX». На gmail.com, у которого MX пять, это была
-        # прямая неправда — ровно в том месте, где он решает, верить ли
-        # приговору «ящика не существует» и удалять ли контакт.
-        def нечем(причина):
-            if почему is not None:
-                почему["текст"] = причина
-            return None
-
-        if time.monotonic() > deadline:
-            return нечем("не успели: истёк общий срок проверки этого адреса")
-
-        # Прокси с ДРУГИМ выходным адресом. Без него спрашивать бессмысленно.
-        proxy = self._pick_best_proxy(need_ptr=needs_ptr, need_clean=needs_clean,
-                                      want_country=want_country,
-                                      avoid_exit_of=first_proxy)
-        if first_proxy and proxy is None:
-            return нечем("в пуле не осталось прокси с другим выходным IP")
-
-        # Сервер по возможности другой: две независимые оси лучше одной.
-        others = [mx for mx in (mx_records or []) if mx != decided_on]
-        target = others[0] if others else decided_on
-        if not others and not first_proxy:
-            return нечем("у домена один почтовый сервер, а проверка шла "
-                         "без прокси — второго выхода тоже нет")
-
-        second = self._do_single_ping(email, target, proxy=proxy)
-        status = second.get("status")
-        if status == "invalid":
-            return True
-        if status == "valid":
-            return False
-        # unknown/greylisted/risky — второй сервер ничего не сказал, и
-        # выдавать его молчание за несогласие нельзя.
-        return нечем("второй сервер (%s) ответил неопределённо: %s"
-                     % (target, str(second.get("reason") or status)[:80]))
-
-    def confirm_valid_from_other_exit(self, email, mx_records,
-                                      first_proxy=None, deadline=None):
-        """Второе мнение о ПОДТВЕРЖДЕНИИ. Зеркало проверки приговора.
-
-        True  — второй выход тоже принял адрес;
-        False — второй выход адрес ОТВЕРГ, «Годен» недоказуем;
-        None  — сверить не с чем: другого выходного адреса в пуле нет.
-
-        ЗАЧЕМ. Приговор «ящика нет» сверяется со вторым сервером и вторым
-        выходом — цена ошибки высока, живой контакт теряется навсегда. У
-        `Valid` второго мнения не было вообще: он держался на одной сессии с
-        одного выхода. А цена ошибки здесь тоже высокая, просто она приходит
-        позже — письмом на несуществующий ящик и отскоком.
-
-        Что это ловит и чего не ловит контрольная проба. Контрольная проба
-        спрашивает выдуманный адрес в той же сессии и ловит catch-all. Она
-        НЕ видит случая, когда почтовик принимает всё подряд именно с нашего
-        выхода — а с другого отвечает честно. Тогда контрольная проба тоже
-        получит `250` на выдуманный, и статус станет `catchall`... но только
-        если она в этой сессии была: у гигантов она идёт раз в 25 адресов.
-
-        ПОЧЕМУ ОТКАЗ ВТОРОГО ВЫХОДА НЕ ДЕЛАЕТ АДРЕС INVALID. Отвергнуть могли
-        по репутации второго прокси, а не по отсутствию ящика. Два выхода
-        разошлись — значит доказательства нет ни у одной стороны, и честный
-        ответ здесь `Unknown`, а не приговор.
-        """
-        if deadline is not None and time.monotonic() > deadline:
-            return None
-        domain = email.split("@")[1].lower() if "@" in email else ""
-        needs_ptr = domain in YAHOO_DOMAINS or domain in AOL_DOMAINS
-        needs_clean = domain in NEEDS_CLEAN_IP_DOMAINS
-
-        proxy = self._pick_best_proxy(need_ptr=needs_ptr,
-                                      need_clean=needs_clean,
-                                      avoid_exit_of=first_proxy)
-        if first_proxy and proxy is None:
-            return None            # другого выхода нет — сверять нечем
-        if not first_proxy and not self.proxies:
-            return None            # прямое соединение: выход всего один
-
-        target = (mx_records or [None])[0]
-        if not target:
-            return None
-        second = self._do_single_ping(email, target, proxy=proxy)
-        status = second.get("status")
-        if status == "valid":
-            return True
-        if status in ("invalid", "catchall"):
-            return False
-        # unknown/greylisted/risky — второй выход промолчал. Молчание не
-        # опровержение: возвращаем «сверить не удалось».
-        return None
-
-    # Через сколько проверок домена повторять контрольную пробу у гигантов.
-    # Двадцать пять — компромисс: лишних RCPT четыре процента, а тарпитинг
-    # обнаруживается на первых же десятках адресов, задолго до конца прогона.
-    TARPIT_RECHECK_EVERY = 25
-
-    def _time_to_recheck(self, domain):
-        """Пора ли проверить, честно ли гигант отвечает СЕЙЧАС.
-
-        Первая проверка домена всегда контрольная: если сервер уже тарпитит,
-        узнать об этом надо на первом адресе, а не на двадцать шестом.
-        """
-        if not domain:
-            return False
-        with self._domain_checks_lock:
-            seen = self._domain_checks.get(domain, 0)
-            self._domain_checks[domain] = seen + 1
-        return seen == 0 or seen % self.TARPIT_RECHECK_EVERY == 0
-
-    def proven_catchall_domains(self):
-        """Домены, про которые ДОКАЗАНО, что они принимают любой адрес.
-
-        Нужны конвейеру в конце прогона: домен мог раскрыться после того, как
-        по нему уже выдали Valid (тройная проба сорвалась, а контрольный RCPT
-        в середине прогона показал правду).
-        """
-        with self.catchall_lock:
-            return sorted(d for d, yes in self.catchall_cache.items() if yes)
-
-    def tarpit_domains(self):
-        """Домены, поймавшие нас на переборе. Для отчёта владельцу."""
-        with self.catchall_lock:
-            return sorted(self._tarpit_domains)
 
     @staticmethod
     def probe_form(email):
