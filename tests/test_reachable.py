@@ -100,9 +100,19 @@ def test_control_second_opinion_default_is_on_end_to_end():
         "on_result": lambda *a: None,
         "on_complete": lambda: None,
     })
-    pipe.start(email_sources=[], threads=1, timeout=1, fix_typos=True,
-               check_spam=True, deep_ping=True, proxies=None)
+    поток = pipe.start(email_sources=[], threads=1, timeout=1, fix_typos=True,
+                       check_spam=True, deep_ping=True, proxies=None)
     pipe.stop()
+    # ДОЖИДАЕМСЯ рабочего потока. stop() не прерывает подготовку, и раньше
+    # поток жил дальше сам по себе: ~28 секунд грузил списки и дописывал
+    # 61 123 одноразовых домена в ОБЩИЙ для процесса список — уже во время
+    # чужих тестов, после того как conftest проверил размер. Так в список
+    # втекал gmial.com, и три проверки опечаток в test_trust.py падали —
+    # замерено 26.09.2026: в среде гейта 2 прогона из 2, вне её 0 из 3,
+    # поэтому падение выглядело случайным. 120 секунд — четыре замера с
+    # запасом; не успел — падаем здесь, громко, а не течём дальше.
+    поток.join(120)
+    assert not поток.is_alive(), "рабочий поток конвейера не закончил подготовку за 120 с"
     assert getattr(pipe, "confirm_valid", False) is True, (
         "второе мнение не доехало до конвейера — подпись поменяли, а поведение нет")
 
