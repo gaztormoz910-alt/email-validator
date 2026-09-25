@@ -54,6 +54,15 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 Compression=lzma2/max
 SolidCompression=yes
+
+; Время файлов — в UTC, а не в местном времени машины сборки. По умолчанию
+; Inno пишет МЕСТНОЕ время, и установщик выдаёт часовой пояс того, кто его
+; собрал: время файлов у получателя расходится со временем публикации ровно
+; на этот пояс. Замерено 25.09.2026 на установщике, собранном на машине
+; разработчика: все 3456 отметок лежали со сдвигом +6 часов. На сервере
+; GitHub пояс UTC, и там разницы нет, — но собирать можно и локально, а
+; проверка tools/check_privacy.py теперь ловит такой сдвиг сама.
+TimeStampsInUTC=yes
 WizardStyle=modern
 DisableProgramGroupPage=yes
 DisableDirPage=auto
