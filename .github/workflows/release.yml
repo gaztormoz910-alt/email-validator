@@ -136,6 +136,26 @@ jobs:
           & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" MailFact.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
+      - name: Проверить, что в сборке нет следов машины сборки
+        # Путь проекта, имя компьютера, данные git — ни в одном файле сборки,
+        # ни в распакованном байткоде, ни в сжатом потоке установщика; время
+        # файлов внутри установщика — в UTC. Свои маркеры (фамилию, домашний
+        # IP) владелец кладёт в секрет репозитория MAILFACT_PRIVATE_MARKERS
+        # через «;»: в открытый файл их писать нельзя, а секрет не виден никому,
+        # и проверка его значений не печатает. Нет секрета — проверяются только
+        # данные машины сборки.
+        shell: bash
+        env:
+          MAILFACT_PRIVATE_MARKERS: ${{ secrets.MAILFACT_PRIVATE_MARKERS }}
+        run: |
+          set +e
+          OUT=$(python tools/check_privacy.py --dist dist/MailFact --installer installer/MailFact-setup.exe 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Следы машины сборки::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
+          fi
+
       - name: Проверить установщик
         shell: pwsh
         run: |
@@ -225,6 +245,20 @@ jobs:
 
       - name: Собрать .app
         run: python -m PyInstaller --noconfirm --clean --log-level WARN MailFact.spec
+
+      - name: Проверить, что в сборке нет следов машины сборки
+        # То же, что на Windows, только установщика здесь нет: .dmg собирается
+        # из этой самой папки .app без добавлений.
+        env:
+          MAILFACT_PRIVATE_MARKERS: ${{ secrets.MAILFACT_PRIVATE_MARKERS }}
+        run: |
+          set +e
+          OUT=$(python tools/check_privacy.py --dist dist/MailFact.app 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Следы машины сборки macOS::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
+          fi
 
       - name: Настоящий прогон внутри собранной программы
         run: |
@@ -381,6 +415,20 @@ jobs:
           echo "$OUT"
           if [ $RC -ne 0 ]; then
             echo "::error title=Зависимости Linux::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
+            exit $RC
+          fi
+
+      - name: Проверить, что в сборке нет следов машины сборки
+        # То же, что на Windows. Ярлык и УСТАНОВКА.txt, которые добавятся в
+        # архив дальше, пишутся из этого же файла и личного не содержат.
+        env:
+          MAILFACT_PRIVATE_MARKERS: ${{ secrets.MAILFACT_PRIVATE_MARKERS }}
+        run: |
+          set +e
+          OUT=$(python tools/check_privacy.py --dist dist/MailFact 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=Следы машины сборки Linux::$(echo "$OUT" | tail -12 | paste -sd '~' -)"
             exit $RC
           fi
 
