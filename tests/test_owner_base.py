@@ -28,7 +28,9 @@ from core.email_syntax import validate_email_syntax
 from core.local_rules import IMPOSSIBLE, check_local_part
 
 DEFAULT_BASE = os.path.join(
-    "C:\\", "Users", "user", "OneDrive", "Desktop", "Мой софт", "200m",
+    # От домашней папки того, кто запускает, а не буквальным путём: имя папки
+    # пользователя в открытом репозитории — это имя человека.
+    os.path.expanduser("~"), "OneDrive", "Desktop", "Мой софт", "200m",
     "Почты", "emails.csv")
 
 
