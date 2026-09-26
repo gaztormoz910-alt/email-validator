@@ -51,7 +51,19 @@ jobs:
       - name: Прогнать тесты
         # Чужой .pyc не должен решать судьбу прогона: -B выключает запись
         # кэша, чтобы зелёный результат означал зелёный ИСХОДНИК.
-        run: python -B -m pytest -q
+        #
+        # Имена упавших тестов дублируются в АННОТАЦИЮ: журнал задания у
+        # публичного репозитория без входа не открывается, и 26.09.2026
+        # падение на windows/3.11 было видно только как «exit code 1».
+        shell: bash
+        run: |
+          set +e
+          python -B -m pytest -q -rf > "$RUNNER_TEMP/pytest.out" 2>&1; RC=$?
+          cat "$RUNNER_TEMP/pytest.out"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=pytest ${{ matrix.os }} ${{ matrix.python }}, код $RC::$(grep -E '^(FAILED|ERROR)|[0-9]+ (passed|failed)' "$RUNNER_TEMP/pytest.out" | tail -12 | cut -c1-300 | paste -sd '~' -)"
+            exit $RC
+          fi
         env:
           PYTHONIOENCODING: utf-8
           # VALIDATOR_CI здесь БОЛЬШЕ НЕТ, и это осознанно.
