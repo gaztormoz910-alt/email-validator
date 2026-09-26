@@ -116,7 +116,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
       - name: mypy
-        run: python -m mypy
+        # Причина провала дублируется в АННОТАЦИЮ: журнал задания у публичного
+        # репозитория открывается только после входа, а аннотация — без него.
+        # На 1.3.3 и 1.3.4 задание падало с кодом 2 (у mypy это ошибка запуска
+        # или разбора, а не ошибка типов), и увидеть почему было нечем: у
+        # владельца на Windows и с --platform linux тот же mypy 2.3.1 чист.
+        shell: bash
+        run: |
+          set +e
+          OUT=$(python -m mypy 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            echo "::error title=mypy, код $RC::$(echo "$OUT" | tail -15 | paste -sd '~' -)"
+            exit $RC
+          fi
 
   structure:
     name: Модули не превращаются обратно в монолиты
