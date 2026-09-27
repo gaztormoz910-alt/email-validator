@@ -22,7 +22,6 @@ from core.paths import data_path
 # реальному bounce-логу и положить результат рядом в JSON.
 DEFAULT_WEIGHTS = {
     "smtp_valid": 55,
-    "smtp_valid_full_inbox": 70,
     "smtp_risky": 20,
     "smtp_unknown": 10,
     "gravatar": 10,
@@ -164,16 +163,21 @@ _STATUS_ALIASES = {
     "role-based": "Role-based",
     "trap/disposable": "Trap/Disposable",
     "disposable": "Trap/Disposable",
+    "full": "Mailbox Full",
+    "mailbox full": "Mailbox Full",
+    "disabled": "Disabled",
+    "unconfirmed": "Unconfirmed",
 }
 
 
 # Формулировки «ящик переполнен» на всех языках, которыми их писал проект.
 #
-# Это САМЫЙ ценный положительный сигнал после чистого 250: переполненный ящик
-# доказывает не только что он существует, но и что им пользуются. Проверка
-# шла по трём английским строкам из старого разбора ответов; когда разбор
-# переписали и причины стали русскими, бонус молча перестал начисляться —
-# а старые причины остались в кэше вердиктов, и их тоже надо понимать.
+# Раньше это был «самый ценный сигнал после 250» с бонусом +70: считалось,
+# что переполненным ящиком активно пользуются. Это неверно — Gmail сам пишет
+# «out of storage space and inactive», и письмо в такой ящик не доставляется
+# (аудит 27.09.2026, D1). Теперь переполненный ящик баллов живости не
+# получает. Формулировки нужны, чтобы узнать и СТАРЫЕ строки, где такой ящик
+# ещё назван «Valid»: у них бонуса тоже не будет.
 _FULL_INBOX_MARKERS = (
     "full inbox", "mailbox full", "over quota", "overquota",
     "quota exceeded", "exceeded storage", "storage allocation",
@@ -252,6 +256,16 @@ def calculate_engagement_score(
             "provider_type": "Free" if is_free_provider else "Corporate",
         }
 
+    # Ящик отключён — письма не принимаются. Для живости это то же самое, что
+    # «ящика нет»: хороший домен не делает отключённый ящик живым.
+    if scoring_status == "Disabled":
+        return {
+            "score": 0,
+            "grade": "Dead",
+            "signals": ["0: сервер назвал ящик отключённым"],
+            "provider_type": "Free" if is_free_provider else "Corporate",
+        }
+
     # === ПОЗИТИВНЫЕ СИГНАЛЫ ===
     
     # 1. SMTP статус
@@ -260,19 +274,21 @@ def calculate_engagement_score(
     # (SPF, PTR, возраст), а у бесплатных провайдеров их набрать неоткуда:
     # с прежним весом +30 подтверждённый живой Gmail упирался в потолок 50/100
     # и вечно показывался как "Neutral".
-    if scoring_status == "Valid":
-        if _looks_like_full_inbox(smtp_reason):
-            score += W("smtp_valid_full_inbox")
-            signals.append(f'+{W("smtp_valid_full_inbox")}: Полный ящик (активно используется)')
-        else:
-            score += W("smtp_valid")
-            signals.append(f'+{W("smtp_valid")}: SMTP 250 OK (почта жива)')
+    if scoring_status == "Mailbox Full" or (
+            scoring_status == "Valid" and _looks_like_full_inbox(smtp_reason)):
+        signals.append("0: Ящик переполнен — письмо не дойдёт; переполняется "
+                       "обычно ящик, которым не пользуются")
+    elif scoring_status == "Valid":
+        score += W("smtp_valid")
+        signals.append(f'+{W("smtp_valid")}: SMTP 250 OK (почта жива)')
     elif scoring_status == "Risky":
         score += W("smtp_risky")
         signals.append(f'+{W("smtp_risky")}: Risky (возможно жива)')
-    elif scoring_status == "Unknown":
+    elif scoring_status in ("Unknown", "Unconfirmed"):
+        # Unconfirmed: сервер принял, но приём любых адресов не исключён —
+        # по доказательности это «не выяснено», а не «жив».
         score += W("smtp_unknown")
-        signals.append(f'+{W("smtp_unknown")}: Unknown (неопределённо)')
+        signals.append(f'+{W("smtp_unknown")}: {scoring_status} (неопределённо)')
     # Invalid/Bounce = 0 баллов
     
     # 2. Gravatar (бонус, только в плюс)

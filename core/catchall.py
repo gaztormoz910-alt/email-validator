@@ -58,7 +58,26 @@ class CatchAllMixin:
         results = self._probe_recipients(fakes, mx_record,
                                          proxy=self._probe_proxy_for(domain))
 
+        # Хоть ОДИН принятый выдуманный адрес — уже catch-all. Раньше нужны
+        # были все три, и сервер, принимающий любой адрес, но отвечающий на
+        # второй RCPT «too many recipients», проходил как «не catch-all» —
+        # и этот вывод ложился в долгую память на тридцать суток (аудит
+        # 27.09.2026, D3). Совпасть с настоящим ящиком случайный адрес не
+        # может, поэтому один приём — доказательство, а не шум.
+        if any((r or {}).get("status") == "valid" for r in results):
+            with self.catchall_lock:
+                self.catchall_cache[domain] = True
+            self._remember_catchall(domain, True)
+            self._note_mx_catchall(mx_record, domain)
+            return True
+
+        from core.confirmation import rejects_fake
         for result in results:
+            # Отказ из-за числа получателей в сессии — не отказ выдуманному
+            # адресу: читается как «проба ничего не сказала».
+            if (result["status"] not in ("unknown", "greylisted", "valid")
+                    and not rejects_fake(result)):
+                result = dict(result, status="unknown")
             # Проба сорвалась (мёртвый прокси, таймаут) — вывода сделать нельзя.
             # НЕ кэшируем: иначе catch-all домен потом молча выдаст Valid на всё.
             #

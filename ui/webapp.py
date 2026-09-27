@@ -319,6 +319,13 @@ class ValidatorApi(SourcesMixin, ParserMixin):
 
     def _on_complete(self):
         self._state = "done"
+        # Прогон, остановленный до первого адреса (порт 25 закрыт, ни один
+        # прокси не ожил), — не «завершённая проверка»: пустая таблица с
+        # такой подписью выглядела бы как база, в которой ничего не нашлось.
+        причина = getattr(self.pipeline, "blocked_reason", "")
+        if причина:
+            self._on_log("[DEAD] Проверка не выполнялась: %s." % причина, "dead")
+            return
         self._on_log("[INFO] Проверка завершена.", "info")
 
     def _on_proxy_profile(self, summary):
@@ -380,11 +387,13 @@ class ValidatorApi(SourcesMixin, ParserMixin):
         set_country_mode(payload.get("country") or "coverage")
 
         if not self.proxy_sources:
+            # Что ответят почтовики, зависит от того, открыт ли у владельца
+            # порт 25, — это выясняется при подготовке (core/port25.py), и
+            # обещать здесь «Gmail ответит честно» заранее нельзя: 27.09.2026
+            # порт был закрыт, и обещание было ложным (аудит, D4).
             self._on_log(
                 "[DEAD] Прокси не заданы: проверка идёт с твоего домашнего IP. "
-                "Gmail и Яндекс ответят честно; Yahoo, AOL, Outlook и iCloud "
-                "почти наверняка откажут — им нужен адрес с обратным DNS и "
-                "чистой репутацией.", "dead")
+                "Сначала проверю, открыт ли у тебя исходящий порт 25.", "dead")
 
         self.store.clear()
         self._progress = (0, 0)
@@ -694,7 +703,13 @@ class ValidatorApi(SourcesMixin, ParserMixin):
                                  # не перепроверялся. Дата рядом исходная, но
                                  # 29-дневный «Годен» выглядит как свежий,
                                  # если на неё не смотреть.
-                                 "FromCache"])
+                                 "FromCache",
+                                 # Ролевой адрес (info@, sales@) — признак, а
+                                 # не статус: мёртвый ролевой — «Мёртв».
+                                 "RoleAddress",
+                                 # Похоже на опечатку: какой адрес, вероятно,
+                                 # имелся в виду. Раньше жил только в карточке.
+                                 "SuggestedEmail"])
                 for row in rows:
                     data = row.get("data") or {}
                     # csv_row, а не голый список: база собрана со страниц в
@@ -726,6 +741,8 @@ class ValidatorApi(SourcesMixin, ParserMixin):
                         data.get("domain_valid_ratio", ""),
                         data.get("domain_checked", ""),
                         "да" if data.get("from_cache") else "",
+                        "да" if data.get("role_address") else "",
+                        data.get("suggested_email", ""),
                     ]))
 
             skipped = {"n": 0}

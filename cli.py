@@ -40,6 +40,14 @@ EXPORT_FIELDS = [
     "verdict_confidence", "verdict_basis", "provider",
     "domain_type", "name_source", "gender_source", "country_source",
     "company_source", "job_role_source", "validated_at",
+    # Ролевой адрес (info@, sales@) — признак рядом со статусом, а не сам
+    # статус: мёртвый ролевой — «Мёртв», живой — «Role-based».
+    "role_address",
+    # Похоже на опечатку: какой адрес человек, вероятно, имел в виду. Вердикт
+    # в строке остаётся про загруженный адрес. Для домена-опечатки из списка
+    # одноразовых (user@gamil.com) подсказка лежала только в карточке окна и
+    # в выгрузку не попадала — прогон test.txt 27.09.2026.
+    "suggested_email",
 ]
 
 
@@ -73,6 +81,8 @@ def _row(entry):
         "company_source": data.get("company_source", ""),
         "job_role_source": data.get("job_role_source", ""),
         "validated_at": data.get("validated_at", ""),
+        "role_address": "да" if data.get("role_address") else "",
+        "suggested_email": data.get("suggested_email", ""),
     }
 
 
@@ -194,6 +204,14 @@ def cmd_validate(args):
     if not args.quiet:
         print(file=sys.stderr)
 
+    # Прогон остановлен до первого адреса (порт 25 закрыт, ни один прокси
+    # не ожил). Пустой файл с кодом 0 выглядел бы как законченная проверка
+    # базы, в которой просто ничего не нашлось.
+    if getattr(pipeline, "blocked_reason", ""):
+        print("Проверка не выполнялась: %s. Подробности — в строках [DEAD] выше."
+              % pipeline.blocked_reason, file=sys.stderr)
+        return 3
+
     rows = [_row(entry) for entry in results]
 
     if args.status:
@@ -243,8 +261,8 @@ def cmd_bounces(args):
     запись идёт поверх всего, даже поверх свежего «Годен».
 
     ТОЛЬКО ЖЁСТКИЕ ОТСКОКИ. Мягкий (ящик переполнен, сервер занят, серый
-    список) доказывает ОБРАТНОЕ — что адрес существует и им пользуются, — и
-    записав его как Invalid, владелец выбросил бы лучшие свои контакты.
+    список) доказывает ОБРАТНОЕ — что адрес существует, — и записав его как
+    Invalid, владелец объявил бы несуществующим ящик, который есть.
     Разделить их за него нельзя: формат отчёта у каждого рассыльщика свой.
     Поэтому фильтр по строке отдаётся ему (`--hard-only`), а по умолчанию
     берётся весь файл — с явным предупреждением в выводе.

@@ -149,7 +149,7 @@ def test_audit_classifier_holds_real_provider_replies():
         (550, "5.7.1 No such user!", "invalid"),              # Yandex: смысл в тексте
         (550, "5.7.1 Service unavailable, Client host [1.2.3.4] blocked using Spamhaus",
          "unknown"),                                          # репутация, не ящик
-        (452, "4.2.2 over quota", "valid"),                    # ящик есть и активен
+        (452, "4.2.2 over quota", "full"),                     # ящик есть, письмо не дойдёт (аудит 27.09, D1)
         (452, "4.3.1 Insufficient system storage", "unknown"),  # место на СЕРВЕРЕ
         (552, "5.3.4 Message size exceeds fixed limit", "unknown"),
         (553, "5.1.8 Sender address rejected", "unknown"),      # отказ ОТПРАВИТЕЛЮ

@@ -34,6 +34,7 @@ from core.pipeline_setup import PipelineSetupMixin
 from core.enrichment import (EnrichmentMixin, AI_SUSPICION_PENALTY,
                              _enrich_signature, _utc_now, _as_utc, _fmt_stamp)
 from core.verdict_revision import VerdictRevisionMixin
+from core.settle import SettleContext, SettleMixin
 from core.heuristics import (extract_birth_year, looks_machine_generated,
                              is_parked_domain, is_role_based)
 from core.parser_pipeline import GLOBAL_VERIFIED_DOMAINS
@@ -161,7 +162,7 @@ class _DomainGate:
 
 
 class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
-                         VerdictRevisionMixin):
+                         VerdictRevisionMixin, SettleMixin):
     def __init__(self, callbacks):
         self.callbacks = callbacks 
         self.is_running = False
@@ -498,6 +499,11 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                     self._emit(email, "Trap/Disposable", "External Blacklist Match", "N/A", data)
                     return
 
+            # Шаг 1.1c: ящик сам называет себя ловушкой (spamtrap@, honeypot@).
+            # Сеть не нужна: писать туда нельзя при любом ответе сервера.
+            if self._trap_by_name(email, data, enable_ai):
+                return
+
             # Шаг 1.2: Проверка на ролевые ящики (Role-based) — п.2.1
             # НЕ убиваем их! Помечаем как отдельную категорию "Role-based".
             # Общая функция ловит не только точные совпадения (info@), но и
@@ -554,7 +560,11 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                     # иначе кэш выглядел бы как свежая проверка.
                     cached_stamp = _fmt_stamp(cached["checked_at"]) or data["validated_at"]
                     data["from_cache"] = True
-                    status_display = "Role-based" if is_role else cached["status"]
+                    # Role-based — только у доказанно живого ролевого ящика;
+                    # мёртвый info@ остаётся «Мёртв» (аудит 27.09.2026, D8).
+                    status_display = ("Role-based" if is_role and cached["status"] == "Valid"
+                                      else cached["status"])
+                    data["role_address"] = bool(is_role)
 
                     want = _enrich_signature(enable_osint, enable_ai)
                     if cached_data.get("enrich_sig") == want:
@@ -614,6 +624,13 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                     state.mark_done(normalize_for_dedup(email))
                     return
 
+            # Шаг 2.5: одноразовый сервис, узнанный по почтовому серверу.
+            # MX спрашивается тем же кэшем, что и в check_email ниже, поэтому
+            # лишнего запроса DNS это не стоит.
+            if deep_ping and self._disposable_by_mx(email, data, enable_ai):
+                state.mark_done(normalize_for_dedup(email))
+                return
+
             # Шаг 3: Глубокий SMTP Ping
             if deep_ping:
                 res = self.network.check_email(email)
@@ -660,7 +677,12 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                 # Greylisted — в очередь на повтор, и ждём столько, сколько
                 # серые списки просят: повтор раньше выдержки получает тот же
                 # серый ответ, то есть тратится впустую. См. core/runstate.py.
-                if raw_status == "greylisted":
+                #
+                # unconfirmed туда же и тем же выходом: сервер принял адрес,
+                # но выдуманный получил «приходите позже» — на повторе той же
+                # тройкой контроль состоится (core/confirmation.py).
+                if raw_status == "greylisted" or (
+                        raw_status == "unconfirmed" and not res.get("unconfirmed_final")):
                     # ТЕМ ЖЕ выходом: серый список ведётся по тройке
                     # (IP, отправитель, получатель), и прийти с другого
                     # адреса значит начать выдержку заново.
@@ -681,130 +703,23 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                 # Ловушка антивирусного вендора: MX домена ведёт на honeypot
                 # (Trend Micro Email Security, FireEye, Agari), и движок
                 # НАМЕРЕННО туда не пошёл — попасть в их чёрный список дороже
-                # любого вердикта. Значит про ящик не сказано ничего.
-                #
-                # Раньше этот статус не знала ни одна из двух лестниц ниже, и
-                # он проваливался в `else`, то есть в «Invalid/Bounce»: адрес
-                # объявлялся несуществующим без единого запроса к серверу,
-                # получал скор 0 с подписью «SMTP подтвердил, что ящика нет»
-                # и уезжал в кэш на девяносто суток. Между тем за таким
-                # шлюзом стоит обычная корпоративная почта, и ящики там
-                # живые. «Trap/Disposable» — это «писать нельзя», а не
-                # «ящика нет», и в кэш такой статус не кладётся вовсе
-                # (см. CACHEABLE_STATUSES в core/cache.py).
+                # любого вердикта. «Trap/Disposable» — это «писать нельзя», а
+                # не «ящика нет», и в кэш такой статус не кладётся вовсе.
                 if raw_status == "trap":
-                    data["engagement_score"] = 0
-                    data["engagement_grade"] = "Dead"
-                    data["provider_type"] = "AV Vendor"
-                    уверенность, основание = verdict_confidence(
-                        "trap", res.get("reason", ""))
-                    data["verdict_confidence"] = уверенность
-                    data["verdict_basis"] = основание
-                    self._enrich_offline(email, data, "Trap/Disposable", enable_ai)
-                    self._emit(email, "Trap/Disposable", res.get("reason", ""),
-                               res.get("mx_record", "N/A"), data)
+                    self._emit_trap(email, data, res.get("reason", ""),
+                                    "AV Vendor", "trap", enable_ai,
+                                    mx=res.get("mx_record", "N/A"))
                     state.mark_done(normalize_for_dedup(email))
                     return
 
-                if raw_status == "valid":
-                    status_display = "Valid"
-                elif raw_status == "catchall":
-                    status_display = "Unknown"  # Catch-All — нельзя доверять, кладём в Unknown
-                elif raw_status == "risky":
-                    status_display = "Risky"
-                elif raw_status == "unknown":
-                    status_display = "Unknown"
-                elif raw_status == "invalid":
-                    status_display = "Invalid/Bounce"
-                else:
-                    # ЗАПАСНОЙ ВЫХОД ВЕДЁТ В «НЕ ПРОВЕРЕНО», А НЕ В ПРИГОВОР.
-                    #
-                    # Здесь стоял `else: Invalid/Bounce`, то есть любой статус,
-                    # которого лестница не знает, хоронил адрес. Так и случилось
-                    # с `trap`. Правило общее: незнакомое слово — это отсутствие
-                    # доказательства, а не доказательство отсутствия.
-                    status_display = "Unknown"
+                # Домен похож на опечатку популярного почтовика, и сервер
+                # «Годен» не дал — подсказка рядом со статусом (аудит, D9).
+                self._typo_hint_on_live_mx(email, data, res, fix_typos)
 
-                # Копим статистику по домену для пост-анализа catch-all
-                try:
-                    dom_key = email.rsplit("@", 1)[1].lower()
-                    with domain_stats_lock:
-                        st = domain_stats.setdefault(dom_key, {"total": 0, "valid": 0})
-                        st["total"] += 1
-                        if raw_status == "valid":
-                            st["valid"] += 1
-                except Exception:
-                    pass
-
-                # Второе мнение о подтверждении — по требованию владельца.
-                # Не на каждом прогоне: это лишняя сессия на КАЖДЫЙ Valid.
-                # Включается перед тем прогоном, после которого он собирается
-                # рассылать.
-                if raw_status == "valid" and getattr(self, "confirm_valid", False):
-                    итог = self._second_opinion_on_valid(email, res)
-                    if итог is False:
-                        raw_status = "unknown"
-                        status_display = "Unknown"
-                        res["reason"] = (
-                            "Второй выход отверг адрес, первый принял — "
-                            "доказательства нет ни у одной стороны")
-
-                # Канарейка: заведомо мёртвый адрес отдельной пробой.
-                #
-                # Контрольная проба спрашивает выдуманный адрес В ТОЙ ЖЕ
-                # сессии и ловит catch-all — постоянное свойство домена.
-                # Канарейка ловит другое: тарпитинг, включившийся ПОСРЕДИ
-                # прогона, и зазор у гигантов, где контрольная проба идёт
-                # лишь раз в 25 адресов. Вернувшийся на неё 250 означает, что
-                # этот выход на этом домене врёт прямо сейчас.
-                if raw_status == "valid":
-                    self._fly_canary(email, res)
-
-                # Доля Valid по домену — В СТРОКУ, а не только в лог.
-                #
-                # «У домена ВСЕ проверенные адреса ответили 250» — сильный
-                # признак catch-all, и он уже считался. Но приписывался он к
-                # тексту причины, а фильтровать по тексту нельзя. Числом в
-                # колонке владелец отложит такие домены одним движением.
-                #
-                # Считаем на момент строки: к концу прогона число уточнится,
-                # но строка уже уехала в таблицу, а пересчитывать всё ради
-                # двух знаков после запятой не стоит той памяти.
-                try:
-                    with domain_stats_lock:
-                        st = domain_stats.get(dom_key) or {}
-                    всего = int(st.get("total") or 0)
-                    if всего:
-                        data["domain_valid_ratio"] = round(
-                            int(st.get("valid") or 0) / float(всего), 3)
-                        data["domain_checked"] = всего
-                except Exception:
-                    pass
-
-                # Что именно ушло в RCPT TO. Показывается в карточке адреса
-                # строкой «Проверен как». Поле читалось окном и не
-                # записывалось нигде — строка была всегда пустой, то есть
-                # владелец не мог убедиться СВОИМИ ГЛАЗАМИ, что проверяют
-                # его адрес. Он спрашивал об этом дважды.
-                try:
-                    data["checked_as"] = (self.network.probe_form(email)
-                                          if self.network is not None else email)
-                except Exception:
-                    data["checked_as"] = email
-
-                # Сохраняем оригинальный SMTP-статус для скоринга (фикс бага Role-based)
-                original_smtp_status = status_display
-                
-                # Если Role-based — перезаписываем отображаемый статус
-                if is_role:
-                    status_display = "Role-based"
-                
-                self._enrich_and_score(email, data, res, status_display,
-                                       original_smtp_status, is_role, enable_ai)
-
-                self._emit(email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
-                # Журнал сделанного: при возобновлении этот адрес пропустится
-                state.mark_done(normalize_for_dedup(email))
+                # Всё остальное — одна лестница для обоих проходов:
+                # отображаемый статус, второе мнение, канарейка, роль,
+                # обогащение, выдача (core/settle.py).
+                self._settle(email, data, is_role, res, enable_ai, settle_ctx)
             else:
                 self._emit(email, "Unverified", "Skipped Ping", "N/A", data)
 
@@ -822,6 +737,9 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         # строк. Плюс журнал даёт возобновление — «Стоп» больше не выбрасывает
         # проделанную работу.
         state = RunState(run_id_for(email_sources), resume=resume)
+        # Общее состояние для лестницы после вердикта (core/settle.py):
+        # статистика доменов и журнал — одни и те же в обоих проходах.
+        settle_ctx = SettleContext(domain_stats, domain_stats_lock, state)
         # Новый проход по файлу — новый дедуп. Журнал вердиктов при этом цел:
         # проверенное по-прежнему пропускается, а прочитанное-но-непроверенное
         # возвращается в работу вместо того, чтобы молча числиться дублем.
@@ -1000,7 +918,9 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                     # второй грязный выход, вторая выдержка серого списка. Тут
                     # адрес по-прежнему БЕЗ вердикта о ящике, и отдавать его
                     # как Unknown рано — если попытки ещё остались.
-                    grey = raw_status == "greylisted"
+                    # unconfirmed ждёт как серый список: той же тройкой.
+                    grey = raw_status == "greylisted" or (
+                        raw_status == "unconfirmed" and not res.get("unconfirmed_final"))
                     if (attempts + 1 < MAX_RETRY_ROUNDS
                             and (grey or _is_transient_failure(
                                 raw_status, res.get("reason", "")))):
@@ -1011,50 +931,20 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                               same_exit=grey, attempts=attempts + 1)
                         return
 
-                    
-                    if raw_status == "valid":
-                        status_display = "Valid"
-                    elif raw_status == "greylisted":
-                        status_display = "Risky"  # Второй раз greylisted — помечаем как Risky
-                    elif raw_status == "risky":
-                        status_display = "Risky"
-                    elif raw_status == "catchall":
-                        status_display = "Unknown"
-                    elif raw_status == "unknown":
-                        status_display = "Unknown"
-                    elif raw_status == "trap":
+                    if raw_status == "trap":
                         # То же, что и на основном проходе: ловушка вендора —
                         # это «писать нельзя», а не «ящика нет».
-                        status_display = "Trap/Disposable"
-                    elif raw_status == "invalid":
-                        status_display = "Invalid/Bounce"
+                        self._emit_trap(email, data, res.get("reason", ""),
+                                        "AV Vendor", "trap", enable_ai,
+                                        mx=res.get("mx_record", "N/A"))
+                        state.mark_done(normalize_for_dedup(email))
                     else:
-                        # Незнакомый статус — отсутствие доказательства.
-                        # Подробнее у такой же лестницы основного прохода.
-                        status_display = "Unknown"
-                    
-                    # Что именно ушло в RCPT TO. Показывается в карточке
-                    # адреса строкой «Проверен как». Поле читалось окном и не
-                    # записывалось нигде — строка была всегда пустой, то есть
-                    # владелец не мог убедиться СВОИМИ ГЛАЗАМИ, что проверяют
-                    # его адрес. Он спрашивал об этом дважды.
-                    try:
-                        data["checked_as"] = (self.network.probe_form(email)
-                                              if self.network is not None else email)
-                    except Exception:
-                        data["checked_as"] = email
-
-                    # Сохраняем оригинальный SMTP-статус для скоринга (фикс бага Role-based)
-                    original_smtp_status = status_display
-                    
-                    if is_role:
-                        status_display = "Role-based"
-                    
-                    self._enrich_and_score(email, data, res, status_display,
-                                           original_smtp_status, is_role, enable_ai)
-
-                    self._emit(email, status_display, res["reason"], res.get("mx_record", "N/A"), data)
-                    state.mark_done(normalize_for_dedup(email))
+                        # ТА ЖЕ лестница, что и в основном проходе: второе
+                        # мнение и канарейка здесь раньше не звались, и
+                        # перепроверенный адрес становился «Годен» без обеих
+                        # защит (аудит 27.09.2026, D3).
+                        self._typo_hint_on_live_mx(email, data, res, fix_typos)
+                        self._settle(email, data, is_role, res, enable_ai, settle_ctx)
                     with retry_lock:
                         retry_count += 1
                     # Вердикт получен — вот теперь адрес пройден. Прогресс
@@ -1247,12 +1137,23 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         # catch-all — они принимают что угодно, и их Valid ничего не доказывает.
         # Тройная проба смотрит 3 выдуманных адреса и могла сорваться; здесь же
         # выборка из реальной базы, поэтому сигнал надёжнее.
+        #
+        # Домен, у которого приём любых адресов ОПРОВЕРГНУТ в этом прогоне,
+        # под подозрение не ставится. С 27.09.2026 «Годен» выдаётся только
+        # при исключённом catch-all (core/confirmation.py): сервер отверг
+        # выдуманный адрес, либо это гигант, у которого catch-all не бывает
+        # по устройству. «Все пять ответили 250» против прямого отказа
+        # выдуманному — догадка против факта. Замерено прогоном test.txt
+        # владельца: пять живых Gmail получили приписку «домен под подозрением
+        # на catch-all», хотя Gmail catch-all не бывает.
         try:
             suspicious = []
             with domain_stats_lock:
                 for dom, st in domain_stats.items():
                     if st["total"] >= 5 and st["valid"] == st["total"]:
                         suspicious.append((dom, st["total"]))
+            suspicious = [(dom, cnt) for dom, cnt in suspicious
+                          if not self._catchall_disproven(dom)]
             if suspicious:
                 suspicious.sort(key=lambda x: -x[1])
                 self.callbacks['on_log'](

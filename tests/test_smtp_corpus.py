@@ -27,6 +27,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.smtp_codes import classify_smtp_response, enhanced_status
 
 DEAD, ALIVE, NOTOLD = "DEAD", "ALIVE", "NOTOLD"
+# Ящик ПЕРЕПОЛНЕН: существует, но письмо не дойдёт. До аудита 27.09.2026
+# такие строки числились ALIVE и обязаны были давать valid — это и было
+# ложным «Годен» (D1). Теперь у них свой класс и свой статус — full.
+FULL = "FULL"
 
 # (код, ответ сервера, класс, откуда взято)
 CORPUS = [
@@ -44,7 +48,7 @@ CORPUS = [
      NOTOLD, "Gmail, блок по репутации нашего IP"),
     (452, b"4.2.2 The email account that you tried to reach is over quota. "
           b"https://support.google.com/mail/?p=OverQuotaTemp",
-     ALIVE, "Gmail, переполненный ящик"),
+     FULL, "Gmail, переполненный ящик"),
     (421, b"4.7.0 Try again later, closing connection.", NOTOLD, "Gmail, лимит скорости"),
     (250, b"2.1.5 OK  s12-20020a0561 - gsmtp", ALIVE, "Gmail, ящик принят"),
 
@@ -128,7 +132,7 @@ CORPUS = [
      DEAD, "Exchange локальный, получатель не найден"),
     (550, b"5.2.1 RESOLVER.RST.NotAuthorized; not authorized",
      NOTOLD, "Exchange, не авторизован"),
-    (552, b"5.2.2 <x@example.com> ... Mailbox full", ALIVE, "Exchange, ящик полон"),
+    (552, b"5.2.2 <x@example.com> ... Mailbox full", FULL, "Exchange, ящик полон"),
 
     # ------------------------------------------------------------- qmail ---
     (550, b"sorry, no mailbox here by that name (#5.1.1)",
@@ -192,6 +196,15 @@ class TestSMTPCorpus(unittest.TestCase):
                     verdict["status"], "valid",
                     f"{source}: {code} {message[:70]!r} -> {verdict}")
 
+    def test_full_mailboxes_are_full_not_valid(self):
+        for code, message, kind, source in CORPUS:
+            if kind != FULL:
+                continue
+            with self.subTest(source=source):
+                verdict = classify_smtp_response(code, message)
+                self.assertEqual(verdict["status"], "full",
+                                 f"{source}: {code} {message[:70]!r} -> {verdict}")
+
     def test_silence_is_never_a_verdict(self):
         """Главный инвариант: молчание сервера о ящике — не приговор и не помилование."""
         for code, message, kind, source in CORPUS:
@@ -204,7 +217,9 @@ class TestSMTPCorpus(unittest.TestCase):
                     f"{source}: {code} {message[:70]!r} -> {verdict}")
 
     def test_every_line_gets_a_known_status(self):
-        allowed = {"valid", "invalid", "risky", "unknown", "greylisted"}
+        # full и disabled — «ящик есть, письмо не дойдёт» (аудит 27.09.2026).
+        allowed = {"valid", "invalid", "risky", "unknown", "greylisted",
+                   "full", "disabled"}
         for code, message, _kind, source in CORPUS:
             with self.subTest(source=source):
                 self.assertIn(classify_smtp_response(code, message)["status"], allowed)
@@ -237,8 +252,9 @@ class TestNoFalseValidFromSubstrings(unittest.TestCase):
     """Подстрока не имеет права делать ящик живым.
 
     Это отрицательная проверка, поэтому рядом стоит положительный контроль:
-    настоящая формулировка про переполнение обязана по-прежнему давать valid.
-    Без контроля «ничего не совпало» неотличимо от «проверка сломана».
+    настоящая формулировка про переполнение обязана давать full (до аудита
+    27.09.2026 — valid, см. D1). Без контроля «ничего не совпало» неотличимо
+    от «проверка сломана». Ловушки не имеют права давать ни valid, ни full.
     """
 
     TRAPS = [
@@ -258,14 +274,14 @@ class TestNoFalseValidFromSubstrings(unittest.TestCase):
     def test_traps_do_not_produce_valid(self):
         for code, message in self.TRAPS:
             with self.subTest(message=message):
-                self.assertNotEqual(
-                    classify_smtp_response(code, message)["status"], "valid")
+                self.assertNotIn(
+                    classify_smtp_response(code, message)["status"], ("valid", "full"))
 
-    def test_positive_control_still_produces_valid(self):
+    def test_positive_control_still_produces_full(self):
         for code, message in self.POSITIVE_CONTROL:
             with self.subTest(message=message):
                 self.assertEqual(
-                    classify_smtp_response(code, message)["status"], "valid")
+                    classify_smtp_response(code, message)["status"], "full")
 
 
 class TestMalformedInput(unittest.TestCase):

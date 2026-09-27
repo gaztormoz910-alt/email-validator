@@ -237,11 +237,15 @@ def test_enhanced_codes_prove_only_what_they_prove(code, message, expected):
     (552, b"5.2.2 Over quota"),
     (452, b"4.2.2 over quota"),
 ])
-def test_full_mailbox_is_proof_of_existence(code, message):
-    """Переполненный ящик существует, и это сильнее обычного 250."""
+def test_full_mailbox_is_recognised_as_full(code, message):
+    """Переполненный ящик существует, но письмо в него не дойдёт.
+
+    До аудита 27.09.2026 здесь ждали valid («сильнее обычного 250»); теперь
+    статус full, группа «Не слать» (D1).
+    """
     from core.smtp_codes import classify_smtp_response
 
-    assert classify_smtp_response(code, message)["status"] == "valid"
+    assert classify_smtp_response(code, message)["status"] == "full"
 
 
 @pytest.mark.parametrize("code,message", [

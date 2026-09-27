@@ -25,10 +25,14 @@ class TestSMTPResponseParsing(unittest.TestCase):
     def test_250_is_valid(self):
         self.assertEqual(self.parse(250, b"2.1.5 OK")["status"], "valid")
 
-    def test_full_mailbox_is_valid(self):
-        # Переполненный ящик = ящик существует и активно используется
-        self.assertEqual(self.parse(452, b"4.2.2 Mailbox full")["status"], "valid")
-        self.assertEqual(self.parse(552, b"5.2.2 Over quota")["status"], "valid")
+    def test_full_mailbox_is_full_not_valid(self):
+        # ТРЕБОВАНИЕ ИЗМЕНЕНО аудитом 27.09.2026 (D1). Раньше здесь стояло
+        # «переполненный ящик = существует и активно используется» и статус
+        # valid. Письмо в переполненный ящик не доставляется, а Gmail сам
+        # пишет «out of storage space and inactive»: это «не слать», а не
+        # «Годен». Ящик при этом существует, поэтому и не invalid.
+        self.assertEqual(self.parse(452, b"4.2.2 Mailbox full")["status"], "full")
+        self.assertEqual(self.parse(552, b"5.2.2 Over quota")["status"], "full")
 
     # --- Должны оставаться INVALID (настоящие bounce) ---
 
@@ -81,8 +85,11 @@ class TestSMTPResponseParsing(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertNotEqual(self.parse(code, b"Try again later")["status"], "invalid")
 
-    def test_account_disabled_is_risky_not_invalid(self):
-        self.assertEqual(self.parse(550, b"550 Account disabled")["status"], "risky")
+    def test_account_disabled_is_disabled_not_invalid(self):
+        # Аудит 27.09.2026 (D11): отключённый ящик — свой статус «disabled»
+        # (группа «Не слать»), а не risky («ответа не получили»). Главное
+        # правило то же: это НЕ invalid — аккаунт могут включить обратно.
+        self.assertEqual(self.parse(550, b"550 Account disabled")["status"], "disabled")
 
 
 
@@ -109,16 +116,19 @@ class TestServerVsMailboxFull(unittest.TestCase):
             with self.subTest(code=code, msg=msg):
                 self.assertNotEqual(self.parse(code, msg)["status"], "valid")
 
-    def test_real_full_mailbox_stays_valid(self):
+    def test_real_full_mailbox_is_recognised_as_full(self):
+        # Переполненный ЯЩИК по-прежнему отличается от переполненного СЕРВЕРА,
+        # но теперь это статус «full», а не «valid» (аудит 27.09.2026, D1).
         for code, msg in [(452, b"4.2.2 Mailbox full"),
                           (452, b"4.2.2 quota exceeded"),
                           (552, b"5.2.2 Over quota"),
                           (552, b"5.2.2 anything at all")]:
             with self.subTest(code=code, msg=msg):
-                self.assertEqual(self.parse(code, msg)["status"], "valid")
+                self.assertEqual(self.parse(code, msg)["status"], "full")
 
     def test_other_452_not_treated_as_full_inbox(self):
-        self.assertNotEqual(self.parse(452, b"4.5.3 Too many recipients")["status"], "valid")
+        self.assertNotIn(self.parse(452, b"4.5.3 Too many recipients")["status"],
+                         ("valid", "full"))
 
 if __name__ == '__main__':
     unittest.main()

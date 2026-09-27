@@ -234,13 +234,16 @@ def test_checked_as_is_actually_filled_now():
     окном и НЕ записывалась нигде — то есть всегда пустая. Владелец не мог
     убедиться своими глазами, что проверяют его адрес, и спрашивал дважды.
     """
-    источник = io.open(os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "core", "pipeline.py"), encoding="utf-8").read()
+    # Поле заполняет лестница после вердикта (core/settle.py) — ОДНА на оба
+    # прохода с аудита 27.09.2026 (D3). Раньше копий было две, и требовалось,
+    # чтобы поле писали обе; теперь требуется, чтобы обе ветки звали лестницу.
+    from исходники import исходник_конвейера
+    import inspect
+    from core.pipeline import ValidationPipeline
+    источник = исходник_конвейера()
     assert 'data["checked_as"]' in источник, "поле по-прежнему никто не пишет"
-    # Обе ветки проверки: первая попытка и повтор после отложенного адреса.
-    assert источник.count('data["checked_as"]') >= 2, (
-        "заполняется только одна ветка — в другой строка останется пустой")
+    assert inspect.getsource(ValidationPipeline.run_pipeline).count("self._settle(") >= 2, (
+        "лестницу зовёт только одна ветка — в другой строка останется пустой")
 
 
 def test_checked_as_uses_the_same_function_as_the_probe():

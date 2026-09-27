@@ -72,8 +72,10 @@ def test_second_opinion_disagreement_lowers_the_verdict():
     Отвергнуть могли по репутации второго прокси, а не по отсутствию ящика.
     Два выхода разошлись — значит доказательства нет ни у одной стороны.
     """
-    источник = io.open(os.path.join(ROOT, "core", "pipeline.py"),
-                       encoding="utf-8").read()
+    # Лестница после вердикта одна для обоих проходов и живёт в
+    # core/settle.py (аудит 27.09.2026, D3); читается вся семья конвейера.
+    from исходники import исходник_конвейера
+    источник = исходник_конвейера()
     кусок = источник[источник.index("_second_opinion_on_valid(email, res)"):]
     кусок = кусок[:600]
     assert 'raw_status = "unknown"' in кусок, "статус не понижается"
@@ -278,13 +280,17 @@ def test_export_header_and_row_have_the_same_width():
 
     полная = [заг for _имя, заг, _стр in пары if "OriginalEmail" in заг]
     assert полная, "не найдена полная выгрузка"
-    assert полная[0][-3:] == ["DomainValidRatio", "DomainChecked", "FromCache"]
+    # RoleAddress добавлен аудитом 27.09.2026 (D8): роль — признак рядом со
+    # статусом, а не сам статус. SuggestedEmail — прогоном файлов владельца
+    # того же дня: подсказка об опечатке жила только в карточке окна.
+    assert полная[0][-5:] == ["DomainValidRatio", "DomainChecked", "FromCache",
+                              "RoleAddress", "SuggestedEmail"]
 
 
 def test_export_ratio_is_computed_in_the_pipeline():
     """Число действительно считается, а не осталось пустой колонкой."""
-    источник = io.open(os.path.join(ROOT, "core", "pipeline.py"),
-                       encoding="utf-8").read()
+    from исходники import исходник_конвейера
+    источник = исходник_конвейера()
     assert 'data["domain_valid_ratio"]' in источник
     assert 'data["domain_checked"]' in источник
 

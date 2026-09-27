@@ -55,6 +55,16 @@ class BlacklistDownloader:
     # загрузи его в SpamFilter, и вся база уедет в Trap/Disposable.
     NON_BLACKLIST_FILES = frozenset({"free_providers.txt"})
 
+    # Ключ манифеста для версии источника, которую скачали и НЕ взяли.
+    #
+    # Отвергнутая версия раньше не запоминалась ничем, и каждый запуск качал
+    # её заново — ради того же «обновление не взято». Замерено прогоном
+    # test_1.txt владельца 27.09.2026: три списка одноразовых скачивались и
+    # отвергались при каждом старте, 72 с до первой проверки (disposable_more
+    # — 58 с из них). Теперь её ETag уходит в If-None-Match вместе с принятым,
+    # и неизменившийся источник отвечает 304 без тела.
+    REJECTED_SUFFIX = "#rejected"
+
     # Старое имя -> новое. SpamFilter грузит ВСЕ .txt из data/, поэтому оставить
     # старый файл рядом с новым нельзя: он загрузился бы вторым экземпляром.
     LEGACY_RENAMES = {"spam_traps.txt": "disposable_extra.txt"}
@@ -124,21 +134,32 @@ class BlacklistDownloader:
         for filename, url in self.sources.items():
             filepath = os.path.join(self.data_dir, filename)
             exists = os.path.exists(filepath)
+            rejected = etags.get(filename + self.REJECTED_SUFFIX)
 
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
 
                 # Условный GET по ETag: GitHub вернёт 304, если данные не менялись,
-                # и мы не будем зря перезаписывать файл.
+                # и мы не будем зря перезаписывать файл. Отвергнутая версия
+                # идёт в тот же заголовок: её мы уже смотрели (см. REJECTED_SUFFIX).
+                known = []
                 if exists and etags.get(filename):
-                    req.add_header("If-None-Match", etags[filename])
+                    known.append(etags[filename])
+                if rejected:
+                    known.append(rejected)
+                if known:
+                    req.add_header("If-None-Match", ", ".join(known))
 
                 with urllib.request.urlopen(req, timeout=15) as response:
                     content = response.read().decode("utf-8", "ignore")
                     new_etag = response.headers.get("ETag")
 
             except urllib.error.HTTPError as e:
-                if e.code == 304:
+                if e.code == 304 and rejected:
+                    log(f"[INFO] {filename}: новых данных у источника нет, а его "
+                        "последняя версия уже отклонена (внутри живые почтовики). "
+                        "Работаем на прежнем списке, заново не скачивал.", "info")
+                elif e.code == 304:
                     log(f"[INFO] {filename}: новых данных нет, список актуален.", "info")
                 else:
                     log(f"[DEAD] {filename}: сервер вернул {e.code}, оставляю старый список.", "dead")
@@ -154,17 +175,30 @@ class BlacklistDownloader:
                 log(f"[DEAD] {filename}: ответ битый ({len(new_domains)} доменов), оставляю старый список.", "dead")
                 continue
 
-            # Санити-контракт для чёрных списков: крупного почтовика в списке
-            # одноразовых доменов быть не может. Если он там есть — источник
-            # испорчен, и применять его нельзя: вся база уедет в Trap.
+            # Санити-контракт для чёрных списков — ТОТ ЖЕ, что у SpamFilter
+            # (core/filters.py, ДОЛЯ_ОХРАНЫ_ПРЕДЕЛ): файл, набитый живыми
+            # почтовиками, не берётся; единицы спорных имён (сервисы
+            # псевдонимов duck.com, addy.io) — обычное разногласие на краю,
+            # и фильтр сам выбрасывает их при загрузке.
+            #
+            # Раньше здесь не брался список с ОДНИМ таким именем. Фильтр
+            # перешёл на долю 12.09.2026, а загрузчик остался на прежнем
+            # правиле — и ни одно обновление с тех пор не применилось: прогон
+            # 27.09.2026 показал «обновление не взято» у всех трёх списков
+            # (два-три спорных имени на тысячи), файлы на диске — от 22.08 до
+            # 01.09. Новые одноразовые домены до программы не доходили.
             if filename not in self.NON_BLACKLIST_FILES:
-                from core.filters import BLACKLIST_SENTINELS
+                from core.filters import BLACKLIST_SENTINELS, ДОЛЯ_ОХРАНЫ_ПРЕДЕЛ
                 bad = BLACKLIST_SENTINELS & new_domains
-                if bad:
+                if bad and len(bad) > ДОЛЯ_ОХРАНЫ_ПРЕДЕЛ * len(new_domains):
+                    if new_etag:
+                        etags[filename + self.REJECTED_SUFFIX] = new_etag
                     # Не «испорчен» и не красным: обновление просто не
                     # взято. Прежний список остался, проверка идёт как шла.
+                    доля = 100.0 * len(bad) / max(1, len(new_domains))
                     log(f"[INFO] {filename}: обновление не взято — внутри живые "
-                        f"почтовики ({', '.join(sorted(bad)[:3])}). "
+                        f"почтовики: {len(bad)} из {len(new_domains)} ({доля:.0f}%, "
+                        f"{', '.join(sorted(bad)[:3])}). "
                         "Работаем на прежнем списке, база не тронута.", "info")
                     continue
 
@@ -195,6 +229,9 @@ class BlacklistDownloader:
             # Запоминаем ETag, чтобы в следующий раз не качать те же данные повторно
             if new_etag:
                 etags[filename] = new_etag
+            # Взятая версия отменяет память об отвергнутой: следующая будет
+            # оцениваться заново, а не отсекаться по старой метке.
+            etags.pop(filename + self.REJECTED_SUFFIX, None)
 
             if exists:
                 if old_count == len(new_domains):

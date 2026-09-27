@@ -347,8 +347,10 @@ def test_b4_call_site_is_guarded_too():
     Сам вызов означает «мы считаем это catch-all», и смотрит на него не одна
     только память.
     """
-    источник = io.open(os.path.join(ROOT, "core", "network.py"),
-                       encoding="utf-8").read()
+    # Место вызова уехало в core/confirmation.py вместе с контрольной
+    # пробой; читается вся семья модулей сети (tests/исходники.py).
+    from исходники import исходник_сети
+    источник = исходник_сети()
     assert "if not self._is_never_catchall(domain):" in источник
     nv = _validator({})
     assert nv._is_never_catchall("gmail.com") is True
@@ -428,14 +430,16 @@ def test_b6_control_250_and_251_remain_valid():
     assert classify_smtp_response(251, b"will forward")["status"] == "valid"
 
 
-def test_b6_control_mailbox_full_still_proves_existence():
-    """Контроль: переполненный ящик — по-прежнему доказательство существования.
+def test_b6_control_mailbox_full_is_recognised():
+    """Контроль: настоящее переполнение ящика по-прежнему узнаётся.
 
-    Самый сильный положительный сигнал после 250: ящик не только есть, им
-    пользуются.
+    До аудита 27.09.2026 оно давало valid («ящиком пользуются»); теперь —
+    full: ящик есть, но письмо не дойдёт (D1). Контроль нужен тот же: без
+    него «на сервере кончилось место -> не valid» неотличимо от сломанного
+    распознавания переполнения вообще.
     """
     итог = classify_smtp_response(452, b"4.2.2 mailbox full, over quota")
-    assert итог["status"] == "valid", итог
+    assert итог["status"] == "full", итог
 
 
 # ══════════════════════════ Б7: регистр имени ящика ═════════════════════

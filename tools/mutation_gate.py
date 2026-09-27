@@ -188,6 +188,63 @@ MUTATIONS = [
                    "tests/test_no_false_verdicts.py"],
         "why": "сервер, отвечающий 550 всем подряд, снова хоронил бы адреса",
     },
+    # --- защиты, добавленные по аудиту 27.09.2026 (.unlazy/audit6/АУДИТ.md) ---
+    {
+        "id": "M11",
+        "title": "SMTP: переполненный ящик снова объявить «Годен» (аудит D1)",
+        "path": "core/smtp_codes.py",
+        "old": '            return result("full", f"{numeric} Ящик переполнен',
+        "new": '            return result("valid", f"{numeric} Ящик переполнен',
+        "guards": ["tests/test_audit6_fixes.py", "tests/test_smtp_parsing.py"],
+        "why": "письмо в переполненный ящик — отскок, а он стоял бы в «Годен»",
+    },
+    {
+        "id": "M12",
+        "title": "catch-all: считать исключённым без отказа выдуманному адресу (аудит D2)",
+        "path": "core/confirmation.py",
+        "old": '        excluded = result.get("control_rcpt") == "rejected"',
+        "new": '        excluded = True',
+        "guards": ["tests/test_audit6_fixes.py"],
+        "why": "catch-all за серым списком снова выдавал бы «Годен» на выдуманный адрес",
+    },
+    {
+        "id": "M13",
+        "title": "лестница после вердикта: не пускать канарейку (аудит D3)",
+        "path": "core/settle.py",
+        "old": ('        if raw_status == "valid":\n'
+                "            self._fly_canary(email, res)"),
+        "new": ("        if False:\n"
+                "            self._fly_canary(email, res)"),
+        "guards": ["tests/test_audit6_fixes.py", "tests/test_canary.py"],
+        "why": "тарпитинг посреди прогона снова оставлял бы «Годен» недоказанным",
+    },
+    {
+        "id": "M14",
+        "title": "роль снова прячет SMTP-вердикт (аудит D8)",
+        "path": "core/settle.py",
+        "old": '        if is_role and status_display == "Valid":',
+        "new": '        if is_role:',
+        "guards": ["tests/test_audit6_fixes.py"],
+        "why": "мёртвый info@ снова выглядел бы как живой ролевой",
+    },
+    {
+        "id": "M15",
+        "title": "«статус не трогать» снова уходит строкой «None» (прогон 27.09)",
+        "path": "core/verdict_revision.py",
+        "old": "        status = None if new_status is None else str(new_status)",
+        "new": "        status = str(new_status)",
+        "guards": ["tests/test_run7_fixes.py"],
+        "why": "доказанно живые адреса снова выходили бы со статусом «None»",
+    },
+    {
+        "id": "M16",
+        "title": "загрузчик снова не берёт список из-за одного спорного имени (прогон 27.09)",
+        "path": "core/github_parser.py",
+        "old": "                if bad and len(bad) > ДОЛЯ_ОХРАНЫ_ПРЕДЕЛ * len(new_domains):",
+        "new": "                if bad:",
+        "guards": ["tests/test_run7_fixes.py"],
+        "why": "обновления списков одноразовых снова не доходили бы до программы",
+    },
 ]
 
 

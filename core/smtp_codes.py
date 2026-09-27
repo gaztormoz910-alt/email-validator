@@ -159,14 +159,47 @@ RECIPIENT_NEGATIONS = (
 )
 
 # Ящик есть, но заморожен: человек существует, письмо не дойдёт.
+#
+# «is inactive» добавлено по справке Gmail: `550 5.2.1 The email account that
+# you tried to reach is inactive` — так Google отвечает про отключённый
+# аккаунт, и без этой строки ответ узнавался только по коду 5.2.1.
 _DISABLED_MARKERS = (
     "disabled", "deactivated", "suspended", "frozen", "locked", "closed",
-    "inactive account", "no longer active", "account expired",
+    "inactive account", "account is inactive", "is inactive",
+    "no longer active", "account expired",
     "has been discontinued", "not accepting mail",
 )
 
-# Ящик ПЕРЕПОЛНЕН. Это доказательство не только существования, но и активного
-# пользования — самый ценный положительный сигнал после чистого 250.
+# Ящик ЖИВОЙ, но сейчас не принимает: у ПОЛУЧАТЕЛЯ исчерпан лимит приёма.
+#
+# Gmail пишет это и кодом 450 4.2.1, и ПОСТОЯННЫМ кодом 550 5.2.1 — тем же
+# расширенным кодом, что и «ящик отключён». По коду их не различить, поэтому
+# текст проверяется раньше: иначе живой, активно используемый ящик получал
+# причину «отключён или заморожен» (аудит 27.09.2026, D13). Microsoft
+# отвечает на то же 5.2.121/5.2.122 «receive limit exceeded».
+_RECIPIENT_RATE_MARKERS = (
+    "receiving email at a rate", "receiving mail at a rate",
+    "receiving email too quickly", "receiving mail too quickly",
+    "receive limit", "message receive limit",
+)
+
+# У НАШЕГО исходящего IP нет обратного DNS. Gmail: `451 4.7.23 The sending IP
+# address for this message doesn't have a PTR record`; Yahoo/AOL: 5.7.25.
+# Это не серый список: повтор тем же выходом через семь минут даст тот же
+# ответ. Нужен другой выход — с PTR.
+_NO_PTR_MARKERS = (
+    "ptr record", "reverse dns", "forward-confirmed", "no ptr",
+)
+
+# Ящик ПЕРЕПОЛНЕН. Ящик существует, но письмо в него НЕ БУДЕТ доставлено —
+# это отскок, а не «можно слать».
+#
+# Раньше здесь стояло «самый ценный положительный сигнал после 250: ящиком
+# активно пользуются», и адрес уходил в «Годен» с бонусом +70 к скору. Это
+# было неверно по существу: Gmail сам пишет «out of storage space and
+# inactive» — переполняется как раз ящик, который никто не разбирает.
+# Платные сервисы ставят такому адресу invalid (ZeroBounce,
+# mailbox_quota_exceeded) или risky (Verifalia). Аудит 27.09.2026, D1.
 #
 # Ни одна из строк здесь не является подстрокой чужого слова: "over quota"
 # нельзя спутать с "overloaded", "quota" — со словом из отчёта о нагрузке.
@@ -179,6 +212,8 @@ _MAILBOX_FULL_MARKERS = (
     "user is over quota", "mailfolder is full", "inbox is full",
     "not enough space in mailbox", "mailbox size limit exceeded",
     "exceeded the storage", "user has exhausted",
+    # Дословно из справки Gmail: 452 4.2.2 и 552 5.2.2.
+    "out of storage space",
 )
 
 # Переполнен СЕРВЕР, а не ящик. Про получателя не говорит ничего.
@@ -253,8 +288,13 @@ def classify_smtp_response(code: object, message: object) -> Verdict:
     """Вердикт о ящике по одному ответу сервера.
 
     Возвращает {"status": ..., "reason": ...}, где status — один из
-    valid / invalid / risky / greylisted / unknown / catchall не выдаётся
-    (это решение уровнем выше, по нескольким пробам).
+    valid / invalid / full / disabled / risky / greylisted / unknown.
+    catchall и unconfirmed здесь не выдаются: это решения уровнем выше, по
+    нескольким пробам.
+
+    full и disabled — ящик существует, но письмо в него не дойдёт
+    (переполнен; отключён). Это не «Годен» и не «Мёртв»: слать нельзя, а
+    хоронить контакт тоже нельзя.
 
     Порядок веток здесь — не стиль, а содержание. Каждая следующая проверка
     опирается на то, что предыдущая уже исключила свой случай, и переставить
@@ -298,21 +338,21 @@ def classify_smtp_response(code: object, message: object) -> Verdict:
         return result("valid", f"{numeric} Accepted")
 
     # ------------------------------------------------- ящик ПЕРЕПОЛНЕН -----
-    # Проверяется раньше всего прочего, потому что это самое сильное
-    # положительное доказательство после 250: ящик не только есть, им
-    # пользуются. Но сначала исключаем два чужих случая с теми же кодами:
-    # кончилось место на СЕРВЕРЕ и слишком большое ПИСЬМО.
-    # 550 сюда добавлен намеренно. Часть серверов отвечает на переполненный
-    # ящик постоянным кодом, и тогда доказательство существования терялось:
-    # адрес уезжал в risky «упомянут получатель без отрицания». Порядок при
-    # этом сохранён: место на сервере и размер письма исключаются первыми.
+    # Проверяется раньше разбора 4xx/5xx: переполнение приходит и временным,
+    # и постоянным кодом, а ответ по сути один — ящик есть, письмо не дойдёт.
+    # Сначала исключаем два чужих случая с теми же кодами: кончилось место на
+    # СЕРВЕРЕ и слишком большое ПИСЬМО.
+    # 550 сюда добавлен намеренно: часть серверов отвечает на переполненный
+    # ящик постоянным кодом.
     if numeric in (452, 552, 522, 550):
         if _contains(msg, _SERVER_STORAGE_MARKERS):
             return result("unknown", f"{numeric} На сервере кончилось место (о ящике не сказано)")
         if _contains(msg, _MESSAGE_SIZE_MARKERS):
             return result("unknown", f"{numeric} Ограничение на размер письма (о ящике не сказано)")
         if _contains(msg, _MAILBOX_FULL_MARKERS) or (enhanced and enhanced[1:] == (2, 2)):
-            return result("valid", f"{numeric} Ящик существует и переполнен")
+            return result("full", f"{numeric} Ящик переполнен — письмо не будет "
+                                  "доставлено; переполняется обычно ящик, "
+                                  "которым не пользуются")
 
     # ------------------------------------------------------- 4xx временно --
     if 400 <= numeric < 500:
@@ -341,13 +381,26 @@ def _classify_temporary(code: int, msg: object, enhanced: Enhanced,
 
     def result(status: str, reason: object) -> Verdict:
         return _verdict(status, reason, prefix)
+    # Нет обратного DNS у НАШЕГО IP. Раньше 451 с таким текстом уходил в
+    # ветку «451 — серый список», и адрес дважды ждал по семь минут повтора
+    # ТЕМ ЖЕ выходом — ровно тем, у которого PTR нет (аудит 27.09.2026, D12).
+    # Слова «обратного DNS» в причине держат адрес вне бессмысленного повтора
+    # (_PERMANENT_UNKNOWN_MARKERS в core/pipeline.py), как и у Yahoo/AOL.
+    if (isinstance(enhanced, (tuple, list)) and tuple(enhanced[1:]) in ((7, 23), (7, 25))) \
+            or _contains(msg, _NO_PTR_MARKERS):
+        return result("unknown", f"{code} У нашего IP нет обратного DNS (PTR) — "
+                                 "почтовик не принимает; нужен прокси или VPS с PTR-записью")
+
     if code == 421:
         return result("unknown", "421 Service Busy (Rate Limit)")
 
     greylisted = _contains(msg, ("grey", "greylist", "grey list", "try again",
                                  "try later", "deferred", "come back"))
+    # «too quickly» и «at a rate» — формулировки Gmail про лимит приёма у
+    # получателя (450 4.2.1). Без них ответ читался как «временно недоступен»
+    # без слова о том, что ящик живой и просто занят.
     rate_limited = _contains(msg, ("rate", "too many", "throttl", "limit exceeded",
-                                   "too fast", "connection limit"))
+                                   "too fast", "too quickly", "connection limit"))
 
     if code == 450:
         if greylisted:
@@ -413,8 +466,37 @@ def _classify_permanent(code: int, msg: object, enhanced: Enhanced,
         return result("unknown",
                       f"{code} Сервер не понял команду (о ящике не сказано ничего)")
 
+    # Лимит приёма у ПОЛУЧАТЕЛЯ (Gmail 550 5.2.1 «receiving email at a rate»,
+    # Microsoft 5.2.121/5.2.122). Ящик живой и активный, просто занят —
+    # вердикта нет, адрес переспрашивается позже. Стоит раньше «отключён»:
+    # у Gmail расширенный код у обоих ответов одинаковый.
+    if _contains(msg, _RECIPIENT_RATE_MARKERS):
+        return result("unknown", f"{code} Ящик существует, но сейчас не принимает "
+                                 "— лимит приёма у получателя (rate limit), "
+                                 "перепроверить позже")
+
     proof = _contains(msg, _NO_MAILBOX_PROOF)
     reputation = _contains(msg, _HARD_REPUTATION_MARKERS)
+
+    # Microsoft 365 с Directory-Based Edge Blocking: несуществующему
+    # получателю — `550 5.4.1 Recipient address rejected: Access denied`.
+    # Microsoft в таблице NDR прямо называет это «The recipient's address
+    # doesn't exist». Слово «denied» ниже читается как политика, и мёртвые
+    # адреса на Microsoft 365 годами оставались «Неясно» (аудит 27.09.2026,
+    # D6). Узнаём по паре «5.4.1 + дословная фраза»: у Postfix та же фраза
+    # приходит с 5.7.1 и там действительно означает политику.
+    if (subject == 4 and detail == 1 and not reputation
+            and "recipient address rejected: access denied" in msg):
+        return result("invalid", f"{code} Microsoft 365: получателя нет в "
+                                 "каталоге организации (DBEB)")
+
+    # Отказ по репутации НАШЕГО IP называется своими словами раньше, чем
+    # «отказ отправителю». Microsoft пишет «banned sending IP … please visit
+    # https://sender.office.com», и слово sender в ссылке уводило причину в
+    # «почини отправителя», хотя чинить надо выход (аудит, D13). Статус в
+    # обеих ветках один — unknown; меняется только то, что владелец чинит.
+    if reputation and not proof:
+        return result("unknown", f"{code} Отказ по политике/репутации IP (ящик может существовать)")
 
     # Отказ по политике или репутации нашего IP. Про ящик не сказано ничего.
     #
@@ -465,11 +547,22 @@ def _classify_permanent(code: int, msg: object, enhanced: Enhanced,
     if proof:
         return result("invalid", f"{code} Получателя не существует")
 
-    # Ящик есть, но заморожен: адрес реальный, письмо не дойдёт.
-    if subject == 2 and detail == 1:
-        return result("risky", f"{code} Ящик отключён или заморожен")
-    if _contains(msg, _DISABLED_MARKERS):
-        return result("risky", f"{code} Ящик отключён или заморожен")
+    # Ящик есть, но отключён: адрес реальный, письмо не дойдёт.
+    #
+    # Раньше это был risky — группа «Неясно, ответа не получили». Но ответ
+    # получен, и для рассылки он окончательный (аудит 27.09.2026, D11). Своё
+    # слово disabled: слать нельзя, а хоронить как «ящика нет» тоже нельзя —
+    # аккаунт могут включить обратно.
+    #
+    # 521, 530, 535 и 571 сюда не допускаются даже с расширенным 5.2.1: это
+    # ответы про сервер или про нас («хост почту не принимает», «нужна
+    # авторизация», «доставка не разрешена»), а не про ящик — ниже для них
+    # своя ветка, и правило «про нас, не про ящик» действует по-прежнему.
+    if code not in (521, 530, 535, 571):
+        if subject == 2 and detail == 1:
+            return result("disabled", f"{code} Ящик отключён — письма не принимаются")
+        if _contains(msg, _DISABLED_MARKERS):
+            return result("disabled", f"{code} Ящик отключён — письма не принимаются")
 
     # Формулировка про получателя, которая используется и для политики.
     # Политика уже исключена выше, поэтому здесь она означает ящик.

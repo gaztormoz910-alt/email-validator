@@ -262,15 +262,12 @@ def test_catchall_is_never_called_valid():
     Сервер отвечает 250 на любой выдуманный адрес — значит про конкретный
     ящик не сказано ничего, и называть это «можно слать» нельзя.
     """
-    import io as _io
-
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "core", "pipeline.py")
-    with _io.open(path, encoding="utf-8") as handle:
-        source = handle.read()
-
-    assert 'status_display = "Unknown"  # Catch-All' in source, \
-        "catch-all перестал переводиться в «не доказано»"
+    # Перевод статусов живёт в одной таблице для обоих проходов
+    # (core/settle.py, аудит 27.09.2026 D3) — проверяется сама таблица, а не
+    # строка исходника: так проверка не зависит от расположения кода.
+    from core.settle import DISPLAY_OF
+    assert DISPLAY_OF["catchall"] == "Unknown",         "catch-all перестал переводиться в «не доказано»"
+    assert DISPLAY_OF["unconfirmed"] != "Valid"
 
 
 def test_catchall_row_is_visible_in_the_table():
@@ -298,12 +295,17 @@ def test_validsource_no_valid_without_a_server_answer():
         assert classify_smtp_response(code, text)["status"] != "valid", code
 
 
-def test_validsource_full_mailbox_is_proof_not_a_guess():
-    """Переполненный ящик — доказательство существования И пользования."""
-    assert classify_smtp_response(452, "4.2.2 over quota")["status"] == "valid"
-    assert classify_smtp_response(552, "mailbox is full")["status"] == "valid"
+def test_validsource_full_mailbox_is_not_sendable():
+    """Переполненный ящик: существует, но письмо не дойдёт — full, не valid.
+
+    Требование изменено аудитом 27.09.2026 (D1): прежде здесь стояло
+    «доказательство существования И пользования» и статус valid.
+    """
+    assert classify_smtp_response(452, "4.2.2 over quota")["status"] == "full"
+    assert classify_smtp_response(552, "mailbox is full")["status"] == "full"
     # Но не всё подряд с этими кодами: место на сервере ящиком не является.
-    assert classify_smtp_response(452, "4.3.1 insufficient system storage")["status"] != "valid"
+    assert classify_smtp_response(452, "4.3.1 insufficient system storage")["status"] not in (
+        "valid", "full")
 
 
 # ══════════════════════════════════════════════════════════ сито

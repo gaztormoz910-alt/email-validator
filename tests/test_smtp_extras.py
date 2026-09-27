@@ -233,7 +233,7 @@ def test_vrfy_is_only_asked_when_there_is_no_verdict():
     """
     source = inspect.getsource(__import__("core.network", fromlist=["x"]))
     block = source[source.index("result = self._parse_smtp_response(code, message"):]
-    block = block[:block.index("# Контрольный RCPT")]
+    block = block[:block.index("# Контрольный вопрос")]
     assert 'if result["status"] == "unknown":' in block
     assert "self._ask_vrfy(server, email, domain)" in block
 

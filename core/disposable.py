@@ -480,6 +480,63 @@ _СЛОВА_ЗОН = frozenset({
 _МИН_ДЛИНА_ИМЕНИ_СЕРВИСА = 4
 
 
+# Почтовая инфраструктура крупных служб, которую НИКОГДА нельзя считать
+# одноразовой, даже если её имя попало в скачанный список.
+#
+# Одноразовость по почтовому серверу проверяется ниже по его ИМЕНИ: MX домена
+# принадлежит известному одноразовому сервису — значит и домен его. Беда была
+# бы, если бы в список попал домен, на серверах которого живут тысячи
+# настоящих компаний (Google Workspace, Microsoft 365, хостинг GoDaddy,
+# Namecheap, Zoho): одна строка в чужом списке похоронила бы их всех без
+# единого запроса. Поэтому страж — здесь, отдельно от стража по доменам
+# адресов (core/filters.BLACKLIST_SENTINELS), который проверяется тоже.
+_MX_NEVER_DISPOSABLE = frozenset({
+    "google.com", "googlemail.com", "gmail.com", "outlook.com",
+    "hotmail.com", "microsoft.com", "office365.us", "yandex.net",
+    "yandex.ru", "mail.ru", "yahoodns.net", "yahoo.com", "icloud.com",
+    "apple.com", "zoho.com", "zoho.eu", "zohomail.com", "protonmail.ch",
+    "proton.me", "messagingengine.com", "secureserver.net",
+    "registrar-servers.com", "amazonaws.com", "amazonses.com",
+    "mailgun.org", "sendgrid.net", "ovh.net", "gandi.net", "ionos.com",
+    "ionos.de", "1and1.com", "hostinger.com", "titan.email",
+    "privateemail.com", "mimecast.com", "pphosted.com", "cloudflare.net",
+    "improvmx.com", "forwardemail.net", "pobox.com", "tutanota.de",
+    "mailbox.org", "posteo.de", "fastmail.com", "gmx.net", "web.de",
+    "rambler.ru", "ukr.net", "qq.com", "163.com", "naver.com",
+})
+
+
+def disposable_mx_owner(mx_hosts) -> str:
+    """Одноразовый сервис, которому принадлежит почтовый сервер домена.
+
+    Возвращает имя сервиса (домен из списка одноразовых) или пустую строку.
+    Узнаётся по имени MX-хоста и его родителям с той же защитой зон, что и у
+    обычной проверки (`_годится_в_родители`): `mx.mailinator.com` принадлежит
+    `mailinator.com`, а `mx.foo.co.cc` не принадлежит зоне `co.cc`.
+    """
+    if isinstance(mx_hosts, str):
+        mx_hosts = [mx_hosts]
+    if not isinstance(mx_hosts, (list, tuple)):
+        return ""
+    try:
+        from core.filters import BLACKLIST_SENTINELS
+    except Exception:
+        BLACKLIST_SENTINELS = frozenset()
+    for host in mx_hosts:
+        if not isinstance(host, str) or not host or host == "N/A":
+            continue
+        имя = host.strip().lower().rstrip(".")
+        метки = имя.split(".")
+        цепочка = [".".join(метки[i:]) for i in range(len(метки) - 1)]
+        if any(звено in _MX_NEVER_DISPOSABLE or звено in BLACKLIST_SENTINELS
+               or звено in NEVER_DISPOSABLE for звено in цепочка):
+            continue
+        for звено in цепочка:
+            if звено in DISPOSABLE_DOMAINS and (звено == имя or _годится_в_родители(звено)):
+                return звено
+    return ""
+
+
 def _годится_в_родители(parent: str) -> bool:
     """Можно ли хоронить ПОДДОМЕНЫ этой записи, а не только её саму.
 

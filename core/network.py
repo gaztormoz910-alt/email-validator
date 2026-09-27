@@ -128,6 +128,7 @@ from core.proxy_pool import ProxyPoolMixin, UNKNOWN_LATENCY_MS  # noqa: E402
 # файл поделён, поведение — нет. См. шапки этих модулей.
 from core.catchall import CatchAllMixin                         # noqa: E402
 from core.second_opinion import SecondOpinionMixin              # noqa: E402
+from core.confirmation import AcceptanceMixin                   # noqa: E402
 from core.dns_checks import DnsChecksMixin                      # noqa: E402
 
 
@@ -200,7 +201,7 @@ def control_probe_address(domain):
 
 
 class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
-                       CatchAllMixin, SecondOpinionMixin):
+                       CatchAllMixin, SecondOpinionMixin, AcceptanceMixin):
     """SMTP-проверка ящика: диалог с сервером и сборка вердикта.
 
     Работа с пулом прокси и проверки по DNS живут в примесях рядом
@@ -253,6 +254,8 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
 
         # Кэш Catch-All доменов — чтобы не делать двойной пинг дважды для одного домена
         self.catchall_cache = BoundedCache()
+        # Выдуманный адрес контрольной пробы — один на домен (core/confirmation.py)
+        self._control_addrs = BoundedCache()
 
         # Память между запусками: catch-all доменов, профили прокси, суточная
         # нагрузка на выходные IP. Недоступная база молча отключает память —
@@ -633,6 +636,11 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
                 if "5.7.25" in mail_text or "reverse dns" in low or "forward-confirmed" in low:
                     reason = ("550 Нет обратного DNS у нашего IP (FCrDNS) — "
                               "Yahoo/AOL не пускают. Нужен прокси с PTR-записью.")
+                elif "4.7.23" in mail_text or "ptr record" in low:
+                    # Gmail пишет то же другими словами: «doesn't have a PTR
+                    # record». Прокси при этом рабочий — штрафовать не за что.
+                    reason = (f"{mail_code} Нет обратного DNS (PTR) у нашего IP — "
+                              "почтовик не пускает. Нужен прокси с PTR-записью.")
                 else:
                     reason = f"{mail_code} MAIL FROM Rejected (Email May Exist): {mail_text[:40]}"
                     self._update_proxy_score(proxy, False, mx_record=mx_record)  # Похоже на проблему прокси/IP
@@ -652,61 +660,28 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
             # Сервер не дал вердикта — спрашиваем VRFY, раз он уже на связи.
             #
             # Команда старая и почти везде выключена, но там, где включена, она
-            # отвечает о ящике ПРЯМО, без всяких проб: одна строка вместо
-            # догадок. Стоит она одного пакета в уже открытой сессии, и пробуем
-            # мы её только тогда, когда иначе результатом был бы «неизвестно».
-            #
-            # Ответ 252 («не могу проверить, но письмо приму») вердиктом НЕ
-            # считается — это ровно то же «не знаю», только другими словами.
+            # отвечает о ящике ПРЯМО. Стоит она одного пакета в уже открытой
+            # сессии, и пробуем мы её только тогда, когда иначе результатом был
+            # бы «неизвестно». Ответ 252 вердиктом не считается (_ask_vrfy).
             if result["status"] == "unknown":
                 verified = self._ask_vrfy(server, email, domain)
                 if verified is not None:
                     result = verified
+                    result["via_vrfy"] = True
 
-            # Контрольный RCPT в ТОЙ ЖЕ сессии.
+            # Контрольный вопрос про выдуманный адрес в ТОЙ ЖЕ сессии.
             #
-            # Сервер ответил 250 — но это ничего не значит, если он отвечает 250
-            # на что угодно. Тройная проба catch-all делается ОТДЕЛЬНЫМ
-            # подключением и до этого момента могла сорваться на прокси, а её
-            # неудача трактуется как «не catch-all». Здесь мы спрашиваем прямо
-            # в открытой сессии: соединение уже установлено, MAIL FROM принят,
-            # и лишняя команда RCPT стоит одного пакета.
-            #
-            # Оба 250 — домен принимает любой адрес, и Valid ничего не доказывает.
-            if control_probe and result["status"] == "valid" and domain:
-                # Форма пробы — ПРАВДОПОДОБНОЕ ИМЯ, а не случайные буквы.
-                # Почему это решает исход, а не украшает код, — у
-                # control_probe_address и _СЛОГИ.
-                fake = control_probe_address(domain)
-                try:
-                    ctl_code, _ctl_msg = server.rcpt(fake)
-                except Exception:
-                    ctl_code = None
-                if ctl_code is not None and 200 <= ctl_code < 300:
-                    result["status"] = "catchall"
-                    result["reason"] = ("Catch-All: сервер принял и выдуманный адрес "
-                                        "в той же сессии")
-                    with self.catchall_lock:
-                        self.catchall_cache[domain] = True
-                    # Такой же факт, как и от тройной пробы, — и помнить его
-                    # надо так же: иначе следующий запуск выяснит его заново.
-                    #
-                    # НО не у гигантов. gmail.com, принявший выдуманный адрес,
-                    # не стал catch-all — он перестал отвечать честно, потому
-                    # что с нашего выхода идёт перебор. Вызывающий распознает
-                    # это как тарпитинг несколькими строками ниже, а запись в
-                    # память делалась ДО того и на тридцать суток. Итог:
-                    # каждый следующий запуск отдавал Unknown по ВСЕЙ почте
-                    # gmail, не сходив в сеть, — то есть худшая потеря базы
-                    # из всех возможных, и молча.
-                    if not self._is_never_catchall(domain):
-                        self._remember_catchall(domain, True)
-                elif ctl_code is not None and ctl_code >= 500:
-                    # Выдуманный адрес отвергнут — сервер отвечает честно, и
-                    # 250 на реальный адрес это подтверждённый живой ящик.
-                    with self.catchall_lock:
-                        self.catchall_cache.setdefault(domain, False)
-                    result["control_rcpt"] = "rejected"
+            # 250 ничего не значит, если сервер отвечает 250 на что угодно.
+            # Правило «что считать доказательством» — в core/confirmation.py.
+            # Если настоящий адрес отправлен ждать серого списка, контрольный
+            # отправляется ждать вместе с ним: на повторе оба получат
+            # настоящий ответ, и контроль состоится.
+            if control_probe and domain:
+                if result["status"] == "valid":
+                    self._control_in_session(server, domain, result,
+                                             via_vrfy=bool(result.get("via_vrfy")))
+                elif result["status"] == "greylisted":
+                    self._prewarm_control(server, domain)
 
             # Добавляем информацию о баннере для Engagement Score
             result["smtp_banner"] = banner_text
@@ -1021,6 +996,11 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
                 if result["status"] == "catchall":
                     return result
 
+                # Ящик есть, но письмо в него не дойдёт (переполнен, отключён).
+                # Это ответ про ящик, а не сбой — другой выход скажет то же.
+                if result["status"] in ("full", "disabled"):
+                    return result
+
                 # А вот приговор «ящика нет» перед возвратом СВЕРЯЕТСЯ со
                 # вторым почтовым сервером домена.
                 #
@@ -1298,20 +1278,23 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
 
         primary_mx = mx_records[0]
 
-        # Шаг 2.5: Почтовый шлюз безопасности перед доменом.
-        # Proofpoint, Mimecast, IronPort и прочие принимают ЛЮБОЙ адрес и
-        # фильтруют письмо позже — домен за таким шлюзом catch-all по
-        # конструкции. Тройная проба выяснит то же самое, но потратит три
-        # подключения и не объяснит причину.
+        # Шаг 2.5: Почтовый шлюз безопасности перед доменом (Proofpoint,
+        # Mimecast, IronPort и прочие).
+        #
+        # Раньше любой 250 за шлюзом объявлялся catch-all «по конструкции». Но
+        # многие шлюзы сверяются с каталогом организации и честно отвергают
+        # несуществующих, и тогда живой ящик терялся в «Неясно» (аудит
+        # 27.09.2026, D7, воспроизведено на Mimecast). Теперь решает
+        # контрольная проба, как у любого домена: принял выдуманный — catch-all
+        # с названием шлюза; отверг — сервер честный, и 250 значит «Годен».
         gateway = security_gateway(mx_records)
         if gateway:
             result = self.stealth_smtp_ping(probe_email, mx_records,
+                                            control_probe=True,
                                             avoid_exit_of=avoid_exit_of,
                                             prefer_exit_of=prefer_exit_of)
-            if result["status"] == "valid":
-                result["status"] = "catchall"
-                result["reason"] = (f"Catch-All: почтовый шлюз {gateway} "
-                                    "принимает любой адрес")
+            result = self._confirm_acceptance(domain, result, mx_records,
+                                              gateway=gateway)
             result["mx_record"] = primary_mx
             result["mx_records"] = mx_records
             return result
@@ -1377,6 +1360,13 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
                 "недоказуем; нужен чистый прокси")
             with self.catchall_lock:
                 self._tarpit_domains.add(domain)
+
+        # «Годен» — только при ИСКЛЮЧЁННОМ приёме любых адресов. У гигантов
+        # catch-all не бывает по устройству; остальным нужен отказ выдуманному
+        # адресу — см. core/confirmation.py. Здесь же отсекаются домены,
+        # чья почта ведёт на парковку или на сервис пересылки.
+        if not skip_catchall:
+            result = self._confirm_acceptance(domain, result, mx_records)
 
         # Шаг 4.5: сервер, отвергающий обязательный адрес, теряет право
         # хоронить наш. Спрашиваются postmaster@ и abuse@ — оба обязательны и

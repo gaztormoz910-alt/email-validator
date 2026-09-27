@@ -87,7 +87,10 @@ class ResultCache:
     _NO_PROOF_REASON = ("Имя не может существовать%", "%длиннее%")
 
     def _forget_verdicts_without_proof(self):
-        """Выбрасывает Invalid, вынесенные отменённым правилом длины.
+        """Выбрасывает вердикты, вынесенные отменёнными правилами.
+
+        Два случая: Invalid по отменённому правилу длины имени и Valid,
+        выданный переполненному ящику (см. ниже).
 
         Без этой чистки исправление до владельца просто не дошло бы: кэш
         держит Invalid девяносто дней и ещё три месяца отдавал бы живой
@@ -100,13 +103,27 @@ class ResultCache:
         """
         if self._conn is None:
             return 0
+        удалено = 0
         try:
             cursor = self._conn.execute(
                 "DELETE FROM results WHERE status = ? AND reason LIKE ? AND reason LIKE ?",
                 ("Invalid/Bounce",) + self._NO_PROOF_REASON)
-            return int(cursor.rowcount or 0)
+            удалено += int(cursor.rowcount or 0)
         except Exception:
-            return 0
+            pass
+        # «Годен», выданный переполненному ящику старым правилом (аудит
+        # 27.09.2026, D1). Без чистки кэш ещё тридцать суток отдавал бы такой
+        # адрес как «можно слать», не спросив сервер ни разу.
+        try:
+            cursor = self._conn.execute(
+                "DELETE FROM results WHERE status = 'Valid' AND ("
+                "reason LIKE '%переполнен%' OR lower(reason) LIKE '%quota%' "
+                "OR lower(reason) LIKE '%mailbox full%' "
+                "OR lower(reason) LIKE '%out of storage%')")
+            удалено += int(cursor.rowcount or 0)
+        except Exception:
+            pass
+        return удалено
 
     # --- служебное ---------------------------------------------------------
 

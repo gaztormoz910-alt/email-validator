@@ -225,16 +225,24 @@ def check_local_part(email):
     # подчёркиванием встречаются до сих пор. Объявить такой адрес мёртвым без
     # спроса у сервера значит выбросить живой контакт. Поэтому адрес идёт в
     # сеть как обычно, и правило вступает в силу только если сеть промолчала.
+    # Первый символ проверяется РАНЬШЕ набора символов. У AOL и Yahoo
+    # правило первого символа вшито и в регулярку набора, и `1ivan@aol.com`
+    # получал причину «недопустимые символы (1)» — хотя цифра в имени
+    # разрешена, запрещена она только первой (аудит 27.09.2026, D13).
+    if rule.starts and not rule.starts.match(name):
+        return (UNLIKELY, f"{rule.name}: имя начинается символом, который сейчас "
+                          f"не разрешён. {rule.note}")
+
     if rule.allowed and not rule.allowed.match(name):
-        bad = sorted({ch for ch in name if not rule.allowed.match(ch)})
+        # Символ плох, только если он не проходит и в СЕРЕДИНЕ имени: иначе
+        # регулярка с условием на первый символ объявляла бы плохой любую
+        # цифру.
+        bad = sorted({ch for ch in name
+                      if not rule.allowed.match(ch) and not rule.allowed.match("a" + ch)})
         shown = "".join(bad[:5])
         return (UNLIKELY,
                 f"{rule.name}: недопустимые по нынешним правилам символы в имени "
                 f"({shown}). {rule.note}")
-
-    if rule.starts and not rule.starts.match(name):
-        return (UNLIKELY, f"{rule.name}: имя начинается символом, который сейчас "
-                          f"не разрешён. {rule.note}")
 
     # Длина считается по ЗНАЧАЩЕЙ части имени. У Gmail точки не значат ничего,
     # и мерить длину вместе с ними — мерить не имя, а его написание.
