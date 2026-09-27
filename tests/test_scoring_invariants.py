@@ -52,22 +52,30 @@ class TestSmtpVerdictOutweighsEverything(unittest.TestCase):
         self.assertGreaterEqual(result["score"], 50)
         self.assertNotIn(result["grade"], ("Dead", "Cold"))
 
-    def test_full_inbox_scores_above_plain_ok(self):
-        """Переполненный ящик доказывает не только существование, но и жизнь."""
+    def test_full_inbox_scores_below_plain_ok(self):
+        """Переполненный ящик живости не получает.
+
+        ТРЕБОВАНИЕ ИЗМЕНЕНО аудитом 27.09.2026 (D1). Раньше здесь стояло
+        «переполненный ящик доказывает не только существование, но и жизнь»
+        с бонусом +70 — выше чистого 250. Но письмо в такой ящик не дойдёт, а
+        Gmail сам пишет «out of storage space and inactive».
+        """
         plain = score(smtp_status="valid", smtp_reason="2.1.5 250 OK")["score"]
-        full = score(smtp_status="valid",
-                     smtp_reason="4.2.2 452 Ящик существует и переполнен")["score"]
-        self.assertGreater(full, plain)
+        full = score(smtp_status="Mailbox Full",
+                     smtp_reason="4.2.2 452 Ящик переполнен")["score"]
+        self.assertLess(full, plain)
 
     def test_full_inbox_recognised_in_both_wordings(self):
-        """Причина бывает и на английском (старый кэш), и на русском."""
+        """Старые строки кэша, где переполненный ящик ещё назван valid, бонуса
+        тоже не получают — на английском и на русском."""
+        plain = score(smtp_status="valid", smtp_reason="2.1.5 250 OK")["score"]
         for reason in ("250 OK (Full Inbox)", "452 OK (Mailbox Full)",
                        "5.2.2 Over quota", "5.2.2 552 Ящик существует и переполнен",
                        "4.2.2 452 Ящик существует и переполнен"):
             with self.subTest(reason=reason):
-                self.assertEqual(
-                    score(smtp_status="valid", smtp_reason=reason)["score"],
-                    DEFAULT_WEIGHTS["smtp_valid_full_inbox"])
+                self.assertLess(
+                    score(smtp_status="valid", smtp_reason=reason)["score"], plain)
+        self.assertNotIn("smtp_valid_full_inbox", DEFAULT_WEIGHTS)
 
 
 class TestUncheckedIsNotPunished(unittest.TestCase):

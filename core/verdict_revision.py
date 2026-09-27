@@ -79,6 +79,24 @@ class VerdictRevisionMixin:
             "этого выхода НЕДОКАЗУЕМЫ — виноват прокси, не база."
             % (domain, exit_ip or "прямого соединения"), "dead")
         return True
+    def _catchall_disproven(self, domain):
+        """Опровергнут ли у домена приём любых адресов — фактом, а не догадкой.
+
+        Да, если это гигант, у которого catch-all не бывает по устройству
+        (его враньё — тарпитинг, и ловится оно канарейкой и контролем), или
+        если в этом прогоне сервер отверг выдуманный адрес. Не знаем — False:
+        отсутствие опровержения не опровержение.
+        """
+        net = getattr(self, "network", None)
+        if net is None:
+            return False
+        try:
+            if net._is_never_catchall(domain):
+                return True
+            with net.catchall_lock:
+                return net.catchall_cache.get(domain) is False
+        except Exception:
+            return False
     def _forget_cached(self, domains, why):
         """Стирает из кэша вердикты по разоблачённым доменам.
 
@@ -118,7 +136,15 @@ class VerdictRevisionMixin:
         handler = self.callbacks.get('on_revise')
         if handler is None or not domains:
             return 0
+        # None доходит до поверхности как None, а не как строка «None».
+        # None значит «статус не трогать, только приписать оговорку», и оба
+        # обработчика проверяют это условием `if new_status`. Строка «None»
+        # это условие проходит: командная строка записывала её в статус, а
+        # окно переносило живые адреса в группу «Неясно» со статусом «None».
+        # Замерено прогоном 27.09.2026: пять доказанно живых Gmail из
+        # test.txt владельца вышли со статусом «None».
+        status = None if new_status is None else str(new_status)
         try:
-            return int(handler(list(domains), str(new_status), str(note)) or 0)
+            return int(handler(list(domains), status, str(note)) or 0)
         except Exception:
             return 0

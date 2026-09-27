@@ -181,8 +181,9 @@ class TestNarrowInvalid(unittest.TestCase):
     def test_narrow_invalid_does_not_touch_other_codes(self):
         # Соседние ветки разбора не должны поехать
         self.assertEqual(self.parse(250, b"OK", "a@b.com", "b.com")["status"], "valid")
+        # Переполненный ящик — full с аудита 27.09.2026 (D1), раньше valid.
         self.assertEqual(self.parse(452, b"mailbox full", "a@b.com", "b.com")["status"],
-                         "valid")
+                         "full")
         self.assertEqual(self.parse(452, b"insufficient system storage",
                                     "a@b.com", "b.com")["status"], "unknown")
         # 551 — «User not local; please try <forward-path>». Сервер говорит

@@ -15,8 +15,11 @@ class TestEngagementScore(unittest.TestCase):
         self.assertGreaterEqual(r['score'], 30)
 
     def test_full_inbox_with_good_server(self):
-        r = self.score(email='test@corp.com', smtp_status='Valid', smtp_reason='452 OK (Mailbox Full)', has_ptr=True, has_starttls=True)
-        self.assertGreaterEqual(r['score'], 40)
+        # Аудит 27.09.2026 (D1): хороший сервер не делает переполненный ящик
+        # живым — письмо туда всё равно не дойдёт. Раньше ждали скор от 40.
+        r = self.score(email='test@corp.com', smtp_status='Mailbox Full', smtp_reason='452 OK (Mailbox Full)', has_ptr=True, has_starttls=True)
+        plain = self.score(email='test@corp.com', smtp_status='Valid', smtp_reason='250 OK', has_ptr=True, has_starttls=True)
+        self.assertLess(r['score'], plain['score'])
 
     def test_valid_without_ptr_starttls_gets_penalized(self):
         r = self.score(email='test@corp.com', smtp_status='Valid', has_ptr=False, has_starttls=False)
@@ -82,13 +85,15 @@ class TestEngagementScore(unittest.TestCase):
                        smtp_reason='250 OK', dns_health_score=3)
         self.assertGreaterEqual(r['score'], 50)
 
-    def test_full_inbox_outranks_plain_ok(self):
-        # Полный ящик — доказательство активного использования, должен быть выше
+    def test_full_inbox_ranks_below_plain_ok(self):
+        # Требование изменено аудитом 27.09.2026 (D1): раньше переполненный
+        # ящик считался «доказательством активного использования» и стоял
+        # выше чистого 250. Письмо в него не дойдёт — он ниже.
         full = self.score(email='a@gmail.com', smtp_status='Valid',
                           smtp_reason='452 OK (Mailbox Full)', dns_health_score=3)
         plain = self.score(email='a@gmail.com', smtp_status='Valid',
                            smtp_reason='250 OK', dns_health_score=3)
-        self.assertGreater(full['score'], plain['score'])
+        self.assertLess(full['score'], plain['score'])
 
     def test_machine_generated_alive_stays_below_warm(self):
         # Ящик жив, но адрес машинный — доверия меньше, чем к человеческому
@@ -123,7 +128,9 @@ class TestEngagementScore(unittest.TestCase):
         self.assertLessEqual(r['score'], 100)
 
     def test_grade_hot(self):
-        r = self.score(email='ceo@company.com', smtp_status='Valid', smtp_reason='Mailbox Full', has_gravatar=True, dns_health_score=3, domain_age_days=2000, name_extracted='John', has_ptr=True, has_starttls=True)
+        # Причина — чистый 250: «Mailbox Full» здесь стояла ради +70 за
+        # переполнение, которого больше нет (аудит 27.09.2026, D1).
+        r = self.score(email='ceo@company.com', smtp_status='Valid', smtp_reason='250 OK', has_gravatar=True, dns_health_score=3, domain_age_days=2000, name_extracted='John', has_ptr=True, has_starttls=True)
         self.assertEqual(r['grade'], 'Hot')
         self.assertGreaterEqual(r['score'], 70)
 

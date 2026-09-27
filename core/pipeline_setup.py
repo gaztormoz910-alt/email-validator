@@ -151,7 +151,6 @@ class PipelineSetupMixin:
                 known_ip = sum(1 for v in vals if v["exit_ip"])
                 dirty_n = sum(1 for v in vals if v.get("rdns_dirty"))
                 outlook_n = sum(1 for v in vals if v.get("outlook_ok") is True)
-                clean_n = len(live_proxies) - bl_n
 
                 lats = sorted(v["latency_ms"] for v in vals if v.get("latency_ms"))
                 if lats:
@@ -175,22 +174,52 @@ class PipelineSetupMixin:
                         "(proxy, vpn, tor, pool...). Почтовики такие штрафуют даже "
                         "при валидном обратном DNS.", "dead")
 
-                if ptr_n:
+                # Годные считаются ТЕМ ЖЕ правилом, что и «Готовность прокси»
+                # ниже (core/proxy_profile.py): прямой ответ почтовика главнее
+                # признаков. Раньше здесь считались «есть PTR» и «нет в
+                # чёрных списках», и журнал противоречил сам себе через две
+                # строки. Замерено прогоном 27.09.2026 на списке владельца:
+                # «Outlook/iCloud/GMX пойдут через 16 прокси», а ниже —
+                # «Outlook / Hotmail — 0 годных прокси»: Microsoft на пробе не
+                # пустил ни один из 21.
+                from core.proxy_profile import provider_fitness
+                fitness = provider_fitness(proxy_profiles)
+                yahoo_ok = int((fitness.get("Yahoo / AOL") or {}).get("ok", 0))
+                outlook = fitness.get("Outlook / Hotmail") or {}
+                outlook_ok = int(outlook.get("ok", 0))
+
+                if yahoo_ok:
                     self.callbacks['on_log'](
-                        f"[INFO] Yahoo/AOL пойдут через {ptr_n} прокси с PTR.", "info")
+                        f"[INFO] Yahoo/AOL пойдут через {yahoo_ok} прокси с PTR.", "info")
+                elif ptr_n:
+                    # PTR есть, а годных ноль — значит, Yahoo на пробе отказал
+                    # каждому из них: без прямого отказа прокси с PTR годен.
+                    self.callbacks['on_log'](
+                        f"[DEAD] PTR есть у {ptr_n} прокси, но Yahoo на пробе не "
+                        "пустил ни один — адреса Yahoo, AOL и Verizon останутся "
+                        "недоказанными.", "dead")
                 else:
                     self.callbacks['on_log'](
                         "[DEAD] Обратного DNS (PTR) нет ни у одного прокси — Yahoo, AOL "
                         "и Verizon проверить не получится. Остальные домены проверятся.", "dead")
 
-                if clean_n:
+                if outlook_ok:
                     self.callbacks['on_log'](
-                        f"[INFO] Outlook/iCloud/GMX пойдут через {clean_n} прокси "
-                        "с чистой репутацией.", "info")
+                        f"[INFO] Outlook/Hotmail пойдут через {outlook_ok} прокси, "
+                        "которые Microsoft пустил на пробе.", "info")
                 else:
+                    # Числа причин — из той же оценки: «отказ» — Microsoft
+                    # не пустил, IP в чёрных списках или имя PTR выдаёт
+                    # прокси; «не выяснено» — пробы не было. Ни то ни другое
+                    # годным не считается.
                     self.callbacks['on_log'](
-                        "[DEAD] ВСЕ прокси числятся в чёрных списках — Outlook, iCloud "
-                        "и GMX будут молчать. Нужны прокси с чистым IP.", "dead")
+                        "[DEAD] Для Outlook/Hotmail нет ни одного прокси, который "
+                        "Microsoft пустил бы на пробе (отказ, чёрный список или "
+                        "прокси-имя в PTR: %d, не выяснено: %d) — их адреса "
+                        "останутся недоказанными. "
+                        "Нужен чистый IP." % (int(outlook.get("no", 0)),
+                                              int(outlook.get("unknown", 0))),
+                        "dead")
 
                 # Структурная сводка для окна. Всё перечисленное выше уже
                 # уходило строками лога, но лог прокручивается и теряется,
@@ -232,10 +261,61 @@ class PipelineSetupMixin:
                     "прокси — Yahoo/AOL и Outlook/iCloud пойдут вслепую."
                     % (type(e).__name__, e), "dead")
         return proxy_profiles
+    def _block_run(self, reason):
+        """Остановить прогон ДО первого адреса и сказать почему.
+
+        run_pipeline видит _stop_requested в самом начале и заканчивает, не
+        тронув ни одного адреса. blocked_reason читают окно и командная
+        строка, чтобы не выдать пустой результат за законченную проверку.
+        """
+        self.blocked_reason = reason
+        self._stop_requested = True
+
+    def _check_port25_direct(self):
+        """Прямой режим: открыт ли исходящий порт 25. Закрыт — прогона не будет."""
+        from core.port25 import probe_port25
+        try:
+            итог = probe_port25()
+        except Exception:
+            return
+        if итог.get("verdict") == "closed":
+            self.callbacks['on_log'](
+                "[DEAD] С этого компьютера закрыт исходящий порт 25: ни один из "
+                "%d почтовых серверов не ответил, хотя обычный интернет работает. "
+                "Без прокси проверить нельзя ни одного ящика — прогон остановлен. "
+                "Нужен прокси или VPS с открытым портом 25 "
+                "(tools/make_vps_proxy.py)." % итог.get("tried", 0), "dead")
+            self._block_run("порт 25 закрыт")
+            return
+        if итог.get("verdict") == "open":
+            self.callbacks['on_log'](
+                "[INFO] Порт 25 открыт: Gmail и Яндекс ответят честно; Yahoo, AOL, "
+                "Outlook и iCloud без прокси с обратным DNS и чистой репутацией "
+                "почти наверняка откажут.", "info")
+        # Второе мнение о «Годен» спрашивается с ДРУГОГО выходного адреса, а
+        # без прокси он один. Настройка включена всегда, и молчать о том, что
+        # здесь она не работает, значило бы выдавать одну сессию за две.
+        self.callbacks['on_log'](
+            "[INFO] Без прокси второе мнение о «Годен» невозможно: второго "
+            "выходного адреса нет. «Годен» держится на одной сессии и "
+            "контрольной пробе выдуманным адресом.", "info")
+
     def setup(self, timeout=5, enable_ai=False, proxies=None, threads=100, use_cache=True):
         # Прогон начинается с чистой сети: донашивать объект от прошлого
         # запуска нельзя — у него внутри старый список прокси.
         self.network = None
+        self.blocked_reason = ""
+        # Прокси ЗАДАНЫ владельцем — это решение, и после перебора оно не
+        # меняется: даже если ни один не ожил, идти напрямую нельзя.
+        proxies_requested = bool(proxies)
+
+        # Прямой режим: сначала убедиться, что проверять вообще есть чем, —
+        # ДО скачивания списков и загрузки фильтров. Закрытый порт иначе
+        # выяснялся бы через минуту подготовки, которая всё равно впустую.
+        if not proxies_requested:
+            self._check_port25_direct()
+            if self._stop_requested:
+                return
         # Гибридный режим: Whitelist + DNS-проверка неизвестных доменов
         self.callbacks['on_log']("[INFO] Подготовка валидатора (гибридный режим: Whitelist + DNS)...", "info")
 
@@ -377,7 +457,14 @@ class PipelineSetupMixin:
                     "имеют. Вердиктов не будет — ни одного. Возьми прокси с "
                     "открытым портом 25 или подними свой VPS "
                     "(tools/make_vps_proxy.py), либо запусти без прокси и "
-                    "проверь хотя бы Gmail и Яндекс.", "dead")
+                    "проверь хотя бы Gmail и Яндекс. Прогон остановлен: идти "
+                    "напрямую без твоего согласия нельзя — это раскрыло бы "
+                    "домашний IP.", "dead")
+                # Раньше здесь только писалось «вердиктов не будет», а дальше
+                # сеть создавалась с ПУСТЫМ списком прокси — то есть как прямое
+                # соединение, и прогон тихо шёл с домашнего IP. Найдено при
+                # внедрении аудита 27.09.2026.
+                self._block_run("ни один прокси не ожил")
             elif len(live_proxies) < 10:
                 self.callbacks['on_log'](
                     "[DEAD] Живых прокси всего %d. На большой базе этого мало: "
@@ -403,6 +490,7 @@ class PipelineSetupMixin:
         if self.network is None:
             self.network = NetworkValidator(timeout=timeout, proxies=proxies)
 
+
         # Spamhaus ZEN — крупнейший чёрный список, и до сих пор он молчал.
         # Код опроса был написан и покрыт тестами, но включался только в них:
         # в рабочем прогоне резолвер никто не задавал, и зона не спрашивалась
@@ -416,52 +504,68 @@ class PipelineSetupMixin:
         except Exception:
             resolvers = []
 
-        if resolvers and self.network:
-            if self.network.set_spamhaus_resolver(resolvers):
-                self.callbacks['on_log'](
-                    f"[INFO] Spamhaus ZEN подключён через {', '.join(resolvers)} — "
-                    "санитарный контракт зоны пройден.", "info")
-            else:
-                # Причина называется словами. «Не прошла контракт» не говорит
-                # владельцу, что чинить: отказ резолверу и недоступная сеть
-                # лечатся по-разному.
-                try:
-                    why = self.network.spamhaus_refusal_reason()
-                except Exception:
-                    why = "зона не прошла санитарный контракт"
-                self.callbacks['on_log'](
-                    "[DEAD] Spamhaus ZEN не опрашивается через %s: %s "
-                    "Проверяю без него — это значит, что крупнейший чёрный "
-                    "список молчит, и репутация IP оценивается по семи "
-                    "остальным зонам." % (", ".join(resolvers), why), "dead")
-        elif not resolvers and self.network:
-            # Резолвер не задан — не повод молчать. Зона не обслуживает
-            # КРУПНЫЕ публичные резолверы, но в системном списке обычно лежит
-            # ещё и резолвер провайдера или Quad9, а их она обслуживает.
-            #
-            # Замерено на машине владельца: 1.1.1.1 отвечает кодом отказа
-            # 127.255.255.254, 8.8.8.8 — NXDOMAIN даже на обязательную
-            # тестовую запись, а 9.9.9.9 отвечает правильно. То есть
-            # крупнейший чёрный список был доступен всё это время — его просто
-            # никто не спросил.
-            found = None
+        # ВКЛЮЧАЕТСЯ В ФОНЕ, прогон её не ждёт. Замерено прогоном test_1.txt
+        # владельца 27.09.2026 через его 1394 прокси: поиск резолвера занял
+        # 186 с — и не нашёл ни одного, — а проверка адресов всё это время
+        # стояла. Ждать незачем: профиль прокси уже снят выше, без Spamhaus,
+        # а сама зона нужна фоновому обновлению профиля и оценке репутации
+        # почтовых серверов. Пока резолвер ищется, зона отвечает «не
+        # спрашивали» (None) — ровно как и когда он не найден вовсе.
+        def включить_spamhaus():
             try:
-                found = self.network.autodetect_spamhaus_resolver()
+                if resolvers and self.network:
+                    if self.network.set_spamhaus_resolver(resolvers):
+                        self.callbacks['on_log'](
+                            f"[INFO] Spamhaus ZEN подключён через {', '.join(resolvers)} — "
+                            "санитарный контракт зоны пройден.", "info")
+                    else:
+                        # Причина называется словами. «Не прошла контракт» не говорит
+                        # владельцу, что чинить: отказ резолверу и недоступная сеть
+                        # лечатся по-разному.
+                        try:
+                            why = self.network.spamhaus_refusal_reason()
+                        except Exception:
+                            why = "зона не прошла санитарный контракт"
+                        self.callbacks['on_log'](
+                            "[DEAD] Spamhaus ZEN не опрашивается через %s: %s "
+                            "Проверяю без него — это значит, что крупнейший чёрный "
+                            "список молчит, и репутация IP оценивается по семи "
+                            "остальным зонам." % (", ".join(resolvers), why), "dead")
+                elif not resolvers and self.network:
+                    # Резолвер не задан — не повод молчать. Зона не обслуживает
+                    # КРУПНЫЕ публичные резолверы, но в системном списке обычно лежит
+                    # ещё и резолвер провайдера или Quad9, а их она обслуживает.
+                    #
+                    # Замерено на машине владельца: 1.1.1.1 отвечает кодом отказа
+                    # 127.255.255.254, 8.8.8.8 — NXDOMAIN даже на обязательную
+                    # тестовую запись, а 9.9.9.9 отвечает правильно. То есть
+                    # крупнейший чёрный список был доступен всё это время — его просто
+                    # никто не спросил.
+                    found = None
+                    try:
+                        found = self.network.autodetect_spamhaus_resolver()
+                    except Exception:
+                        found = None
+                    if found:
+                        self.callbacks['on_log'](
+                            "[INFO] Spamhaus ZEN подключён сам через системный "
+                            "резолвер %s — санитарный контракт зоны пройден." % found,
+                            "info")
+                    else:
+                        self.callbacks['on_log'](
+                            "[DEAD] Spamhaus ZEN не опрашивается: ни один резолвер из "
+                            "системных зона не обслуживает. Крупнейший чёрный список "
+                            "сейчас не участвует в оценке — репутация IP считается по "
+                            "семи остальным зонам. Свой резолвер указывается в "
+                            "data/settings.json полем spamhaus_resolvers; проще всего "
+                            "поднять его на том же VPS, где стоит прокси.", "dead")
             except Exception:
-                found = None
-            if found:
-                self.callbacks['on_log'](
-                    "[INFO] Spamhaus ZEN подключён сам через системный "
-                    "резолвер %s — санитарный контракт зоны пройден." % found,
-                    "info")
-            else:
-                self.callbacks['on_log'](
-                    "[DEAD] Spamhaus ZEN не опрашивается: ни один резолвер из "
-                    "системных зона не обслуживает. Крупнейший чёрный список "
-                    "сейчас не участвует в оценке — репутация IP считается по "
-                    "семи остальным зонам. Свой резолвер указывается в "
-                    "data/settings.json полем spamhaus_resolvers; проще всего "
-                    "поднять его на том же VPS, где стоит прокси.", "dead")
+                # Сбой поиска не должен ронять ничего: Spamhaus — одна из
+                # восьми зон, а не условие работы.
+                pass
+
+        threading.Thread(target=включить_spamhaus, name="spamhaus-setup",
+                         daemon=True).start()
 
         # Починка склейки домена теперь применяется только по ответу DNS.
         # Признак «к зоне приклеен мусор» одинаково подходит настоящей

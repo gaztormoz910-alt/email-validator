@@ -206,11 +206,17 @@ def test_static_defects_are_absent():
     Шум от `from ui.colors import *` отфильтрован: имена оттуда настоящие,
     просто pyflakes не может их увидеть.
     """
+    # Кодировка дочернего процесса — явно, как в контроле ниже. Без неё на
+    # консоли cp1252 pyflakes падает на первом кириллическом имени, stdout
+    # приходит пустым, и проверка «проходит», ничего не проверив. Замерено
+    # 27.09.2026: `pytest tests/test_cleanup.py` зелёный, а тот же тест в
+    # полном прогоне с PYTHONIOENCODING=utf-8 нашёл переопределение имени.
+    окружение = dict(os.environ, PYTHONIOENCODING="utf-8")
     result = subprocess.run(
         [sys.executable, "-m", "pyflakes", "core", "ui", "api", "tools",
          "tests", "cli.py", "main.py"],
         cwd=ROOT, capture_output=True, text=True,
-        encoding="utf-8", errors="replace")
+        encoding="utf-8", errors="replace", env=окружение)
     found = [line for line in (result.stdout or "").splitlines()
              if any(marker in line for marker in STATIC_MARKERS)
              and "ui.colors" not in line]

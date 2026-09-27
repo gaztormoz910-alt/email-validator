@@ -42,7 +42,17 @@ CONFIDENCE_STEPS = {
                                          "выдуманный — значит отвечает честно"),
     "server_accepted": (78, "сервер принял адрес; выдуманный в той же сессии "
                             "не проверялся"),
-    "mailbox_full": (85, "ящик переполнен — он существует и им пользуются"),
+    # Переполненный ящик: существует, но письмо НЕ дойдёт. Раньше основание
+    # было «существует и им пользуются» при статусе «Годен» — неверно по
+    # существу: Gmail сам пишет «out of storage space and inactive» (аудит
+    # 27.09.2026, D1).
+    "mailbox_full": (85, "ящик переполнен — письмо не будет доставлено; "
+                         "переполняется обычно ящик, которым не пользуются"),
+    "disabled": (85, "сервер назвал ящик отключённым — письма не принимаются"),
+    "unconfirmed": (30, "сервер принял адрес, но исключить приём любых адресов "
+                        "не удалось — выдуманный адрес не получил окончательного "
+                        "ответа, либо почта домена уходит на парковку или в "
+                        "пересылку"),
 
     # --- сервер ответил, но не про ящик ---
     "accept_all": (15, "домен принимает ЛЮБОЙ адрес: существование этого "
@@ -123,6 +133,12 @@ def verdict_confidence(status, reason="", extras=None):
         # Ловушка вендора — отдельный случай: это не про существование ящика.
         if low_status == "trap":
             return _step("trap")
+        if low_status in ("full", "mailbox full"):
+            return _step("mailbox_full")
+        if low_status == "disabled":
+            return _step("disabled")
+        if low_status == "unconfirmed":
+            return _step("unconfirmed")
 
         # Сначала текст причины: он точнее статуса. «Invalid» бывает и фактом
         # (нет MX), и одиночным 550 — а это разная твёрдость.
@@ -137,9 +153,13 @@ def verdict_confidence(status, reason="", extras=None):
             # ли верить этому «принял».
             if matched == "mailbox_full":
                 return _step("mailbox_full")
-            if extras.get("control_probe"):
-                return _step("server_accepted_with_control")
-            return _step("server_accepted")
+            value, basis = _step("server_accepted_with_control"
+                                 if extras.get("control_probe") else "server_accepted")
+            # Без прокси второго выходного адреса нет, и «Годен» держится на
+            # одной сессии — это пишется в основание, а не замалчивается.
+            if extras.get("valid_second_opinion") == "unavailable":
+                basis += "; второго мнения с другого IP не было"
+            return value, basis
 
         if low_status in ("invalid", "invalid/bounce"):
             if matched == "fact_no_address":

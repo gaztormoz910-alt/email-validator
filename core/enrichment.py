@@ -410,7 +410,8 @@ class EnrichmentMixin:
             res.get("reason", ""),
             {"control_probe": res.get("control_rcpt") == "rejected",
              "confirmed": res.get("second_opinion") == "agreed",
-             "postmaster_honored": res.get("postmaster_honored")})
+             "postmaster_honored": res.get("postmaster_honored"),
+             "valid_second_opinion": res.get("valid_second_opinion")})
         data["verdict_confidence"] = confidence
         data["verdict_basis"] = basis
 

@@ -80,6 +80,11 @@ def group_of(status):
         return "invalid"
     if status == "Role-based":
         return "spam"
+    # Ящик есть, но письмо не дойдёт: переполнен или отключён. Это не
+    # «Мёртв» (ящика нет) и не «Неясно» (ответа не было) — ответ получен, и
+    # он «не слать» (аудит 27.09.2026, D1 и D11).
+    if status in ("Mailbox Full", "Disabled"):
+        return "spam"
     if isinstance(status, str) and ("Trap" in status or "Disposable" in status):
         return "spam"
     if status in ("Unknown", "Risky"):

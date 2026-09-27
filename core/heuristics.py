@@ -374,3 +374,28 @@ def is_role_based(email: str) -> bool:
             return True
 
     return False
+
+
+# Слова, по которым ящик сам называет себя ловушкой для рассылок.
+#
+# Такие адреса заводят, чтобы ловить отправку по собранным базам, и письмо
+# на них — прямой удар по репутации отправителя (у ZeroBounce это
+# possible_trap). Сверяются ЦЕЛЫЕ слова имени, разделённые точкой, дефисом,
+# подчёркиванием или плюсом: `trapeznikov@` и `honeycomb@` ловушками не
+# становятся. Склеенная форма (`spam_trap` -> `spamtrap`) ловится отдельно.
+_TRAP_WORDS = frozenset({"spamtrap", "spamtraps", "honeypot", "honeypots",
+                         "honeytrap", "trap", "traps"})
+
+
+def trap_word_in_local(email) -> str:
+    """Слово-ловушка из имени ящика или пустая строка."""
+    if not isinstance(email, str) or "@" not in email:
+        return ""
+    local = email.rsplit("@", 1)[0].strip().lower()
+    if not local:
+        return ""
+    for part in _ROLE_SPLIT.split(local):
+        if part in _TRAP_WORDS:
+            return part
+    склеено = _ROLE_SPLIT.sub("", local).rstrip("0123456789")
+    return склеено if склеено in _TRAP_WORDS else ""
