@@ -76,9 +76,14 @@ class DnsChecksMixin:
             self._spamhaus_ok = None
             return False
 
+        # Только свои справочные, без публичных DoH: Cloudflare и Google зона
+        # не обслуживает (отказ 127.255.255.254), и раньше при заданных прокси
+        # вопрос уходил сначала к ним — контракт не проходил никогда. Со
+        # второй DNS-дорожкой (29.09.2026) их отказ мог бы ещё и перебить
+        # верное «числится» (вторая рецензия, DOM-4).
         resolver = ProxiedResolver(
             nameservers=list(nameservers), timeout=self.timeout,
-            proxy_provider=self._dns_proxy)
+            proxy_provider=self._dns_proxy, public_doh=False)
 
         def listed(reversed_ip):
             """True — числится, False — точно не числится, None — не спросили.
