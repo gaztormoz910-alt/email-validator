@@ -364,16 +364,20 @@ class ProxyPoolMixin:
             alive = {p for p in self.proxies if p not in self._proxy_banned}
             return bool(alive - self._dirty_proxies)
 
-    def _dns_proxy(self):
+    def _dns_proxy(self, exclude=()):
         """Прокси для DNS-запроса. Контракт описан в ProxiedResolver.resolve().
 
         Когда прокси заданы, но живых не осталось, возвращаем пустую строку, а не
         None: молча уйти на 8.8.8.8 напрямую — значит раскрыть реальный IP там,
         где пользователь этого не ждёт. Ровно та же логика, что у SMTP.
+
+        exclude — прокси, через которые этот вопрос уже прождал впустую: резолвер
+        просит другой. Пустая строка в ответ значит «других нет», и он остаётся
+        на прежнем прокси, а не уходит напрямую.
         """
         if not self._proxy_dns or not self.proxies:
             return None
-        return self._pick_best_proxy() or ""
+        return self._pick_best_proxy(exclude=exclude) or ""
 
     def _proxy_country(self, proxy):
         """Двухбуквенный код страны выходного IP или пусто."""
@@ -482,7 +486,7 @@ class ProxyPoolMixin:
         return proxy
 
     def _pick_best_proxy(self, need_ptr=False, need_clean=False, want_country="",
-                         avoid_exit_of=None):
+                         avoid_exit_of=None, exclude=None):
         """Выбирает живой прокси с наивысшим health score (п.8).
 
         need_ptr=True  — только прокси с обратным DNS (для Yahoo/AOL/Verizon).
@@ -490,6 +494,8 @@ class ProxyPoolMixin:
         need_ptr=False — предпочитает прокси БЕЗ PTR, чтобы не расходовать
                          дефицитные PTR-прокси там, где они не нужны.
                          Если остались только PTR-прокси, берёт их.
+        exclude        — строки прокси, которые брать нельзя (DNS уже прождал
+                         через них впустую). Если кроме них никого, None.
 
         Возвращает None, если прокси не заданы вообще ИЛИ все забанены.
         Вызывающий код обязан различать эти случаи через has_proxies_configured().
@@ -499,6 +505,8 @@ class ProxyPoolMixin:
         with self._proxy_score_lock:
             # Забаненные прокси не воскрешаем — они выбыли навсегда
             alive = [p for p in self.proxies if p not in self._proxy_banned]
+            if exclude:
+                alive = [p for p in alive if p not in exclude]
 
             # Второе мнение нельзя спрашивать у того же выходного адреса.
             #

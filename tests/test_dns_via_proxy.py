@@ -17,6 +17,7 @@ pytestmark = pytest.mark.slow
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -91,10 +92,14 @@ class TestResolverContract(unittest.TestCase):
     def test_all_transports_failed_raises_dns_unavailable(self):
         r = ProxiedResolver(["8.8.8.8"], timeout=1,
                             proxy_provider=lambda: "socks5://127.0.0.1:1")
-        r._via_doh = lambda *a, **k: None
-        r._via_socks_tcp = lambda *a, **k: None
-        with self.assertRaises(DNSUnavailable):
-            r.resolve("example.com", "A")
+        # С 29.09.2026 попытка — одна справочная за раз (_ask_doh/_ask_tcp),
+        # чтобы после ожидания впустую открывать вторую дорожку. Заглушки —
+        # через patch.object: переименуют метод — тест упадёт, а не пойдёт
+        # молча настоящей сетью на 127.0.0.1:1, проверяя уже не то.
+        with mock.patch.object(ProxiedResolver, "_ask_doh", autospec=True, return_value=None), \
+                mock.patch.object(ProxiedResolver, "_ask_tcp", autospec=True, return_value=None):
+            with self.assertRaises(DNSUnavailable):
+                r.resolve("example.com", "A")
 
     def test_dns_unavailable_is_not_nxdomain(self):
         # Самое важное различие во всём файле: «не спросили» != «домена нет».
