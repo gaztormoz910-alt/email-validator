@@ -163,6 +163,54 @@ def проверить_сборку(папка):
     return exe
 
 
+def _ключ_удаления():
+    """Ключ реестра «Установка и удаление программ» — по AppId из MailFact.iss.
+
+    AppId читается из .iss, а не переписывается сюда: он единственный
+    источник, и расхождение двух копий сделало бы проверку ниже пустой.
+    """
+    import re
+    текст = open(os.path.join(КОРЕНЬ, "MailFact.iss"), encoding="utf-8-sig").read()
+    найдено = re.search(r"^AppId=\{\{([0-9A-Fa-f-]+)\}", текст, re.M)
+    if not найдено:
+        return None
+    return r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{%s}_is1" % найдено.group(1)
+
+
+def _ключ_есть(ключ):
+    import winreg
+    try:
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, ключ))
+        return True
+    except OSError:
+        return False
+
+
+def удалить_молча(папка):
+    """Удаляет установленную копию её же деинсталлятором и проверяет итог.
+
+    Без этого каждый прогон оставлял программу установленной: ключ --keep
+    был объявлен, а удаления не было вовсе (найдено 30.09.2026). Заодно
+    проверяется сам деинсталлятор — его получает каждый пользователь.
+    """
+    ключ = _ключ_удаления()
+    шаг(ключ is not None, "AppId найден в MailFact.iss")
+    деинсталлятор = os.path.join(папка, "unins000.exe")
+    if not шаг(os.path.exists(деинсталлятор), "есть деинсталлятор unins000.exe"):
+        return
+    готово = subprocess.run([деинсталлятор, "/VERYSILENT", "/SUPPRESSMSGBOXES",
+                             "/NORESTART"], capture_output=True, timeout=300)
+    шаг(готово.returncode == 0, "деинсталлятор вернул 0 (получено %s)" % готово.returncode)
+    # Деинсталлятор Inno Setup перезапускает себя из временной папки и
+    # доделывает работу уже после выхода первого процесса — ждём итога.
+    предел = time.time() + 120
+    while time.time() < предел and (os.path.exists(папка) or (ключ and _ключ_есть(ключ))):
+        time.sleep(1)
+    шаг(not os.path.exists(папка), "папки программы после удаления нет")
+    if ключ:
+        шаг(not _ключ_есть(ключ), "в «Установке и удалении программ» записи не осталось")
+
+
 def запустить_и_посмотреть(exe, ждать=45):
     """Запускает программу, находит ЕЁ окно по PID и смотрит на иконки."""
     print("запускаю:", exe)
@@ -300,6 +348,8 @@ def main():
         exe = проверить_сборку(куда)
         if exe:
             запустить_и_посмотреть(exe)
+        if not args.keep:
+            удалить_молча(куда)
 
     print()
     if ПРОВАЛЫ:

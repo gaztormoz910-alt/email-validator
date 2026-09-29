@@ -326,6 +326,33 @@ MUTATIONS = [
         "guards": ["tests/test_dns_proxy_switch.py"],
         "why": "после одной заминки лучшего прокси вопросы начинались бы с мёртвых и теряли ответ",
     },
+    {
+        "id": "M26",
+        "title": "прежние релизы прячутся, даже когда нового не видно (30.09)",
+        "path": "tools/hide_old_releases.py",
+        "old": "    if not any(р.get(\"tag_name\") == оставить for р in опубликованные):",
+        "new": "    if False:",
+        "guards": ["tests/test_hide_old_releases.py"],
+        "why": "страница релизов осталась бы пустой — скачать программу было бы неоткуда",
+    },
+    {
+        "id": "M27",
+        "title": "итог скрытия релизов не сверяется (30.09)",
+        "path": "tools/hide_old_releases.py",
+        "old": "    if осталось != [оставить] or последний != оставить:",
+        "new": "    if False:",
+        "guards": ["tests/test_hide_old_releases.py"],
+        "why": "шаг выпуска рапортовал бы «спрятано», когда GitHub правку не принял",
+    },
+    {
+        "id": "M28",
+        "title": "повторная сборка старого тега прячет новую версию (30.09)",
+        "path": "tools/hide_old_releases.py",
+        "old": "    if новее:\n        raise Отказ(",
+        "new": "    if False:\n        raise Отказ(",
+        "guards": ["tests/test_hide_old_releases.py"],
+        "why": "на странице релизов осталась бы старая версия, а новая ушла бы в черновики",
+    },
 ]
 
 

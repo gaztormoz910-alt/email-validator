@@ -22,8 +22,8 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
           cache: 'pip'
@@ -186,10 +186,16 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "установка вернула $($p.ExitCode)" }
 
       - name: Проверить установленную копию
-        run: python tools/check_installed.py --setup "installer\MailFact-setup.exe"
+        # --keep: раннер одноразовый, убирать за собой на нём незачем.
+        # Деинсталлятор проверяется тем же скриптом без --keep на машине
+        # разработчика — по установщику, скачанному из опубликованного релиза.
+        run: python tools/check_installed.py --setup "installer\MailFact-setup.exe" --keep
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
+          # Файла нет — это провал сборки, а не предупреждение: иначе релиз
+          # ушёл бы без установщика, а на задании висела бы жёлтая плашка.
+          if-no-files-found: error
           name: windows
           path: installer/MailFact-setup.exe
 
@@ -199,8 +205,8 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
           cache: 'pip'
@@ -305,8 +311,11 @@ jobs:
           echo "dmg: ${SIZE_MB} MB"
           if [ "$SIZE_MB" -lt 60 ]; then echo "dmg подозрительно мал"; exit 1; fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
+          # Файла нет — это провал сборки, а не предупреждение: иначе релиз
+          # ушёл бы без установщика, а на задании висела бы жёлтая плашка.
+          if-no-files-found: error
           name: macos
           path: MailFact-macos.dmg
 
@@ -314,10 +323,14 @@ jobs:
   # LINUX — архив с программой и ярлыком
   # ======================================================================
   linux:
-    runs-on: ubuntu-latest
+    # Точная версия, а не ubuntu-latest (та с 19.10.2026 переезжает на 26.04,
+    # и GitHub вешал об этом плашку). И вторая причина, важнее: программа,
+    # собранная на 24.04, опирается на её glibc и запускается на системах
+    # не новее неё — сборка на 26.04 молча отрезала бы пользователей 24.04.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
           cache: 'pip'
@@ -546,8 +559,11 @@ jobs:
           echo "архив: ${SIZE_MB} MB"
           if [ "$SIZE_MB" -lt 60 ]; then echo "архив подозрительно мал"; exit 1; fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
+          # Файла нет — это провал сборки, а не предупреждение: иначе релиз
+          # ушёл бы без установщика, а на задании висела бы жёлтая плашка.
+          if-no-files-found: error
           name: linux
           path: MailFact-linux-x86_64.tar.gz
 
@@ -557,9 +573,17 @@ jobs:
   release:
     needs: [windows, macos, linux]
     if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      # Код репозитория здесь нужен ради одного файла — tools/hide_old_releases.py
+      # в последнем шаге. Артефакты качаются в свою папку и с ним не пересекаются.
+      # Токен в git не сохраняется: этой задаче git с правами не нужен, скрипт
+      # ходит в API со своим GITHUB_TOKEN из env.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
         with:
           path: артефакты
 
@@ -572,9 +596,15 @@ jobs:
           V="${{ github.ref_name }}"; V="${V#v}"
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           name: MailFact ${{ steps.ver.outputs.version }}
+          # Не найден файл из списка — провал, а не публикация без него.
+          fail_on_unmatched_files: true
+          # «Latest» — по дате и старшинству версии, а не «кто опубликован
+          # последним»: повторный запуск сборки старого тега не должен
+          # отнимать этот признак у новой версии.
+          make_latest: legacy
           files: |
             артефакты/windows/MailFact-setup.exe
             артефакты/macos/MailFact-macos.dmg
@@ -603,3 +633,15 @@ jobs:
             «Сбор адресов» — «AOL (Tor)» и «Yahoo (Tor)» — работают только на
             Windows: Tor лежит в проекте бинарниками под неё. Остальные движки
             и вся проверка почты работают везде одинаково.
+
+      - name: Спрятать прежние релизы в черновики
+        # Решение владельца 30.09.2026: посторонние видят на странице релизов
+        # только последнюю версию. Прежние не удаляются — становятся
+        # черновиками (видит только владелец, возвращаются кнопкой «Publish
+        # release»). Шаг идёт ПОСЛЕ публикации и ничего не трогает, пока новый
+        # релиз не виден опубликованным; в конце сверяет, что опубликован
+        # ровно он один и он же Latest (см. tools/hide_old_releases.py).
+        run: python3 tools/hide_old_releases.py --keep "${{ github.ref_name }}" --apply
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}

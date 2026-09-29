@@ -33,12 +33,17 @@ jobs:
         # Windows — рабочая площадка владельца, Linux — то, на чём стоит VPS с
         # прокси и куда переезжает проверка на больших базах. Расхождения между
         # ними (пути, кодировки, переводы строк) ловятся именно здесь.
-        os: [windows-latest, ubuntu-latest]
+        #
+        # Ubuntu названа точной версией, а не ubuntu-latest: с 19.10.2026 эта
+        # метка переезжает на 26.04, и GitHub вешал на каждое задание плашку
+        # об этом (30.09.2026). Та же 24.04, что у сборки для Linux в
+        # release.yml, — тесты идут там, где собирается программа.
+        os: [windows-latest, ubuntu-24.04]
         python: ["3.11", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -83,7 +88,7 @@ jobs:
 
   mutation:
     name: Мутационный гейт (тесты обязаны замечать поломки)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Потолок времени назван честно: локальный замер после починки списка
     # сторожей — около полутора минут, и почти всё это базовый прогон. Десять
     # минут оставлено на случай, когда мутация проваливается к полному кругу:
@@ -91,9 +96,9 @@ jobs:
     # настоящая дыра в наборе выглядела бы как сбой инфраструктуры.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -116,10 +121,10 @@ jobs:
 
   types:
     name: Типы на ядре
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -145,10 +150,10 @@ jobs:
 
   structure:
     name: Модули не превращаются обратно в монолиты
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Проверить размеры модулей
@@ -159,10 +164,10 @@ jobs:
 
   requirements:
     name: requirements.txt сходится с импортами
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Установить зависимости
