@@ -317,6 +317,15 @@ MUTATIONS = [
         "guards": ["tests/test_dns_proxy_switch.py"],
         "why": "настоящее «записи нет» терялось бы, когда DoH через прокси не работает (живой замер 29.09)",
     },
+    {
+        "id": "M25",
+        "title": "память о молчании уводит первый выбор с лучшего прокси (рецензия F2, 30.09)",
+        "path": "core/dns_resolver.py",
+        "old": "        proxy = self._proxy_provider() if self._proxy_provider else None",
+        "new": "        proxy = (self._other_proxy(()) or self._proxy_provider()) if self._proxy_provider else None",
+        "guards": ["tests/test_dns_proxy_switch.py"],
+        "why": "после одной заминки лучшего прокси вопросы начинались бы с мёртвых и теряли ответ",
+    },
 ]
 
 

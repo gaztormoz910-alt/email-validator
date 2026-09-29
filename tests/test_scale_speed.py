@@ -70,12 +70,15 @@ def store():
 
 
 def took(fn, повторов=ПОВТОРОВ):
+    # perf_counter, а не monotonic: на Windows до Python 3.13 monotonic
+    # шагает по 15.625 мс, и sleep(0.2) замерялся как 0.1875 (12 шагов) —
+    # положительный контроль ниже падал в CI 30.09.2026 на 3.11.
     лучшее = None
     result = None
     for _ in range(max(1, повторов)):
-        started = time.monotonic()
+        started = time.perf_counter()
         result = fn()
-        прошло = time.monotonic() - started
+        прошло = time.perf_counter() - started
         лучшее = прошло if лучшее is None else min(лучшее, прошло)
     return лучшее, result
 
