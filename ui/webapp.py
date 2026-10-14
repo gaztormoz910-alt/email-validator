@@ -65,8 +65,9 @@ PAGE_SIZE = 100
 # Примеси рядом: источники и вкладка сбора адресов — по файлу на тему.
 from ui.webapp_sources import SourcesMixin, _тип_диалога  # noqa: E402
 from ui.webapp_parser import ParserMixin                  # noqa: E402
+from ui.webapp_activity import ActivityBridgeMixin        # noqa: E402
 
-class ValidatorApi(SourcesMixin, ParserMixin):
+class ValidatorApi(SourcesMixin, ParserMixin, ActivityBridgeMixin):
     """То, что страница может попросить у питона.
 
     Каждый публичный метод — одна конечная точка. Возвращают обычные
@@ -250,7 +251,9 @@ class ValidatorApi(SourcesMixin, ParserMixin):
     def _on_log(self, text, tag="info"):
         with self._lock:
             self._log_seq += 1
-            line = {"text": str(text), "tag": tag, "n": self._log_seq}
+            # «t» — когда строка родилась: окно ставит перед ней время, и
+            # по журналу сразу видно, свежая это строка или давняя.
+            line = {"text": str(text), "tag": tag, "n": self._log_seq, "t": time.time()}
             self._pending.append(line)
             self._history.append(line)
             if len(self._history) > self._history_cap:
@@ -499,6 +502,8 @@ class ValidatorApi(SourcesMixin, ParserMixin):
             "proxyProgress": {"checked": proxy_checked, "seen": proxy_seen,
                               "running": bool(proxy_seen) and not total},
             "phase": {"name": self._phase[0], "count": self._phase[1]},
+            # Жив ли движок и что делает — для полосы состояния (core/activity.py).
+            "activity": self._validator_activity(),
             "log": lines,
             "logSeq": self._log_seq,
             "dropped": self.log.dropped,

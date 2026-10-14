@@ -498,6 +498,100 @@ input[type="number"], textarea {
 .log .l-valid { color: var(--ok); }
 .log .l-dead  { color: var(--bad); }
 .log .l-trap  { color: var(--warn); }
+.log .l-warning { color: var(--warn); }
+/* Время строки — приглушённо: оно для ориентира, а не для чтения. */
+.log .t { color: var(--text-3); }
+/* Смена этапа — заметной строкой: по ним журнал читается как оглавление. */
+.log .l-stage { color: var(--accent); font-weight: 600; }
+/* Пульс — тихо, пока всё в порядке, и громко, когда движок медлит или встал. */
+.log .l-pulse { color: var(--text-3); }
+.log .l-pulse-slow { color: var(--warn); }
+.log .l-pulse-stall { color: var(--bad); font-weight: 600; }
+
+/* ── Полоса «жив ли движок» (core/activity.py) ──
+   Владелец: «чтобы было максимально наглядно видно, когда софт действительно
+   работает, а когда нет». Цвет и движение точки — главный признак: зелёная
+   бьётся — работает; синяя медленно — ждёт по плану; жёлтая мигает — медлит;
+   красная часто мигает — похоже на зависание или нет связи; серая стоит —
+   не запущено. Часы справа идут от самого окна: остановились — завис уже
+   не движок, а окно. */
+.live {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  min-height: 52px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--text-3);
+  border-radius: var(--r);
+  /* БЕЗ transition, намеренно. Замерено на стенде: страница, которой браузер
+     не даёт кадров (свёрнута, перекрыта, WebView2 решил, что окно не видно),
+     замораживает переход на первом кадре, и рамка «Завершено» оставалась
+     красной от давнего «похоже на зависание». Цвет обязан отвечать
+     состоянию сейчас, а не тому, что было до заморозки. */
+}
+.live__dot {
+  flex: none; width: 12px; height: 12px; border-radius: 50%;
+  color: var(--text-3);
+  background: currentColor;
+}
+.live__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.live__head { display: flex; align-items: baseline; gap: var(--s-2); flex-wrap: wrap; }
+.live__title { font-size: 13px; font-weight: 700; color: var(--text); white-space: nowrap; }
+.live__detail { font-size: 12px; color: var(--text-2); line-height: 1.4; overflow-wrap: anywhere; }
+.live__trail { display: flex; flex-wrap: wrap; gap: 2px 6px; font-size: 11px; color: var(--text-3); }
+.live__trail:empty { display: none; }
+.live__step.is-active { color: var(--accent); font-weight: 600; }
+.live__sep { opacity: .6; }
+.live__clock { flex: none; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+.live[data-level="ok"]       { border-left-color: var(--ok); }
+.live[data-level="ok"] .live__dot { color: var(--ok); animation: live-beat 1.2s var(--ease) infinite; }
+.live[data-level="ok"] .live__title { color: var(--ok); }
+
+.live[data-level="wait"]     { border-left-color: var(--accent); }
+.live[data-level="wait"] .live__dot { color: var(--accent); animation: live-beat 2.4s var(--ease) infinite; }
+.live[data-level="wait"] .live__title { color: var(--accent); }
+
+.live[data-level="paused"]   { border-left-color: var(--violet); }
+.live[data-level="paused"] .live__dot { color: var(--violet); }
+.live[data-level="paused"] .live__title { color: var(--violet); }
+
+.live[data-level="stopping"],
+.live[data-level="slow"]     { border-left-color: var(--warn); }
+.live[data-level="stopping"] .live__dot,
+.live[data-level="slow"] .live__dot { color: var(--warn); animation: live-blink 1.6s var(--ease) infinite; }
+.live[data-level="stopping"] .live__title,
+.live[data-level="slow"] .live__title { color: var(--warn); }
+
+.live[data-level="stall"],
+.live[data-level="dead"],
+.live[data-level="nolink"],
+.live[data-level="failed"],
+.live[data-level="blocked"]  { border-left-color: var(--bad); }
+.live[data-level="stall"] .live__dot,
+.live[data-level="dead"] .live__dot,
+.live[data-level="nolink"] .live__dot { color: var(--bad); animation: live-blink .8s var(--ease) infinite; }
+.live[data-level="failed"] .live__dot,
+.live[data-level="blocked"] .live__dot { color: var(--bad); }
+.live[data-level="stall"] .live__title,
+.live[data-level="dead"] .live__title,
+.live[data-level="nolink"] .live__title,
+.live[data-level="failed"] .live__title,
+.live[data-level="blocked"] .live__title { color: var(--bad); }
+
+.live[data-level="done"]     { border-left-color: var(--ok); }
+.live[data-level="done"] .live__dot { color: var(--ok); }
+
+@keyframes live-beat {
+  0%   { box-shadow: 0 0 0 0 currentColor; }
+  70%  { box-shadow: 0 0 0 9px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@keyframes live-blink { 0%, 100% { opacity: 1 } 50% { opacity: .2 } }
+/* Кто просил систему не анимировать — получает тот же смысл цветом. */
+@media (prefers-reduced-motion: reduce) {
+  .live__dot { animation: none !important; }
+}
 
 /* ── Таблица. Дефект №3 лечится table-layout: fixed ── */
 /* Минимум высоты обязателен. flex:1 с min-height:0 честно отдаёт всё место

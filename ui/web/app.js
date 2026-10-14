@@ -416,19 +416,113 @@ async function refreshSources() { showSources(await api("sources")); }
 const logBox = $("#log");
 const MAX_LOG_NODES = 1200;   // столько строк человек всё равно не отмотает
 
+/* Время по часам этой машины. Метку «t» ставит мост в момент рождения строки,
+   поэтому время у строки — когда это СЛУЧИЛОСЬ, а не когда окно дорисовало. */
+function clockOf(epochSeconds) {
+  const d = new Date(epochSeconds * 1000);
+  return [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map((v) => String(v).padStart(2, "0")).join(":");
+}
+
+/* Длительность словами — так же, как пишет движок (core/activity.py). */
+function fmtDur(seconds) {
+  let s = Math.max(0, Math.round(Number(seconds) || 0));
+  if (s < 60) return `${s} с`;
+  let m = Math.floor(s / 60); s %= 60;
+  if (m < 60) return `${m} мин ${String(s).padStart(2, "0")} с`;
+  const h = Math.floor(m / 60); m %= 60;
+  return `${h} ч ${String(m).padStart(2, "0")} мин`;
+}
+
+/* Строка журнала: приглушённое время, затем текст. Время — отдельным узлом,
+   чтобы его можно было приглушить, но при копировании оно уходит вместе со
+   строкой: присланный журнал без времени не разобрать. */
+function logSpan(line) {
+  const span = document.createElement("span");
+  span.className = `l-${line.tag || "info"}`;
+  if (typeof line.t === "number") {
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = clockOf(line.t) + " ";
+    span.appendChild(t);
+  }
+  span.appendChild(document.createTextNode(line.text + "\n"));
+  return span;
+}
+
 function appendLog(lines) {
   if (!lines || !lines.length) return;
   const atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 24;
   const frag = document.createDocumentFragment();
-  for (const line of lines) {
-    const span = document.createElement("span");
-    span.className = `l-${line.tag || "info"}`;
-    span.textContent = line.text + "\n";
-    frag.appendChild(span);
-  }
+  for (const line of lines) frag.appendChild(logSpan(line));
   logBox.appendChild(frag);
   while (logBox.childNodes.length > MAX_LOG_NODES) logBox.removeChild(logBox.firstChild);
   if (atBottom) logBox.scrollTop = logBox.scrollHeight;
+}
+
+/* ── полоса «жив ли движок» ─────────────────────────────────
+   Слова и уровень приходят от движка готовыми (core/activity.py) — окно их
+   не сочиняет, а только показывает. Своё у окна одно: «нет связи», когда
+   мост перестал отвечать. Этого движок о себе сказать не может по
+   определению. */
+function renderTrail(el, trail) {
+  if (!el) return;
+  const steps = Array.isArray(trail) ? trail : [];
+  // Перерисовка — только когда цепочка изменилась. У активного этапа время
+  // растёт каждую секунду, поэтому в подпись идут целые секунды.
+  const sig = steps.map((s) => `${s.label}:${Math.floor(s.seconds || 0)}:${s.active ? 1 : 0}`).join("|");
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
+  const frag = document.createDocumentFragment();
+  steps.forEach((s, i) => {
+    if (i) {
+      const sep = document.createElement("span");
+      sep.className = "live__sep";
+      sep.textContent = "›";
+      frag.appendChild(sep);
+    }
+    const item = document.createElement("span");
+    item.className = s.active ? "live__step is-active" : "live__step";
+    item.textContent = `${s.active ? "▶" : "✓"} ${s.label} · ${fmtDur(s.seconds)}`;
+    frag.appendChild(item);
+  });
+  el.replaceChildren(frag);
+}
+
+function renderLive(id, a) {
+  const box = document.getElementById(id);
+  if (!box || !a) return;
+  if (box.dataset.level !== a.level) box.dataset.level = a.level || "idle";
+  const title = document.getElementById(`${id}Title`);
+  if (title) setText(title, a.title || "");
+  const detail = document.getElementById(`${id}Detail`);
+  if (detail) {
+    setText(detail, a.detail || "");
+    detail.title = a.detail || "";
+  }
+  if (a.trail !== undefined) renderTrail(document.getElementById(`${id}Trail`), a.trail);
+}
+
+/* Мост не отвечает: окно живо (раз этот код выполняется), а движок — нет
+   или занят так, что не может ответить. Одиночный сорвавшийся запрос не в
+   счёт: мерцать красным из-за одного опоздания значит приучить не смотреть. */
+function renderNoLink(id, sinceMs) {
+  const secs = (Date.now() - sinceMs) / 1000;
+  if (secs < 3) return;
+  renderLive(id, {
+    level: "nolink",
+    title: "Нет связи с движком",
+    detail: `Окно работает, но движок не отвечает уже ${fmtDur(secs)}. ` +
+            "Если это длится больше минуты — перезапустите программу: " +
+            "уже проверенные адреса повторно проверяться не будут.",
+  });
+}
+
+/* Часы окна. Идут — значит окно перерисовывается; встали — завис уже не
+   движок, а само окно. Отдельный таймер, независимый от опроса моста. */
+function tickClocks() {
+  const now = clockOf(Date.now() / 1000);
+  for (const el of document.querySelectorAll(".live__clock")) el.textContent = now;
 }
 
 /* ── таблица ──────────────────────────────────────────────── */
@@ -967,6 +1061,7 @@ let missed = 0;
 let skip = 0;
 
 let logSeen = 0;                 // номер последней показанной строки лога
+let lastStateOk = Date.now();    // когда мост в последний раз ответил
 
 async function tick() {
   if (skip > 0) { skip -= 1; return; }
@@ -976,14 +1071,17 @@ async function tick() {
   } catch {
     missed += 1;
     skip = Math.min(8, missed);   // мост ещё не поднялся или окно закрывается
+    renderNoLink("live", lastStateOk);
     return;
   }
   missed = 0;
+  lastStateOk = Date.now();
 
   ui.running = s.running;
 
   ui.state = s.state;
   syncRunState();
+  renderLive("live", s.activity);
 
   setText($("#statValid"),   num(s.counts.valid));
   setText($("#statInvalid"), num(s.counts.invalid));
@@ -1466,12 +1564,7 @@ function appendParserLog(lines) {
   if (!lines || !lines.length) return;
   const atBottom = pLogBox.scrollTop + pLogBox.clientHeight >= pLogBox.scrollHeight - 24;
   const frag = document.createDocumentFragment();
-  for (const line of lines) {
-    const span = document.createElement("span");
-    span.className = `l-${line.tag || "info"}`;
-    span.textContent = line.text + "\n";
-    frag.appendChild(span);
-  }
+  for (const line of lines) frag.appendChild(logSpan(line));
   pLogBox.appendChild(frag);
   while (pLogBox.childNodes.length > MAX_LOG_NODES) pLogBox.removeChild(pLogBox.firstChild);
   if (atBottom) pLogBox.scrollTop = pLogBox.scrollHeight;
@@ -1525,6 +1618,7 @@ let enginesFilled = false;
 
 let parserMissed = 0;
 let parserSkip = 0;
+let lastParserOk = Date.now();
 
 async function parserTick() {
   if (parserSkip > 0) { parserSkip -= 1; return; }
@@ -1534,9 +1628,12 @@ async function parserTick() {
   } catch {
     parserMissed += 1;
     parserSkip = Math.min(8, parserMissed);
+    renderNoLink("pLive", lastParserOk);
     return;
   }
   parserMissed = 0;
+  lastParserOk = Date.now();
+  renderLive("pLive", s.activity);
 
   if (!enginesFilled && s.engines.length) {
     enginesFilled = true;
@@ -1676,6 +1773,8 @@ function syncLock() {
 /* ============================================================ Старт */
 [threads, timeout, pThreads, pTimeout].forEach(paintRange);
 refreshSources();
+tickClocks();
+setInterval(tickClocks, 1000);
 /* Хвост лога — чтобы после перезагрузки страницы терминал не оказался пустым
    при идущем прогоне: очередь к тому моменту уже отдана прошлой странице. */
 /* Хвост лога и опрос больше не спорят за одни и те же строки: хвост говорит,

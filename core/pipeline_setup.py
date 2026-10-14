@@ -313,6 +313,7 @@ class PipelineSetupMixin:
         # ДО скачивания списков и загрузки фильтров. Закрытый порт иначе
         # выяснялся бы через минуту подготовки, которая всё равно впустую.
         if not proxies_requested:
+            self._stage("port25")
             self._check_port25_direct()
             if self._stop_requested:
                 return
@@ -322,6 +323,7 @@ class PipelineSetupMixin:
         # Кэш вердиктов прошлых прогонов. Хранит только доказанное — Valid и
         # Invalid/Bounce; Unknown и Risky не кэшируются никогда, иначе сбой
         # нашей стороны закрепился бы за адресом навсегда.
+        self._stage("cache")
         self.cache = None
         self._cache_hits = 0
         if use_cache:
@@ -353,12 +355,14 @@ class PipelineSetupMixin:
         # Обновляем disposable/spam-списки ДО загрузки SpamFilter, чтобы он
         # сразу подхватил свежие данные. Списки переустанавливаются (замена, не
         # накопление), а качаются только если на сервере реально есть новое.
+        self._stage("lists")
         try:
             self.callbacks['on_log']("[INFO] Проверка обновлений disposable-списков...", "info")
             BlacklistDownloader().download_all(log_callback=self.callbacks['on_log'])
         except Exception as e:
             self.callbacks['on_log'](f"[DEAD] Обновление списков не удалось ({type(e).__name__}), использую локальные.", "dead")
 
+        self._stage("filters")
         # Список бесплатных почтовиков. Он НЕ для отбраковки, а для скоринга:
         # без него сотни бесплатных сервисов считаются корпоративными и
         # получают +5, которого не получает gmail.com.
@@ -413,6 +417,7 @@ class PipelineSetupMixin:
             # Повторы схлопываются по ходу чтения: один прокси, записанный
             # дважды, проверялся бы дважды и занимал два места в ротации.
             proxies = dedupe_proxies_stream(proxies)
+            self._stage("proxies")
             self.callbacks['on_log'](
                 f"[INFO] Тестирование прокси-серверов потоком "
                 f"(потоков: {threads}, таймаут: {timeout}с)...", "info")
@@ -483,6 +488,8 @@ class PipelineSetupMixin:
             # PTR) и Outlook/iCloud (нужна чистая репутация) после этого
             # работала вслепую.
             self.network = NetworkValidator(timeout=timeout, proxies=proxies)
+            if live_proxies:
+                self._stage("profiles")
             proxy_profiles = self._profile_live_proxies(
                 live_proxies, timeout, threads)
 
@@ -584,6 +591,7 @@ class PipelineSetupMixin:
             self._start_profile_refresher(timeout=timeout, workers=threads)
         
         if enable_ai:
+            self._stage("ai")
             self.callbacks['on_log']("[INFO] Прогрев и обучение Нейросети (TensorFlow + NaiveBayes)...", "info")
             self.ai = EmailAI()
             self.ai.train_models()

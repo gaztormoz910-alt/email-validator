@@ -9,6 +9,7 @@
 """
 import os
 import threading
+import time
 from core.baseops import csv_row, export_encoding
 # `_тип_диалога` живёт в соседнем модуле вместе с выбором файлов —
 # направление одностороннее, круга нет.
@@ -19,7 +20,8 @@ __all__ = ["ParserMixin"]
 
 class ParserMixin:
     def _parser_log(self, message, tag="info"):
-        line = {"text": str(message), "tag": tag}
+        # «t» — время рождения строки: окно ставит его перед текстом.
+        line = {"text": str(message), "tag": tag, "t": time.time()}
         with self._lock:
             self._parser_pending.append(line)
             self._parser_history.append(line)
@@ -50,6 +52,7 @@ class ParserMixin:
         self._parser_state = "done"
         self._parser_log("[Система] Сбор адресов завершён." if not aborted
                          else "[Система] Сбор адресов остановлен.", "info")
+        self._finish_parser_activity(aborted)
     def parser_start(self, payload):
         if self.parser is not None and self.parser.is_alive():
             return {"ok": False, "error": "Сбор уже идёт"}
@@ -69,6 +72,9 @@ class ParserMixin:
                               "pages": 0, "snippets": 0, "emails": 0}
         self._parser_progress = (0, 0, 0, "Парсинг")
         self._parser_state = "running"
+        # Отсчёт — синхронно с нажатием: окно сразу показывает «Запуск».
+        self.parser_activity.begin()
+        callbacks = self._observed_parser_callbacks()
 
         dork_sources = list(self._sources["dorks"])
         proxy_sources = list(self._sources["pproxy"])
@@ -94,20 +100,23 @@ class ParserMixin:
                     proxies=proxies,
                     max_threads=threads,
                     timeout=timeout,
-                    on_log=self._parser_log,
-                    on_progress=self._parser_progress_cb,
-                    on_stats_update=self._parser_stats_cb,
-                    on_result_found=self._parser_result_cb,
+                    on_log=callbacks["on_log"],
+                    on_progress=callbacks["on_progress"],
+                    on_stats_update=callbacks["on_stats_update"],
+                    on_result_found=callbacks["on_result_found"],
                     on_complete=self._parser_complete_cb,
                     engine_name=engine,
+                    activity=self.parser_activity,
                 )
                 self.parser = pipeline
                 pipeline.start()
+                self._start_parser_pulse(pipeline)
             except Exception as exc:
                 # Молча упавший поток выглядел бы как «нажал и ничего»:
                 # состояние осталось бы running навсегда.
                 self._parser_state = "done"
                 self._parser_log("[Ошибка] Сбор не запустился: %s" % exc, "dead")
+                self.parser_activity.finish("failed")
 
         threading.Thread(target=launch, daemon=True).start()
         return {"ok": True}
@@ -128,6 +137,7 @@ class ParserMixin:
         pipeline = self.parser
         if pipeline is not None and pipeline.is_alive():
             pipeline.stop()
+            self.parser_activity.request_stop()
             self._parser_log("[Система] Остановка сбора.", "info")
         self._parser_state = "done"
         return {"state": self._parser_state}
@@ -145,6 +155,8 @@ class ParserMixin:
                 "stats": stats,
                 "progress": {"current": current, "total": total,
                              "pct": pct, "label": label},
+                # Жив ли сбор и что делает — для полосы состояния.
+                "activity": self._parser_activity_payload(),
                 "log": lines}
     def parser_log_tail(self, payload=None):
         with self._lock:
