@@ -51,8 +51,16 @@ DEFAULT_ENGINE = SEARCH_ENGINES[0]
 
 class ParserPipeline(threading.Thread):
     def __init__(self, dork_sources, proxies, max_threads, timeout=5.0,
-                 on_log=None, on_progress=None, on_stats_update=None, on_result_found=None, on_complete=None, engine_name="DuckDuckGo Lite", enable_osint=False):
+                 on_log=None, on_progress=None, on_stats_update=None, on_result_found=None, on_complete=None, engine_name="DuckDuckGo Lite", enable_osint=False,
+                 activity=None):
         super().__init__()
+        # Журнал активности (core/activity.py): этапы и «в работе» для полосы
+        # состояния в окне. Не передали — заводится свой, без вывода в журнал:
+        # сбор работает как раньше, просто о его ходе никто не спрашивает.
+        if activity is None:
+            from core.activity import ActivityMonitor
+            activity = ActivityMonitor(kind="parser")
+        self.activity = activity
         self.dork_sources = dork_sources
         self.proxies = proxies
         self.max_threads = max_threads
@@ -154,6 +162,9 @@ class ParserPipeline(threading.Thread):
         self._pause_event.clear()
 
     def run(self):
+        # Загрузка модели и словаря имён идёт минутами и без единой строки —
+        # без названия этапа окно выглядело бы застывшим сразу после «Начать».
+        self.activity.stage("p_init")
         self.ml_predictor = MLPredictor()
         if self.name_extractor is None:
             self.name_extractor = NameExtractor(enable_osint=self.enable_osint)
@@ -191,6 +202,7 @@ class ParserPipeline(threading.Thread):
         use_tor = self.engine_name in tor_engines
         
         if use_tor:
+            self.activity.stage("p_tor")
             from core.tor_manager import TorManager
             self.tor_manager = TorManager(log_callback=self.log)
             
@@ -206,6 +218,7 @@ class ParserPipeline(threading.Thread):
         else:
             # 1. Ping proxies
             if self.proxies:
+                self.activity.stage("p_proxies")
                 self.log(f"[Система] Проверка работоспособности SOCKS5 прокси ({len(self.proxies)} шт.)...")
                 
                 def _proxy_progress(checked, total, live):
@@ -274,9 +287,36 @@ class ParserPipeline(threading.Thread):
                     time.sleep(0.5)
                     
                 try:
-                    dork_idx, sub_query, base_dork = self.dork_queue.get_nowait()
+                    item = self.dork_queue.get(timeout=0.5)
                 except queue.Empty:
-                    break # queue is empty, worker can exit
+                    # Пусто, но фидер ещё читает файл — ждём, а не уходим.
+                    # Раньше здесь стоял get_nowait с выходом на пустой
+                    # очереди: поток, стартовавший раньше, чем фидер положил
+                    # первую строку, уходил сразу и не брал ни одного дорка.
+                    # Фидер умер, а очередь пуста — работы больше не будет.
+                    if self.feeder_thread.is_alive() or not self.dork_queue.empty():
+                        continue
+                    break
+                if item is None:
+                    # Сигнал конца от фидера (_feed_dorks кладёт их после
+                    # последнего дорка). Раньше его распаковывали как дорк, и
+                    # КАЖДЫЙ поток в конце сбора падал с TypeError — в журнал
+                    # сбоев (data/crash.log) уходило по записи на поток, то есть
+                    # штатное окончание выглядело аварией.
+                    break
+                dork_idx, sub_query, base_dork = item
+                # «В работе» — пока дорк ищется: это сетевое ожидание
+                # поисковика, и окно должно отличать его от простоя.
+                self.activity.enter()
+                try:
+                    search_one(engine, dork_idx, sub_query, base_dork)
+                finally:
+                    self.activity.leave()
+
+        # Один дорк целиком — прежнее тело цикла без единого изменения,
+        # вынесенное в функцию ради try/finally выше: так счётчик «в работе»
+        # не залипает, даже если обработка дорка бросит исключение.
+        def search_one(engine, dork_idx, sub_query, base_dork):
                 self.log(f"[DORK {dork_idx}/{self.total_dorks}] Sub-query: {sub_query}")
                 
                 # Extract domain filter from dork (e.g. "@gmail.com" -> "gmail.com")
@@ -353,6 +393,7 @@ class ParserPipeline(threading.Thread):
                 self.dork_queue.task_done()
 
         # 3. Spawn workers
+        self.activity.stage("p_search")
         self.feeder_thread.start()
         threads = []
         safe_max_threads = min(self.max_threads, 500)

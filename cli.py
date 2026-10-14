@@ -23,6 +23,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -164,15 +165,25 @@ def cmd_validate(args):
                 moved += 1
         return moved
 
+    # Строка прогресса пишется через «\r» без перевода строки. Без учёта этого
+    # следующая строка журнала приклеивалась к ней хвостом: «1234/5000 (24%)[INFO] …».
+    progress_open = [False]
+
     def on_log(message, tag="info"):
         if not args.quiet:
-            print(message, file=sys.stderr)
+            if progress_open[0]:
+                print(file=sys.stderr)
+                progress_open[0] = False
+            # Время у каждой строки: по консоли сразу видно, свежая она или
+            # давняя, то есть идёт ли работа прямо сейчас.
+            print(time.strftime("%H:%M:%S"), message, file=sys.stderr, flush=True)
 
     def on_progress(current, total):
         if args.quiet or not total:
             return
         print(f"\r{current}/{total} ({current * 100 // total}%)",
               end="", file=sys.stderr, flush=True)
+        progress_open[0] = True
 
     pipeline = ValidationPipeline(callbacks={
         "on_log": on_log,
@@ -184,6 +195,14 @@ def cmd_validate(args):
 
     for line in format_base_scan(scan_base_providers(sources)):
         on_log(line)
+
+    # Пульс в консоль: раз в 15 с строка «что делает и жив ли», чтобы долгая
+    # подготовка (перебор прокси, прогрев модели) не выглядела зависанием.
+    # Пишется в обход наблюдения — сам пульс событием не считается.
+    from core.activity import Pulse
+    pulse = Pulse(pipeline.activity, emit=lambda text, tag: on_log(text, tag))
+    pipeline.activity.begin()
+    pulse.start()
 
     try:
         # confirm_valid ставится ПОЛЕМ, а не параметром: run_pipeline его не
@@ -201,6 +220,15 @@ def cmd_validate(args):
     except KeyboardInterrupt:
         pipeline.stop()
         print("\nПрервано. Сохраняю то, что успели проверить.", file=sys.stderr)
+    except Exception:
+        # Ошибка внутри — итог «прервано ошибкой», а не «готово».
+        pipeline._finish_activity(failed=True)
+        raise
+    finally:
+        # Итог «готово / остановлено / не выполнялось» и конец пульса — при
+        # любом исходе. Повторный вызов после run_pipeline ничего не делает.
+        pipeline._finish_activity()
+        pulse.stop()
     if not args.quiet:
         print(file=sys.stderr)
 

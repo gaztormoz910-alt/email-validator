@@ -31,6 +31,7 @@ from core.provider import (classify_domain, country_from_domain,
 # Примеси рядом — по одному файлу на тему. Все три работают с тем же
 # объектом и тем же состоянием из __init__: файл поделён, поведение нет.
 from core.pipeline_setup import PipelineSetupMixin
+from core.activity import PipelineActivityMixin
 from core.enrichment import (EnrichmentMixin, AI_SUSPICION_PENALTY,
                              _enrich_signature, _utc_now, _as_utc, _fmt_stamp)
 from core.verdict_revision import VerdictRevisionMixin
@@ -162,9 +163,12 @@ class _DomainGate:
 
 
 class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
-                         VerdictRevisionMixin, SettleMixin):
+                         VerdictRevisionMixin, SettleMixin, PipelineActivityMixin):
     def __init__(self, callbacks):
-        self.callbacks = callbacks 
+        self.callbacks = callbacks
+        # Каждый вызов колбэка — событие для журнала активности
+        # (core/activity.py): по нему окно отличает «работает» от «встал».
+        self._init_activity()
         self.is_running = False
         self.is_paused = False
         # Отдельный флаг «остановку запросили», а не одна лишь is_running.
@@ -288,6 +292,7 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         # вовсе: взвести is_running здесь значило бы отменить команду.
         if self._stop_requested:
             self.is_running = False
+            self._finish_activity()
             self.callbacks['on_complete']()
             return
 
@@ -404,6 +409,10 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         self.canary = CanaryWatch()
         
         # Предзагрузка тяжелых модулей один раз (O(1) вместо O(N) в потоках)
+        if not self.name_extractor or not self.ml_predictor:
+            # Отдельный этап: загрузка идёт минутами и молча, а без названия
+            # этапа окно показывало бы «Проверка адресов» при нуле в работе.
+            self._stage("models")
         if not self.name_extractor:
             self.callbacks['on_log']("[INFO] Загрузка модуля извлечения имен...", "info")
             self.name_extractor = NameExtractor(enable_osint=enable_osint,
@@ -827,6 +836,7 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                     "(один ящик записан по-разному — двойная отправка предотвращена). "
                     f"К проверке: {queued_count}.", "info")
 
+        self._stage("check")
         t_feeder = threading.Thread(target=feeder_thread, daemon=True)
         t_feeder.start()
         
@@ -842,7 +852,10 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                 try:
                     # False означает «адрес отложен на перепроверку»: вердикта
                     # по нему ещё нет, и считать его пройденным нельзя.
-                    deferred = process_single(item) is False
+                    # «В работе» — пока адрес проверяется: по этому числу окно
+                    # отличает «ждём ответа сервера» от «ничего не делаем».
+                    with self.activity.working():
+                        deferred = process_single(item) is False
                 except Exception as e:
                     # Without this the whole worker thread would die and silently
                     # drop every remaining email it was going to handle.
@@ -886,7 +899,8 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         # была, но её надо было заметить.
         self._phase("retry", greylisted_count)
         if greylisted_count > 0 and self.is_running and deep_ping:
-            
+            self._stage("retry")
+
             if self.is_running:
                 retry_count = 0
                 retry_lock = threading.Lock()
@@ -996,7 +1010,8 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                             # Всё, что уже созрело, отправляем в пул немедленно
                             launched = 0
                             while index < total_pending and pending[index][3] <= now:
-                                futures.append(retry_pool.submit(retry_one, pending[index]))
+                                futures.append(retry_pool.submit(
+                                    self.activity.counted(retry_one), pending[index]))
                                 index += 1
                                 launched += 1
                             if launched and not announced:
@@ -1011,6 +1026,11 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                             # но шагами по четверти секунды, чтобы «Стоп» был мгновенным
                             remaining = pending[index][3] - time.monotonic()
                             if remaining > 0:
+                                # Ожидание ПО ПЛАНУ: окно скажет «ждёт ещё N с»,
+                                # а не «похоже на зависание».
+                                self.activity.wait(
+                                    remaining, "ближайший отложенный адрес созреет "
+                                    "для перепроверки")
                                 if not announced and waited == 0.0:
                                     self.callbacks['on_log'](
                                         f"[INFO] Отложено на перепроверку: {total_pending}. "
@@ -1020,6 +1040,7 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                                 time.sleep(step)
                                 waited += step
 
+                        self.activity.unwait()
                         for fut in as_completed(futures):
                             try:
                                 fut.result()
@@ -1039,6 +1060,7 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                         f"{waited:.1f}с.", "info")
 
         self._phase("", 0)
+        self._stage("finish")
 
         # Страховка: всё, что осталось в очереди — не перепроверено (нажали «Стоп»,
         # выключен deep_ping, или прогон прервался). Раньше такие адреса молча
@@ -1232,6 +1254,7 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                 "info")
 
         self.is_running = False
+        self._finish_activity()
         self.callbacks['on_complete']()
 
     def start(self, email_sources, threads, timeout, fix_typos, check_spam,
@@ -1258,6 +1281,9 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         # адресов вышло 156 строк, а счётчики удвоились ровно вдвое.
         self.is_running = True
         self.is_paused = False
+        # Отсчёт прогона — синхронно с признаком: окно с первого же тика
+        # показывает «Запуск», а не «Не запущено».
+        self.activity.begin()
 
         def worker():
             try:
@@ -1273,18 +1299,25 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                 self.callbacks['on_log'](
                     "[DEAD] Проверка прервана ошибкой: %s: %s"
                     % (type(exc).__name__, exc), "dead")
+                self._finish_activity(failed=True)
             finally:
+                # Итог пишется всегда; повторный вызов ничего не делает.
+                self._finish_activity()
                 if self.is_running:
                     self.is_running = False
                     self.callbacks['on_complete']()
 
         t = threading.Thread(target=worker, daemon=True)
+        self.__dict__["_worker"] = t
         t.start()
+        self._start_pulse()
         return t
         
     def stop(self):
         self._stop_requested = True
         self.is_running = False
+        # До конца потока окно скажет «останавливаю», а не «работает».
+        self.activity.request_stop()
         # Остановка снимает и паузу: иначе остановленный на паузе прогон
         # остаётся «на паузе» навсегда, и следующий запуск стартует замершим.
         self.is_paused = False

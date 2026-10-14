@@ -185,6 +185,20 @@
       <div class="progress__track" id="progressTrack"><div class="progress__bar" id="progressBar"></div></div>
     </div>
 
+    <!-- Жив ли движок: этап, «в работе», последнее событие. Над вкладками,
+         чтобы было видно на любой из них. -->
+    <div class="live" id="live" data-level="idle">
+      <span class="live__dot" aria-hidden="true"></span>
+      <div class="live__body">
+        <div class="live__head">
+          <b class="live__title" id="liveTitle" role="status">Не запущено</b>
+          <span class="live__detail" id="liveDetail">Движок ждёт команды.</span>
+        </div>
+        <div class="live__trail" id="liveTrail"></div>
+      </div>
+      <time class="live__clock" title="Часы окна: идут — значит окно живо">--:--:--</time>
+    </div>
+
     <div class="panel">
       <nav class="tabs" role="tablist">
         <button class="tab is-active" data-tab="log" role="tab">Ход проверки</button>
@@ -438,6 +452,19 @@
         <span id="pProgressPct">0%</span>
       </div>
       <div class="progress__track"><div class="progress__bar" id="pProgressBar"></div></div>
+    </div>
+
+    <!-- Жив ли сбор: этап, «в работе», последнее событие. -->
+    <div class="live" id="pLive" data-level="idle">
+      <span class="live__dot" aria-hidden="true"></span>
+      <div class="live__body">
+        <div class="live__head">
+          <b class="live__title" id="pLiveTitle" role="status">Не запущено</b>
+          <span class="live__detail" id="pLiveDetail">Сбор ждёт команды.</span>
+        </div>
+        <div class="live__trail" id="pLiveTrail"></div>
+      </div>
+      <time class="live__clock" title="Часы окна: идут — значит окно живо">--:--:--</time>
     </div>
 
     <div class="panel">
