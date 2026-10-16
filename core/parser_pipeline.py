@@ -109,18 +109,63 @@ class ParserPipeline(threading.Thread):
         self.global_seen_emails = self._seen
         
         self.feeder_thread = threading.Thread(target=self._feed_dorks, daemon=True)
-        
+        # Сбой чтения файла дорков посреди работы и итоговая причина провала
+        # сбора. Пусто — сбор не ломался.
+        self.feeder_error = None
+        self.failed_reason = ""
+        self._completed = False
+
+    def _put(self, item):
+        """Положить в очередь, не повиснув на ней после «Стопа».
+
+        Очередь ограничена (1000), а работники на стопе уходят, не разбирая
+        её. Блокирующий put() без срока оставлял фидер висеть навсегда — вместе
+        с очередью, объектом сбора и открытым файлом дорков, который потом
+        нельзя было ни удалить, ни переименовать до закрытия программы."""
+        while not self._stop_event.is_set():
+            try:
+                self.dork_queue.put(item, timeout=0.5)
+                return True
+            except queue.Full:
+                continue
+        return False
+
     def _feed_dorks(self):
         from core.streamer import StreamLoader
-        for i, d in enumerate(StreamLoader(self.dork_sources).stream_lines(), 1):
-            if self._stop_event.is_set():
-                break
-            # block until space in queue
-            self.dork_queue.put((i, d.strip(), d))
-        
-        # sentinel workers
+        lines = StreamLoader(self.dork_sources).stream_lines()
+        try:
+            for i, d in enumerate(lines, 1):
+                if self._stop_event.is_set():
+                    break
+                if not self._put((i, d.strip(), d)):
+                    break
+        except Exception as exc:
+            # Сбой чтения посреди файла (сетевой или съёмный диск, облачный
+            # файл не подкачался). Раньше фидер умирал молча, работники
+            # принимали это за штатный конец, и окно писало «Готово», хотя
+            # обработана лишь часть дорков. Теперь это провал с причиной.
+            self.feeder_error = exc
+            logging.getLogger(__name__).exception("чтение дорков оборвалось")
+        finally:
+            # Закрыть генератор — значит закрыть файл: на стопе он иначе
+            # оставался открытым, пока жив объект сбора.
+            close = getattr(lines, "close", None)
+            if close is not None:
+                close()
+
+        # Сигналы конца. На стопе _put сразу отказывает: работники уходят
+        # по флагу сами, а класть в полную очередь некому.
         for _ in range(self.max_threads * 2):
-            self.dork_queue.put(None)
+            if not self._put(None):
+                break
+
+    def _complete(self, aborted):
+        """on_complete ровно один раз, как бы ни закончился сбор."""
+        if self._completed:
+            return
+        self._completed = True
+        if self.on_complete:
+            self.on_complete(aborted=aborted)
     def _update_stats(self, dork_done=False, page=0, snippet=0, emails=0):
         with self.stats_lock:
             if dork_done:
@@ -154,14 +199,37 @@ class ParserPipeline(threading.Thread):
 
     def stop(self):
         self._stop_event.set()
+        # Стоп снимает паузу: поток, застывший в паузе посреди дорка, иначе
+        # не выходил никогда — сбор висел навсегда, а окно бесконечно писало
+        # «Останавливаю».
+        self._pause_event.clear()
+        self.activity.set_paused(False)
 
     def pause(self):
         self._pause_event.set()
+        self.activity.set_paused(True)
 
     def resume(self):
         self._pause_event.clear()
+        # Возобновление — событие: молчание на паузе не должно читаться как
+        # зависание сразу после «Продолжить».
+        self.activity.set_paused(False)
 
     def run(self):
+        """Сбор целиком. Любое исключение — провал с причиной в журнале и
+        on_complete, а не тихо умерший поток: иначе окно оставалось в
+        состоянии «идёт сбор» до перезапуска программы."""
+        try:
+            self._run()
+        except Exception as exc:
+            self.failed_reason = "%s: %s" % (type(exc).__name__, exc)
+            self.log("[Ошибка] Сбор прерван ошибкой: %s" % self.failed_reason)
+            self._complete(aborted=True)
+            # Дальше — в журнал сбоев, как и раньше (crash.log): по нему
+            # разбирается, где именно упало.
+            raise
+
+    def _run(self):
         # Загрузка модели и словаря имён идёт минутами и без единой строки —
         # без названия этапа окно выглядело бы застывшим сразу после «Начать».
         self.activity.stage("p_init")
@@ -212,8 +280,7 @@ class ParserPipeline(threading.Thread):
             
             if not self.tor_manager.start(num_instances=num_tor_instances):
                 self.log("[Ошибка] Не удалось запустить Tor. Парсинг невозможен.")
-                if self.on_complete:
-                    self.on_complete(aborted=True)
+                self._complete(aborted=True)
                 return
         else:
             # 1. Ping proxies
@@ -234,8 +301,7 @@ class ParserPipeline(threading.Thread):
                 self.log(f"[Система] Рабочих прокси: {live} из {len(self.proxies)}")
                 if live == 0:
                     self.log("[Ошибка] Нет ни одного рабочего прокси! Парсинг невозможен.")
-                    if self.on_complete:
-                        self.on_complete(aborted=True)
+                    self._complete(aborted=True)
                     return
             else:
                 self.log("[Предупреждение] Прокси не загружены. Парсинг пойдет через прямой IP!")
@@ -334,7 +400,9 @@ class ParserPipeline(threading.Thread):
                     for snippet in engine.search_generator(sub_query):
                         if self._stop_event.is_set():
                             break
-                        while self._pause_event.is_set():
+                        # С проверкой стопа: «Пауза», затем «Стоп» раньше
+                        # оставляли поток здесь навсегда (и в 1.3.7 тоже).
+                        while self._pause_event.is_set() and not self._stop_event.is_set():
                             time.sleep(0.5)
                             
                         # Increment snippet/page stats
@@ -424,14 +492,18 @@ class ParserPipeline(threading.Thread):
         for t in threads:
             t.join()
             
-        if self._stop_event.is_set():
+        if self.feeder_error is not None:
+            self.failed_reason = "чтение файла дорков оборвалось: %s: %s" % (
+                type(self.feeder_error).__name__, self.feeder_error)
+            self.log("[Ошибка] Сбор прерван — %s. Обработано дорков: %s, остальные "
+                     "не прочитаны." % (self.failed_reason, self.processed_dorks))
+        elif self._stop_event.is_set():
             self.log("[Система] Парсинг был принудительно остановлен.")
         else:
             self.log(f"[Система] Парсинг успешно завершен! Всего найдено: {self.total_emails}")
-        
+
         if hasattr(self, 'tor_manager') and self.tor_manager:
             self.tor_manager.stop()
-            
+
         self.log(f"[Система] Парсинг завершен. Всего почт: {self.total_emails}")
-        if self.on_complete:
-            self.on_complete(aborted=self._stop_event.is_set())
+        self._complete(aborted=self._stop_event.is_set() or self.feeder_error is not None)

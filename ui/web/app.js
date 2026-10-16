@@ -470,7 +470,7 @@ function renderTrail(el, trail) {
   const steps = Array.isArray(trail) ? trail : [];
   // Перерисовка — только когда цепочка изменилась. У активного этапа время
   // растёт каждую секунду, поэтому в подпись идут целые секунды.
-  const sig = steps.map((s) => `${s.label}:${Math.floor(s.seconds || 0)}:${s.active ? 1 : 0}`).join("|");
+  const sig = steps.map((s) => `${s.label}:${Math.floor(s.seconds || 0)}:${s.active ? 1 : 0}:${s.cut ? 1 : 0}`).join("|");
   if (el.dataset.sig === sig) return;
   el.dataset.sig = sig;
   const frag = document.createDocumentFragment();
@@ -482,8 +482,9 @@ function renderTrail(el, trail) {
       frag.appendChild(sep);
     }
     const item = document.createElement("span");
-    item.className = s.active ? "live__step is-active" : "live__step";
-    item.textContent = `${s.active ? "▶" : "✓"} ${s.label} · ${fmtDur(s.seconds)}`;
+    // «✗» — этап оборван «Стопом» или ошибкой: галочка сказала бы, что он пройден.
+    item.className = s.active ? "live__step is-active" : (s.cut ? "live__step is-cut" : "live__step");
+    item.textContent = `${s.active ? "▶" : (s.cut ? "✗" : "✓")} ${s.label} · ${fmtDur(s.seconds)}`;
     frag.appendChild(item);
   });
   el.replaceChildren(frag);

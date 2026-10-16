@@ -49,6 +49,12 @@ class ActivityBridgeMixin:
         pipeline = getattr(self, "parser", None)
         alive = None
         paused = False
+        # Пока новый сбор запускается (читаются прокси, создаётся конвейер),
+        # self.parser — ещё ПРОШЛЫЙ, завершённый поток. Спросить живость у
+        # него — получить «Движок остановился… Это сбой» на каждом повторном
+        # сборе. Живость нового пока неизвестна, и это честно.
+        if self.__dict__.get("_parser_launching"):
+            pipeline = None
         if pipeline is not None:
             try:
                 alive = bool(pipeline.is_alive())
@@ -111,11 +117,17 @@ class ActivityBridgeMixin:
         работать было нечем (Tor не поднялся, ни один прокси не ожил)."""
         pipeline = getattr(self, "parser", None)
         stopped = False
+        failed = ""
         try:
             stopped = pipeline is not None and pipeline._stop_event.is_set()
+            failed = getattr(pipeline, "failed_reason", "") or ""
         except Exception:
             pass
-        if not aborted:
+        # Провал проверяется первым: оборванное чтение файла дорков раньше
+        # выглядело как «Готово», а исключение — как «не смог начаться».
+        if failed:
+            outcome, note = "failed", failed
+        elif not aborted:
             outcome, note = "done", ""
         elif stopped:
             outcome, note = "stopped", ""

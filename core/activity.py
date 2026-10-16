@@ -34,7 +34,7 @@ from contextlib import contextmanager
 
 __all__ = ["ActivityMonitor", "describe", "payload", "pulse_line", "Pulse",
            "observe_callbacks", "PipelineActivityMixin", "fmt_duration",
-           "fmt_number", "STAGES"]
+           "fmt_number", "net_budget", "STAGES", "PAUSABLE"]
 
 # ─────────────────────────────── этапы ─────────────────────────────────
 #
@@ -71,12 +71,36 @@ STAGES = {
 # «Начать» и первым настоящим этапом, и строка про него была бы шумом.
 _SILENT = {"start"}
 
-# Сетевой этап с занятыми потоками может молчать дольше: одна проверка адреса
-# ограничена общим дедлайном 180 с (core/network.py), и пока он не истёк,
-# долгое молчание — это медленный сервер, а не поломка. Зависание — всё, что
-# дольше дедлайна с запасом.
+# Этапы, на которых «Пауза» действительно останавливает работу. На остальных
+# (проверка прокси, прогрев модели, загрузка списков) её нечем приостановить:
+# они доделываются, а пауза вступает в силу со следующего такого этапа.
+# Говорить там «на паузе, новых проверок нет» было бы неправдой — проверка
+# прокси при этом идёт полным ходом.
+PAUSABLE = {"check", "retry", "p_search"}
+
+# Сетевой этап с занятыми потоками может молчать дольше: пока идёт проверка
+# адреса, сеть не сообщает о себе ни разу, и долгое молчание — это медленный
+# сервер, а не поломка. Это пороги при таймауте по умолчанию; при большом
+# таймауте одна проверка законно идёт дольше, и порог зависания отодвигается
+# (net_budget ниже, задаёт подготовка прогона).
 NET_SLOW = 45.0
 NET_STALL = 240.0
+
+
+def net_budget(timeout, address_deadline):
+    """Сколько может законно идти ОДНА проверка адреса при этом таймауте.
+
+    Дедлайн адреса (core/network.py) сверяется только МЕЖДУ попытками, так
+    что последняя попытка заканчивается позже него. А внутри одной проверки
+    кроме самой сессии бывают проба на catch-all, подтверждение приёма,
+    второе мнение и канарейка — каждое со своими ожиданиями до таймаута.
+    Отсюда два дедлайна и шесть таймаутов: замер рецензии 16.10.2026 дал при
+    таймауте 85 с 255 с на одну сессию, и порог 240 с объявлял зависанием
+    обычную проверку."""
+    try:
+        return 2.0 * float(address_deadline) + 6.0 * float(timeout)
+    except (TypeError, ValueError):
+        return None
 
 # Как часто движок пишет строку-пульс, если ничего не изменилось.
 PULSE_INTERVAL = 15.0
@@ -140,6 +164,10 @@ class ActivityMonitor:
         self.emit = emit
         self._clock = clock or time.monotonic
         self._lock = threading.RLock()
+        # Сколько может законно идти одна проверка адреса (net_budget). Это
+        # настройка сети, а не состояние прогона: begin() её не сбрасывает,
+        # иначе бюджет, заданный до первого этапа, молча терялся бы.
+        self.net_longest = None
         self._reset()
 
     def _reset(self):
@@ -159,7 +187,14 @@ class ActivityMonitor:
         self.aux_current = 0
         self.aux_total = 0
         self.found = 0
-        self.trail = []              # [(ключ, длительность в секундах)]
+        # Пропущено фидером без проверки (проверено в прошлый раз, дубль,
+        # пустая строка) и входит ли это число ещё в знаменатель прогресса.
+        self.skipped_count = 0
+        self.skip_in_total = True
+        self._pinned_total = None
+        self.paused = False
+        # [(ключ, длительность в секундах, прерван ли этап)]
+        self.trail = []
         self._samples = deque(maxlen=240)
 
     # ── жизненный цикл ──
@@ -187,15 +222,11 @@ class ActivityMonitor:
                 # которые зовут setup()/run_pipeline() напрямую.
                 self.begin()
             now = self._clock()
-            prev, started = self.stage_key, self.stage_started
-            if prev == key:
+            if self.stage_key == key:
                 return
-            if prev and started is not None:
-                took = max(0.0, now - started)
-                self.trail.append((prev, took))
-                if prev not in _SILENT:
-                    lines.append(("✓ %s — %s" % (STAGES.get(prev, (prev,))[0],
-                                                 fmt_duration(took)), "stage"))
+            # Переход этапа после «Стоп» — это не «этап пройден», а «этап
+            # оборван»: конвейер проскакивает к итогам, бросив проверку.
+            lines.extend(self._close_stage(now, "stopped" if self.stopping else ""))
             self.stage_key = key
             self.stage_started = now
             self.last_event = now
@@ -217,13 +248,15 @@ class ActivityMonitor:
                 self.outcome_note = note
                 return
             now = self._clock()
-            prev, started = self.stage_key, self.stage_started
-            if prev and started is not None:
-                took = max(0.0, now - started)
-                self.trail.append((prev, took))
-                if prev not in _SILENT:
-                    lines.append(("✓ %s — %s" % (STAGES.get(prev, (prev,))[0],
-                                                 fmt_duration(took)), "stage"))
+            # Ошибка обрывает тот этап, на котором случилась. «Стоп» — тоже,
+            # кроме итогов: их конвейер доводит до конца и после остановки
+            # (отдаёт неперепроверенные адреса как Unknown, сверяет счёт).
+            cut = ""
+            if outcome == "failed":
+                cut = "failed"
+            elif outcome == "stopped" and self.stage_key != "finish":
+                cut = "stopped"
+            lines.extend(self._close_stage(now, cut))
             self.state = outcome if outcome in _FINAL else "done"
             self.outcome_note = note
             self.stage_key = ""
@@ -238,11 +271,37 @@ class ActivityMonitor:
             text = {
                 "done": "■ Готово. Весь прогон занял %s." % total,
                 "stopped": "■ Остановлено по вашей команде через %s." % total,
-                "failed": "■ Прервано ошибкой через %s — причина строкой выше." % total,
+                # «Выше», а не «строкой выше»: между причиной и итогом стоит
+                # строка оборванного этапа, а в CLI трассировку печатает
+                # сам вызывающий — до этой строки (cli.py).
+                "failed": "■ Прервано ошибкой через %s — причина в журнале выше." % total,
                 "blocked": "■ Работа не выполнялась: %s." % (note or "нечем проверять"),
             }[self.state]
             lines.append((text, "stage"))
         self._emit(lines)
+
+    def _close_stage(self, now, cut=""):
+        """Закрыть текущий этап: запись в цепочку и строка для журнала.
+
+        cut — чем этап оборван ("stopped", "failed") или "" — пройден. Галочка
+        «✓» ставится только пройденному: оборванный этап с галочкой выглядел
+        бы завершённым, и цепочка в окне врала бы о том, докуда дошла работа.
+        Вызывается под замком; строки возвращаются, пишет их вызывающий."""
+        prev, started = self.stage_key, self.stage_started
+        if not prev or started is None:
+            return []
+        took = max(0.0, now - started)
+        self.trail.append((prev, took, bool(cut)))
+        if prev in _SILENT:
+            return []
+        label = STAGES.get(prev, (prev,))[0]
+        if cut == "failed":
+            text = "✗ %s — оборвано ошибкой через %s" % (label, fmt_duration(took))
+        elif cut:
+            text = "✗ %s — остановлено через %s" % (label, fmt_duration(took))
+        else:
+            text = "✓ %s — %s" % (label, fmt_duration(took))
+        return [(text, "stage")]
 
     def request_stop(self):
         """Нажали «Стоп»: до конца потока покажем «останавливаю», а не «работает»."""
@@ -275,6 +334,11 @@ class ActivityMonitor:
                 self.progress_total = int(total or 0)
             except (TypeError, ValueError):
                 return
+            # После retotal() знаменатель окончательный. Рабочий поток мог
+            # прочитать прежний (сырые строки файла) за миг до того, как фидер
+            # его сменил, и прийти с ним уже после — не даём откатить.
+            if self._pinned_total is not None:
+                self.progress_total = self._pinned_total
             # Не чаще раза в секунду: при сотне потоков прогресс сдвигается
             # сотни раз в секунду, а для скорости нужны точки, а не поток.
             if not self._samples or now - self._samples[-1][0] >= 1.0:
@@ -297,10 +361,64 @@ class ActivityMonitor:
             except (TypeError, ValueError):
                 pass
 
+    def skipped(self, count):
+        """Сколько фидер пропустил без проверки: проверено в прошлый раз,
+        дубль, пустая строка.
+
+        Это движение, а не молчание: на продолжении прогона фидер минутами
+        проматывает уже проверенное (≈11 тыс. строк/с, замер рецензии), не
+        вызывая ни одного колбэка, и без этого через минуту полоса говорила
+        бы «медленно», а через три — «похоже на зависание, нажмите Стоп»."""
+        with self._lock:
+            self.last_event = self._clock()
+            try:
+                self.skipped_count = int(count or 0)
+            except (TypeError, ValueError):
+                pass
+
+    def retotal(self, total):
+        """Фидер дошёл до конца входа: знаменатель теперь — только то, что
+        ушло в проверку, и пропущенные из него уже вычтены."""
+        with self._lock:
+            self.last_event = self._clock()
+            try:
+                self._pinned_total = int(total or 0)
+            except (TypeError, ValueError):
+                return
+            self.progress_total = self._pinned_total
+            self.skip_in_total = False
+
+    def set_paused(self, paused):
+        """Пауза включена или снята. И то и другое — событие.
+
+        Молчание на паузе — не молчание движка: без этого после пяти минут
+        паузы «Продолжить» сразу давало «Похоже на зависание», потому что
+        последнее событие было пять минут назад, ДО паузы."""
+        with self._lock:
+            self._note_paused(bool(paused), self._clock())
+
+    def _note_paused(self, paused, now):
+        if paused != self.paused:
+            self.paused = paused
+            self.last_event = now
+
+    def set_net_budget(self, seconds):
+        """Сколько может законно идти одна проверка адреса (см. net_budget)."""
+        with self._lock:
+            try:
+                self.net_longest = float(seconds) if seconds else None
+            except (TypeError, ValueError):
+                self.net_longest = None
+
     # ── в работе ──
     def enter(self):
         with self._lock:
             self.inflight += 1
+            # Взять адрес в работу — тоже событие. Без этого после планового
+            # ожидания перепроверки молчание отсчитывалось от последнего
+            # результата ДО ожидания, и первая же отправленная проверка
+            # выглядела «зависшей на 5 минут».
+            self.last_event = self._clock()
 
     def leave(self):
         with self._lock:
@@ -336,10 +454,17 @@ class ActivityMonitor:
             self.wait_reason = ""
 
     # ── снимок ──
-    def snapshot(self, paused=False, alive=None):
-        """Всё, что нужно describe(), одной копией под замком."""
+    def snapshot(self, paused=None, alive=None):
+        """Всё, что нужно describe(), одной копией под замком.
+
+        paused — флаг паузы конвейера, если вызывающий его знает. Смена флага
+        засчитывается как событие и здесь: окно и пульс спрашивают снимок
+        постоянно, так что возобновление заметится, даже если тот, кто снял
+        паузу, не позвал set_paused()."""
         with self._lock:
             now = self._clock()
+            if paused is not None:
+                self._note_paused(bool(paused), now)
             rate = eta = None
             if self._samples:
                 window = [p for p in self._samples if now - p[0] <= 60.0]
@@ -350,9 +475,26 @@ class ActivityMonitor:
                     # первая пачка кэшированных адресов дала бы «8000 в минуту».
                     if span >= 15.0 and done > 0:
                         rate = done * 60.0 / span
+                        # На продолжении прогона знаменатель — все строки
+                        # файла, вместе с проверенными в прошлый раз. Их фидер
+                        # пропускает, и в остаток они не входят: иначе оценка
+                        # «осталось» завышалась во столько раз, во сколько
+                        # проверенного больше, чем нового (замер: 10 мин
+                        # вместо 0.2 с).
                         left = self.progress_total - self.progress_current
+                        if self.skip_in_total:
+                            left -= self.skipped_count
                         if left > 0:
                             eta = left * 60.0 / rate
+            # Плановое ожидание — не молчание. Когда его срок истёк, отсчёт
+            # тишины идёт от конца ожидания, а не от события ДО него: между
+            # сроком и тем, как созревший адрес возьмут в работу (enter),
+            # проходят доли секунды, и опрос окна в этот миг иначе видел
+            # «молчит 5 минут — похоже на зависание».
+            last = self.last_event
+            if (self.wait_until is not None and self.wait_until <= now
+                    and (last is None or self.wait_until > last)):
+                last = self.wait_until
             return {
                 "kind": self.kind,
                 "state": self.state,
@@ -361,20 +503,23 @@ class ActivityMonitor:
                 "stageElapsed": (now - self.stage_started) if self.stage_started is not None else None,
                 "runElapsed": ((self.run_ended if self.run_ended is not None else now)
                                - self.run_started) if self.run_started is not None else None,
-                "lastEventAge": (now - self.last_event) if self.last_event is not None else None,
+                "lastEventAge": (now - last) if last is not None else None,
                 "inflight": self.inflight,
                 "waitLeft": (self.wait_until - now) if self.wait_until is not None and self.wait_until > now else None,
                 "waitReason": self.wait_reason,
                 "stopping": self.stopping,
-                "paused": bool(paused),
+                "paused": self.paused,
                 "alive": alive,
                 "current": self.progress_current,
                 "total": self.progress_total,
+                "skipped": self.skipped_count,
+                "skipInTotal": self.skip_in_total,
                 "auxCurrent": self.aux_current,
                 "auxTotal": self.aux_total,
                 "found": self.found,
                 "rate": rate,
                 "eta": eta,
+                "netLongest": self.net_longest,
                 "trail": list(self.trail),
             }
 
@@ -401,9 +546,22 @@ def _progress_text(snap):
             parts.append("дорков %s из %s" % (fmt_number(cur), fmt_number(tot)))
         parts.append("адресов найдено %s" % fmt_number(snap["found"]))
         return " · ".join(parts)
-    if stage in ("check", "retry") and tot:
-        pct = int(cur * 100 / tot) if tot else 0
-        return "проверено %s из %s (%d%%)" % (fmt_number(cur), fmt_number(tot), pct)
+    if stage in ("check", "retry"):
+        skipped = snap.get("skipped") or 0
+        # Пропущенное фидером ещё сидит в знаменателе, пока он не дошёл до
+        # конца файла (skipInTotal) — тогда «из» показывается без него, иначе
+        # продолжение прогона читалось бы как «проверено 3%», хотя
+        # непроверенного осталось на минуту.
+        if skipped and snap.get("skipInTotal", True):
+            tot = max(cur, tot - skipped)
+        parts = []
+        if tot:
+            pct = int(cur * 100 / tot) if tot else 0
+            parts.append("проверено %s из %s (%d%%)" % (fmt_number(cur), fmt_number(tot), pct))
+        if skipped:
+            parts.append("пропущено %s: проверены раньше, повторы или не адреса"
+                         % fmt_number(skipped))
+        return " · ".join(parts)
     return ""
 
 
@@ -450,8 +608,9 @@ def describe(snap):
                     "detail": "Работа не начиналась: %s. Подробности — в журнале."
                               % (snap["note"] or "нечем проверять")}
         return {"level": "failed", "title": "Прервано ошибкой",
-                "detail": "Работа прервалась через %s. Причина — в журнале строкой "
-                          "[DEAD] выше. Движок свободен, можно запускать заново." % took}
+                "detail": "Работа прервалась через %s. Причина — в журнале выше "
+                          "(%s). Движок свободен, можно запускать заново."
+                          % (took, snap["note"] or "строка [DEAD] или [Ошибка]")}
 
     # Дальше — прогон идёт.
     if snap["alive"] is False:
@@ -476,10 +635,16 @@ def describe(snap):
         return {"level": "stopping", "title": "Останавливаю",
                 "detail": " · ".join(parts + [
                     "доделываются начатые проверки, после этого движок освободится"])}
-    if snap["paused"]:
+    if snap["paused"] and stage in PAUSABLE:
         return {"level": "paused", "title": "На паузе",
                 "detail": " · ".join(parts + [
                     "новых проверок нет, пока не нажмёте «Продолжить»"])}
+    if snap["paused"]:
+        # Пауза нажата, но этот этап ею не останавливается — так и говорим,
+        # а живость оцениваем как обычно: подготовка идёт и может встать.
+        nxt = "поиск по доркам" if snap["kind"] == "parser" else "проверка адресов"
+        parts.append("пауза включится, когда начнётся %s: этот этап "
+                     "приостановить нельзя, он доделывается" % nxt)
 
     age = snap["lastEventAge"]
     quiet = STAGES.get(stage, ("", "", 60, False))[2]
@@ -495,9 +660,13 @@ def describe(snap):
 
     silence = age if age is not None else (snap["stageElapsed"] or 0.0)
     if network and inflight:
-        slow_at, stall_at = NET_SLOW, NET_STALL
+        longest = snap.get("netLongest") or 0.0
+        # Зависание — только то, что дольше самой долгой законной проверки
+        # с запасом минуту: при большом таймауте один адрес молчит минутами.
+        slow_at, stall_at = NET_SLOW, max(NET_STALL, longest + 60.0)
         why_slow = ("ответов нет %s — серверы отвечают медленно; одна проверка "
-                    "может идти до 3 мин" % fmt_duration(silence))
+                    "может идти до %s" % (fmt_duration(silence),
+                                          fmt_duration(longest) if longest else "3 мин"))
     elif network:
         # Сетевой этап, а занятых потоков нет: это не «сервер медлит», а
         # «никто ничего не ждёт» — так и говорим.
@@ -532,8 +701,10 @@ def payload(snap):
     out = dict(snap)
     out.update(describe(snap))
     out["stageLabel"] = STAGES.get(snap["stage"], (snap["stage"] or "",))[0]
-    trail = [{"label": STAGES.get(k, (k, k))[1], "seconds": round(s, 1), "active": False}
-             for k, s in snap["trail"] if k not in _SILENT]
+    # cut — этап оборван «Стопом» или ошибкой: окно рисует его «✗», а не «✓».
+    trail = [{"label": STAGES.get(k, (k, k))[1], "seconds": round(s, 1), "active": False,
+              "cut": bool(c)}
+             for k, s, c in snap["trail"] if k not in _SILENT]
     if snap["stage"] and snap["stage"] not in _SILENT and snap["state"] == "running":
         trail.append({"label": STAGES.get(snap["stage"], (snap["stage"], snap["stage"]))[1],
                       "seconds": round(snap["stageElapsed"] or 0.0, 1), "active": True})

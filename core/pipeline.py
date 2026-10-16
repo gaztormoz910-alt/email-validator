@@ -299,7 +299,12 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         # Признак уже взведён в start(), синхронно. Здесь он подтверждается на
         # случай прямого вызова run_pipeline в обход start (так делают тесты).
         self.is_running = True
-        self.is_paused = False
+        # Паузу здесь НЕ сбрасываем. Её уже сбросил start(), а нажатая во
+        # время подготовки (перебор прокси, прогрев модели) должна вступить в
+        # силу с первого адреса. Раньше здесь стояло is_paused = False: пауза,
+        # нажатая на подготовке, молча терялась, окно продолжало показывать
+        # «на паузе», а следующее нажатие («Продолжить») ставило паузу уже
+        # по-настоящему — кнопка работала наоборот.
         with self._emitted_lock:
             self._emitted = 0
         
@@ -770,6 +775,19 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
 
         def feeder_thread():
             nonlocal duplicates_skipped, queued_count, already_done
+            # Всё пропущенное без проверки — для журнала активности. На
+            # продолжении прогона фидер минутами проматывает проверенное, не
+            # вызывая ни одного колбэка; без этого счётчика полоса через
+            # минуту писала «медленно», через три — «похоже на зависание».
+            пропущено = 0
+
+            def отметить_пропуск():
+                nonlocal пропущено
+                пропущено += 1
+                # Раз в 500 строк: при ~11 тыс. строк/с это десятки раз в
+                # секунду — достаточно, чтобы промотка была видна, и дёшево.
+                if пропущено % 500 == 0:
+                    self.activity.skipped(пропущено)
             from core.streamer import StreamLoader
             # Решения, принятые загрузчиком по форме файла, объявляются в
             # лог. Единственное такое решение сегодня — отбраковка колонки,
@@ -790,6 +808,7 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                     email = self.cleaner.clean_email(email)
 
                 if not email:
+                    отметить_пропуск()
                     continue
 
                 if isinstance(data, dict) and loaded_as != email:
@@ -801,11 +820,13 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                 dedup_key = normalize_for_dedup(email)
                 if not state.add_if_new(dedup_key):
                     duplicates_skipped += 1
+                    отметить_пропуск()
                     continue
 
                 # Продолжение прерванного прогона: адрес с вердиктом пропускаем
                 if resume and state.is_done(dedup_key):
                     already_done += 1
+                    отметить_пропуск()
                     continue
 
                 queued_count += 1
@@ -823,6 +844,10 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
             # не перезапишет наше число своим, менее точным.
             feeder_finished = True
             total_emails = queued_count
+            # Журналу активности — тот же окончательный знаменатель: оценка
+            # «осталось» теперь считается от того, что ушло в проверку.
+            self.activity.skipped(пропущено)
+            self.activity.retotal(queued_count)
             if 'on_unique_count' in self.callbacks:
                 self.callbacks['on_unique_count'](queued_count)
 
@@ -910,6 +935,11 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                     nonlocal retry_count, processed_count
                     (email, data, is_role, _due,
                      first_proxy, _reason, same_exit, attempts) = entry
+                    # Пауза действует и здесь, как в основном проходе. Раньше
+                    # перепроверка её не замечала: полоса писала «на паузе,
+                    # новых проверок нет», а адреса проверялись дальше.
+                    while self.is_paused and self.is_running:
+                        time.sleep(0.5)
                     if not self.is_running:
                         return
 
@@ -1006,6 +1036,10 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                         index = 0
                         announced = False
                         while index < total_pending and self.is_running:
+                            if self.is_paused:
+                                # На паузе новые адреса в пул не отправляются.
+                                time.sleep(0.25)
+                                continue
                             now = time.monotonic()
                             # Всё, что уже созрело, отправляем в пул немедленно
                             launched = 0
@@ -1281,6 +1315,11 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         # адресов вышло 156 строк, а счётчики удвоились ровно вдвое.
         self.is_running = True
         self.is_paused = False
+        # Поток прошлого прогона забываем ДО begin(): иначе между begin() и
+        # заменой окно видело «прогон идёт, а поток мёртв» и мигало
+        # «Движок остановился». Пока нового потока нет, живость неизвестна
+        # (None), и это честно.
+        self.__dict__["_worker"] = None
         # Отсчёт прогона — синхронно с признаком: окно с первого же тика
         # показывает «Запуск», а не «Не запущено».
         self.activity.begin()
@@ -1308,8 +1347,10 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                     self.callbacks['on_complete']()
 
         t = threading.Thread(target=worker, daemon=True)
-        self.__dict__["_worker"] = t
         t.start()
+        # Присваивается ПОСЛЕ start(): до него is_alive() у потока False, и
+        # снимок в этот миг объявил бы движок мёртвым.
+        self.__dict__["_worker"] = t
         self._start_pulse()
         return t
         
@@ -1321,7 +1362,11 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         # Остановка снимает и паузу: иначе остановленный на паузе прогон
         # остаётся «на паузе» навсегда, и следующий запуск стартует замершим.
         self.is_paused = False
-        
+        self.activity.set_paused(False)
+
     def pause(self):
         self.is_paused = not self.is_paused
+        # Пауза и возобновление — события для журнала активности: молчание
+        # на паузе не должно после «Продолжить» читаться как зависание.
+        self.activity.set_paused(self.is_paused)
         return self.is_paused
