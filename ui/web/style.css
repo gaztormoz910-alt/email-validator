@@ -541,6 +541,7 @@ input[type="number"], textarea {
 .live__trail { display: flex; flex-wrap: wrap; gap: 2px 6px; font-size: 11px; color: var(--text-3); }
 .live__trail:empty { display: none; }
 .live__step.is-active { color: var(--accent); font-weight: 600; }
+.live__step.is-cut { color: var(--warn); }
 .live__sep { opacity: .6; }
 .live__clock { flex: none; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 

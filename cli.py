@@ -168,22 +168,28 @@ def cmd_validate(args):
     # Строка прогресса пишется через «\r» без перевода строки. Без учёта этого
     # следующая строка журнала приклеивалась к ней хвостом: «1234/5000 (24%)[INFO] …».
     progress_open = [False]
+    # Пишут сюда сразу многие потоки: рабочие (прогресс, [DEAD]) и пульс.
+    # Без замка строка журнала всё равно ложилась хвостом к прогрессу, если
+    # другой поток печатал прогресс между проверкой флага и печатью строки.
+    print_lock = threading.Lock()
 
     def on_log(message, tag="info"):
         if not args.quiet:
-            if progress_open[0]:
-                print(file=sys.stderr)
-                progress_open[0] = False
-            # Время у каждой строки: по консоли сразу видно, свежая она или
-            # давняя, то есть идёт ли работа прямо сейчас.
-            print(time.strftime("%H:%M:%S"), message, file=sys.stderr, flush=True)
+            with print_lock:
+                if progress_open[0]:
+                    print(file=sys.stderr)
+                    progress_open[0] = False
+                # Время у каждой строки: по консоли сразу видно, свежая она
+                # или давняя, то есть идёт ли работа прямо сейчас.
+                print(time.strftime("%H:%M:%S"), message, file=sys.stderr, flush=True)
 
     def on_progress(current, total):
         if args.quiet or not total:
             return
-        print(f"\r{current}/{total} ({current * 100 // total}%)",
-              end="", file=sys.stderr, flush=True)
-        progress_open[0] = True
+        with print_lock:
+            print(f"\r{current}/{total} ({current * 100 // total}%)",
+                  end="", file=sys.stderr, flush=True)
+            progress_open[0] = True
 
     pipeline = ValidationPipeline(callbacks={
         "on_log": on_log,
@@ -220,8 +226,12 @@ def cmd_validate(args):
     except KeyboardInterrupt:
         pipeline.stop()
         print("\nПрервано. Сохраняю то, что успели проверить.", file=sys.stderr)
-    except Exception:
-        # Ошибка внутри — итог «прервано ошибкой», а не «готово».
+    except Exception as exc:
+        # Ошибка внутри — итог «прервано ошибкой», а не «готово». Причина
+        # строкой [DEAD] — ДО итога, как в окне: трассировка Python выйдет
+        # только после него, и итог «причина в журнале выше» иначе врал бы.
+        on_log("[DEAD] Проверка прервана ошибкой: %s: %s"
+               % (type(exc).__name__, exc), "dead")
         pipeline._finish_activity(failed=True)
         raise
     finally:

@@ -19,6 +19,10 @@ __all__ = ["ParserMixin"]
 
 
 class ParserMixin:
+    # Запуск сбора и «Стоп» во время запуска. Отдельный замок, а не self._lock:
+    # под ним стартует поток сбора, а тот сразу пишет в журнал через self._lock.
+    _PARSER_LAUNCH_LOCK = threading.Lock()
+
     def _parser_log(self, message, tag="info"):
         # «t» — время рождения строки: окно ставит его перед текстом.
         line = {"text": str(message), "tag": tag, "t": time.time()}
@@ -50,7 +54,9 @@ class ParserMixin:
             self._parser_rows.append((str(email), str(dork or "")))
     def _parser_complete_cb(self, aborted=False):
         self._parser_state = "done"
-        self._parser_log("[Система] Сбор адресов завершён." if not aborted
+        failed = getattr(self.parser, "failed_reason", "") if self.parser is not None else ""
+        self._parser_log("[Система] Сбор адресов прерван ошибкой." if failed
+                         else "[Система] Сбор адресов завершён." if not aborted
                          else "[Система] Сбор адресов остановлен.", "info")
         self._finish_parser_activity(aborted)
     def parser_start(self, payload):
@@ -64,6 +70,15 @@ class ParserMixin:
             return {"ok": False, "error": "Неизвестный поисковик"}
         threads = self._number(payload, "threads", 20, 1, 500)
         timeout = self._number(payload, "timeout", 15, 1, 120)
+
+        # «Запускается» — от нажатия до старта потока сбора (чтение прокси,
+        # создание конвейера). Второе нажатие в это время пропустила бы
+        # проверка выше: self.parser ещё прошлый, мёртвый.
+        with self._PARSER_LAUNCH_LOCK:
+            if self.__dict__.get("_parser_launching"):
+                return {"ok": False, "error": "Сбор уже запускается"}
+            self.__dict__["_parser_launching"] = True
+            self.__dict__["_parser_cancel"] = False
 
         with self._lock:
             self._parser_rows = []
@@ -108,12 +123,26 @@ class ParserMixin:
                     engine_name=engine,
                     activity=self.parser_activity,
                 )
-                self.parser = pipeline
-                pipeline.start()
+                # Под замком: «Стоп», нажатый во время запуска, либо отменит
+                # старт, либо увидит уже живой поток — третьего не дано.
+                with self._PARSER_LAUNCH_LOCK:
+                    cancelled = bool(self.__dict__.get("_parser_cancel"))
+                    if not cancelled:
+                        self.parser = pipeline
+                        pipeline.start()
+                    self.__dict__["_parser_launching"] = False
+                if cancelled:
+                    # Раньше «Стоп» в эти секунды не делал ничего: сбор
+                    # стартовал следом, как будто кнопку не нажимали.
+                    self._parser_state = "done"
+                    self._parser_log("[Система] Сбор остановлен до начала работы.", "info")
+                    self.parser_activity.finish("stopped")
+                    return
                 self._start_parser_pulse(pipeline)
             except Exception as exc:
                 # Молча упавший поток выглядел бы как «нажал и ничего»:
                 # состояние осталось бы running навсегда.
+                self.__dict__["_parser_launching"] = False
                 self._parser_state = "done"
                 self._parser_log("[Ошибка] Сбор не запустился: %s" % exc, "dead")
                 self.parser_activity.finish("failed")
@@ -134,8 +163,16 @@ class ParserMixin:
             self._parser_log("[Система] Сбор приостановлен.", "info")
         return {"state": self._parser_state}
     def parser_stop(self, payload=None):
+        with self._PARSER_LAUNCH_LOCK:
+            launching = bool(self.__dict__.get("_parser_launching"))
+            if launching:
+                # Поток сбора ещё не создан — отменяем его старт (см. launch).
+                self.__dict__["_parser_cancel"] = True
         pipeline = self.parser
-        if pipeline is not None and pipeline.is_alive():
+        if launching:
+            self.parser_activity.request_stop()
+            self._parser_log("[Система] Остановка сбора.", "info")
+        elif pipeline is not None and pipeline.is_alive():
             pipeline.stop()
             self.parser_activity.request_stop()
             self._parser_log("[Система] Остановка сбора.", "info")

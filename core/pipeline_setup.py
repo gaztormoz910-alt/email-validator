@@ -17,6 +17,7 @@ from core.cache import ResultCache
 from core.filters import SpamFilter
 from core.github_parser import BlacklistDownloader
 from core.network import NetworkValidator
+from core.activity import net_budget
 from core.ai_engine import EmailAI
 from core.provider import extend_free_domains
 from core.paths import data_path
@@ -496,6 +497,10 @@ class PipelineSetupMixin:
         # Прокси не задавали — сеть ещё не создана, создаём здесь.
         if self.network is None:
             self.network = NetworkValidator(timeout=timeout, proxies=proxies)
+        # Сколько может законно идти одна проверка при этом таймауте: по нему
+        # журнал активности отличает долгую проверку от зависания.
+        self.activity.set_net_budget(net_budget(
+            timeout, getattr(self.network, "address_deadline", 180)))
 
 
         # Spamhaus ZEN — крупнейший чёрный список, и до сих пор он молчал.
