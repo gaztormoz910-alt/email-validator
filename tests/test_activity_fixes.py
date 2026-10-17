@@ -1238,3 +1238,148 @@ def test_duckduckgo_link_walk_stops_on_stop(monkeypatch):
                                      is_stopped=lambda: заходов["n"] >= 1)
     list(движок.search_generator("site:example.com"))
     assert заходов["n"] == 1, заходов
+
+
+# ══════════════════════════════ пятая рецензия (18.10.2026)
+
+def test_profiles_cut_by_stop_give_no_verdict_on_the_pool(monkeypatch):
+    import core.network as сеть
+    p, строки, _р = _конвейер()
+    p.network = type("N", (), {"recall_proxy_profiles": lambda self, live: {}})()
+    сводки = []
+    p.callbacks["on_proxy_profile"] = lambda s: сводки.append(s)
+
+    def профили(fresh, **kw):
+        p.stop()
+        return {fresh[0]: {"has_ptr": False, "in_dnsbl": False, "exit_ip": "1.2.3.4",
+                           "latency_ms": 10}}
+    monkeypatch.setattr(сеть, "profile_proxies", профили)
+    p._profile_live_proxies(["a:1", "b:1", "c:1"], 5, 2)
+    тексты = [т for _тег, т in строки]
+    assert any("Профилирование прервано «Стопом»: снято 1 из 3" in т for т in тексты), тексты
+    assert not any(т.startswith("[DEAD]") for т in тексты), тексты
+    assert сводки == [], "в окно ушла сводка по части пула"
+
+
+def test_feeder_error_before_retry_blames_the_check(monkeypatch):
+    import core.pipeline as модуль
+    from core.streamer import StreamLoader
+    monkeypatch.setattr(модуль, "DEFAULT_RETRY_DELAY", 0.0)
+
+    def обрыв(self):
+        yield "h0@example.com", {}
+        raise OSError("диск отвалился")
+    monkeypatch.setattr(StreamLoader, "stream_emails", обрыв)
+    p, строки, результаты = _конвейер()
+    p.network = _СетьСоСбоем()                   # h0 уходит на перепроверку
+    p.run_pipeline([{"type": "text", "content": "x@example.com"}], threads=1,
+                   fix_typos=True, check_spam=False, deep_ping=True, enable_ai=False)
+    этапы = [т for тег, т in строки if тег == "stage"]
+    assert any(т.startswith("✗ Проверка адресов — оборвано ошибкой") for т in этапы), этапы
+    assert any(т.startswith("✓ Перепроверка отложенных адресов") for т in этапы), этапы
+    assert any(т.startswith("✓ Подведение итогов") for т in этапы), этапы
+    assert [e for e, _s in результаты] == ["h0@example.com"]
+
+
+def test_stage_where_the_run_got_blocked_gets_a_cross():
+    m, часы, строки = монитор(kind="parser")
+    m.stage("p_tor")
+    часы.прошло(90)
+    m.finish("blocked", "Tor не поднялся")
+    тексты = [т for _тег, т in строки]
+    assert "✗ Запуск Tor — дальше не пройти, через 1 мин 30 с" in тексты, тексты
+    assert payload(m.snapshot())["trail"][-1]["cut"] is True
+
+
+def test_tor_stop_is_heard_while_tor_is_silent(monkeypatch, tmp_path):
+    import core.tor_manager as тор
+    отпусти = threading.Event()
+
+    class _Молчит:
+        def __iter__(self):
+            отпусти.wait(30)                     # tor не пишет ни строки
+            return iter(())
+
+    class _Процесс:
+        pid = 0
+        stdout = _Молчит()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(тор.subprocess, "Popen", lambda *a, **kw: _Процесс())
+    узел = тор.TorInstance(0, tmp_path, tmp_path / "tor.exe", lambda *a, **k: None)
+    погашен = []
+    узел.stop = lambda: погашен.append(1)
+    стоп = threading.Event()
+    итог = []
+    поток = threading.Thread(target=lambda: итог.append(узел.start(should_stop=стоп.is_set)),
+                             daemon=True)
+    try:
+        поток.start()
+        time.sleep(0.3)
+        стоп.set()
+        поток.join(5)
+        assert not поток.is_alive(), "«Стоп» не услышан, пока tor молчит"
+        assert итог == [False] and погашен == [1]
+    finally:
+        отпусти.set()
+
+
+def test_cli_ctrl_c_while_writing_does_not_cut_the_file(monkeypatch, tmp_path, capsys):
+    import _thread
+    from core import baseops
+    from core.pipeline import ValidationPipeline
+    исходная = baseops.write_chunks_stream
+
+    def запись(*a, **kw):
+        _thread.interrupt_main()                 # Ctrl+C посреди записи
+        time.sleep(0.3)
+        return исходная(*a, **kw)
+    monkeypatch.setattr(baseops, "write_chunks_stream", запись)
+
+    class _Готово(ValidationPipeline):
+        def setup(self, **kw):
+            pass
+
+        def run_pipeline(self, sources, **kw):
+            self._stage("check")
+            self.callbacks["on_result"]("w@example.com", "Valid", "250 OK", "mx", {})
+            self._finish_activity()
+            self.callbacks["on_complete"]()
+
+    код = _cli(monkeypatch, tmp_path, _Готово)
+    assert код == 0
+    assert "w@example.com" in (tmp_path / "out.csv").read_text(encoding="utf-8-sig")
+
+
+def test_after_second_ctrl_c_late_results_cannot_be_marked_done(monkeypatch, tmp_path):
+    """После второго Ctrl+C замок результатов держится до выхода: проверка,
+    закончившаяся во время записи, не выдаётся — значит, и не помечается
+    сделанной (отметка идёт только после выдачи)."""
+    import _thread
+    import cli
+    from core.pipeline import ValidationPipeline
+    отпусти = threading.Event()
+    поздний = threading.Event()
+    monkeypatch.setattr(cli, "_выйти_сразу", lambda код: None)
+
+    class _Поздний(ValidationPipeline):
+        def setup(self, **kw):
+            pass
+
+        def run_pipeline(self, sources, **kw):
+            self.is_running = True
+            self._stage("check")
+            threading.Timer(0.3, _thread.interrupt_main).start()
+            threading.Timer(1.0, _thread.interrupt_main).start()
+            отпусти.wait(30)
+            self.callbacks["on_result"]("late@example.com", "Valid", "250 OK", "mx", {})
+            поздний.set()
+
+    try:
+        _cli(monkeypatch, tmp_path, _Поздний)
+    finally:
+        отпусти.set()
+    assert not поздний.wait(0.5), "поток прогона выдал результат после снимка"
+    assert "late@example.com" not in (tmp_path / "out.csv").read_text(encoding="utf-8-sig")

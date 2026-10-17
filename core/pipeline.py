@@ -916,6 +916,17 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                             if not self.is_running:
                                 break
 
+        def после_проверки():
+            """Чем закрыть проверку при переходе к следующему этапу.
+
+            Оборванное чтение базы обрывает ПРОВЕРКУ: «✗» ей, а не
+            перепроверке или итогам, которые отрабатывают целиком. Следующим
+            этапом бывает и перепроверка, и сразу итоги — поэтому решает то,
+            какой этап закрывается сейчас (рецензия 17.10.2026, пятая)."""
+            if feeder_error and self.activity.stage_key == "check":
+                return "failed"
+            return None
+
         self._stage("check")
         t_feeder = threading.Thread(target=feeder_thread, daemon=True)
         t_feeder.start()
@@ -979,7 +990,7 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         # была, но её надо было заметить.
         self._phase("retry", greylisted_count)
         if greylisted_count > 0 and self.is_running and deep_ping:
-            self._stage("retry")
+            self._stage("retry", cut=после_проверки())
 
             if self.is_running:
                 retry_count = 0
@@ -1183,7 +1194,7 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         self._phase("", 0)
         # Оборванное чтение базы обрывает ПРОВЕРКУ: «✗» ей, а не итогам,
         # которые после этого отрабатывают целиком.
-        self._stage("finish", cut="failed" if feeder_error else None)
+        self._stage("finish", cut=после_проверки())
 
         # Страховка: всё, что осталось в очереди — не перепроверено (нажали «Стоп»,
         # выключен deep_ping, или прогон прервался). Раньше такие адреса молча
