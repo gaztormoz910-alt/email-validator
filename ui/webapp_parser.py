@@ -130,22 +130,27 @@ class ParserMixin:
                     if not cancelled:
                         self.parser = pipeline
                         pipeline.start()
-                    self.__dict__["_parser_launching"] = False
+                        self.__dict__["_parser_launching"] = False
                 if cancelled:
                     # Раньше «Стоп» в эти секунды не делал ничего: сбор
                     # стартовал следом, как будто кнопку не нажимали.
+                    # Итог — ДО снятия флага «запускается»: иначе в
+                    # промежутке полоса спросила бы живость у прошлого,
+                    # мёртвого сбора и мигнула «Движок остановился».
                     self._parser_state = "done"
                     self._parser_log("[Система] Сбор остановлен до начала работы.", "info")
                     self.parser_activity.finish("stopped")
+                    self.__dict__["_parser_launching"] = False
                     return
                 self._start_parser_pulse(pipeline)
             except Exception as exc:
                 # Молча упавший поток выглядел бы как «нажал и ничего»:
-                # состояние осталось бы running навсегда.
-                self.__dict__["_parser_launching"] = False
+                # состояние осталось бы running навсегда. Итог — до снятия
+                # флага, по той же причине, что и выше.
                 self._parser_state = "done"
                 self._parser_log("[Ошибка] Сбор не запустился: %s" % exc, "dead")
                 self.parser_activity.finish("failed")
+                self.__dict__["_parser_launching"] = False
 
         threading.Thread(target=launch, daemon=True).start()
         return {"ok": True}

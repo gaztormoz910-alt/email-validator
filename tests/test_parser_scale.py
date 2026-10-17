@@ -117,7 +117,12 @@ class TestDorkCountingIsCheap(unittest.TestCase):
 
     def test_estimate_is_used_first(self):
         import inspect
-        source = inspect.getsource(ParserPipeline.run)
+        # Тело сбора живёт в _run(): run() оборачивает его, чтобы любое
+        # исключение давало итог и on_complete (17.10.2026). Читается путь
+        # целиком — и что run() правда идёт в _run(), а не мимо.
+        run_source = inspect.getsource(ParserPipeline.run)
+        self.assertIn("self._run()", run_source, "run() больше не ведёт в тело сбора")
+        source = run_source + inspect.getsource(ParserPipeline._run)
         self.assertIn("estimate_total_lines", source,
                       "парсер считает все дорки до начала работы")
         self.assertIn("count_total_lines", source,

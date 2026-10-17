@@ -61,6 +61,15 @@ class ParserPipeline(threading.Thread):
             from core.activity import ActivityMonitor
             activity = ActivityMonitor(kind="parser")
         self.activity = activity
+        # Порог зависания у сбора — от таймаута: поисковик повторяет
+        # запрос через другой прокси молча, без строки в журнале, и при
+        # таймауте 120 с два таймаута подряд у одного потока давали ложное
+        # «Похоже на зависание» (рецензия 17.10.2026). Три таймаута — запас
+        # на повторы; дольше без единого ответа — это уже не «медленно».
+        try:
+            activity.set_net_budget(3.0 * float(timeout))
+        except (TypeError, ValueError):
+            pass
         self.dork_sources = dork_sources
         self.proxies = proxies
         self.max_threads = max_threads
@@ -159,6 +168,22 @@ class ParserPipeline(threading.Thread):
             if not self._put(None):
                 break
 
+    def _stopped_before_search(self):
+        """«Стоп» нажат на подготовке — дальше не идём.
+
+        Раньше до начала поиска остановка не проверялась вовсе: после «Стопа»
+        загружалась модель, поднимался Tor или перебирался весь пул прокси,
+        открывался «Поиск по доркам» и запускались потоки, а окно всё это
+        время писало «Останавливаю» и не давало начать новый сбор."""
+        if not self._stop_event.is_set():
+            return False
+        self.log("[Система] Сбор остановлен до начала поиска.")
+        tor = getattr(self, "tor_manager", None)
+        if tor is not None:
+            tor.stop()
+        self._complete(aborted=True)
+        return True
+
     def _complete(self, aborted):
         """on_complete ровно один раз, как бы ни закончился сбор."""
         if self._completed:
@@ -236,7 +261,9 @@ class ParserPipeline(threading.Thread):
         self.ml_predictor = MLPredictor()
         if self.name_extractor is None:
             self.name_extractor = NameExtractor(enable_osint=self.enable_osint)
-        
+        if self._stopped_before_search():
+            return
+
         from core.streamer import StreamLoader
         # Сначала ОЦЕНКА по размеру файла — она мгновенна и даёт знаменатель
         # прогресса сразу. Точный счёт уточняет её следом: на списке в 712 МБ
@@ -278,9 +305,13 @@ class ParserPipeline(threading.Thread):
             import math
             num_tor_instances = max(1, min(10, math.ceil(self.max_threads / 50)))
             
+            if self._stopped_before_search():
+                return
             if not self.tor_manager.start(num_instances=num_tor_instances):
                 self.log("[Ошибка] Не удалось запустить Tor. Парсинг невозможен.")
                 self._complete(aborted=True)
+                return
+            if self._stopped_before_search():
                 return
         else:
             # 1. Ping proxies
@@ -295,8 +326,14 @@ class ParserPipeline(threading.Thread):
                     if checked % max(1, (total // 10)) == 0 or checked == total:
                         self.log(f"[Система] Проверка прокси: {checked}/{total} (Живых: {live})")
                         
-                self.proxy_manager.check_all_proxies(max_workers=self.max_threads, progress_callback=_proxy_progress)
-                
+                # «Стоп» прерывает и перебор: раньше он шёл до конца пула —
+                # на десятках тысяч прокси это часы «Останавливаю».
+                self.proxy_manager.check_all_proxies(
+                    max_workers=self.max_threads, progress_callback=_proxy_progress,
+                    should_stop=self._stop_event.is_set)
+                if self._stopped_before_search():
+                    return
+
                 live = self.proxy_manager.get_live_count()
                 self.log(f"[Система] Рабочих прокси: {live} из {len(self.proxies)}")
                 if live == 0:
@@ -306,6 +343,8 @@ class ParserPipeline(threading.Thread):
             else:
                 self.log("[Предупреждение] Прокси не загружены. Парсинг пойдет через прямой IP!")
 
+        if self._stopped_before_search():
+            return
         # Initialize UI stats to 0
         self._update_stats()
 
@@ -351,7 +390,12 @@ class ParserPipeline(threading.Thread):
             while not self._stop_event.is_set():
                 while self._pause_event.is_set() and not self._stop_event.is_set():
                     time.sleep(0.5)
-                    
+                # Вышли из паузы по «Стопу» — новый дорк не берём. Раньше
+                # каждый поток, стоявший на паузе, после «Стопа» начинал
+                # ещё один сетевой поиск (рецензия 17.10.2026).
+                if self._stop_event.is_set():
+                    break
+
                 try:
                     item = self.dork_queue.get(timeout=0.5)
                 except queue.Empty:

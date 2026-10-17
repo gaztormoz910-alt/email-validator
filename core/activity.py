@@ -34,7 +34,7 @@ from contextlib import contextmanager
 
 __all__ = ["ActivityMonitor", "describe", "payload", "pulse_line", "Pulse",
            "observe_callbacks", "PipelineActivityMixin", "fmt_duration",
-           "fmt_number", "net_budget", "STAGES", "PAUSABLE"]
+           "fmt_number", "net_budget", "STAGES", "PAUSABLE", "INTERRUPTIBLE"]
 
 # ─────────────────────────────── этапы ─────────────────────────────────
 #
@@ -77,6 +77,12 @@ _SILENT = {"start"}
 # Говорить там «на паузе, новых проверок нет» было бы неправдой — проверка
 # прокси при этом идёт полным ходом.
 PAUSABLE = {"check", "retry", "p_search"}
+
+# Этапы, которые «Стоп» действительно обрывает: бросают недоделанное и уходят.
+# Остальные (списки, фильтры, профили, прогрев ИИ, Tor) доводятся до конца и
+# после «Стопа» — пометить их «✗ остановлено» значило бы соврать, что они
+# прерваны, хотя они прошли целиком (рецензия 17.10.2026).
+INTERRUPTIBLE = PAUSABLE | {"proxies", "p_proxies"}
 
 # Сетевой этап с занятыми потоками может молчать дольше: пока идёт проверка
 # адреса, сеть не сообщает о себе ни разу, и долгое молчание — это медленный
@@ -193,6 +199,7 @@ class ActivityMonitor:
         self.skip_in_total = True
         self._pinned_total = None
         self.paused = False
+        self._pause_started = None
         # [(ключ, длительность в секундах, прерван ли этап)]
         self.trail = []
         self._samples = deque(maxlen=240)
@@ -225,8 +232,10 @@ class ActivityMonitor:
             if self.stage_key == key:
                 return
             # Переход этапа после «Стоп» — это не «этап пройден», а «этап
-            # оборван»: конвейер проскакивает к итогам, бросив проверку.
-            lines.extend(self._close_stage(now, "stopped" if self.stopping else ""))
+            # оборван»: конвейер проскакивает к итогам, бросив проверку. Но
+            # только у этапов, которые «Стоп» и правда обрывает.
+            cut = "stopped" if self.stopping and self.stage_key in INTERRUPTIBLE else ""
+            lines.extend(self._close_stage(now, cut))
             self.stage_key = key
             self.stage_started = now
             self.last_event = now
@@ -236,8 +245,13 @@ class ActivityMonitor:
                 lines.append(("▶ %s" % STAGES.get(key, (key,))[0], "stage"))
         self._emit(lines)
 
-    def finish(self, outcome="done", note=""):
-        """Конец прогона. Последний этап закрывается, пишется итог."""
+    def finish(self, outcome="done", note="", interrupted=False):
+        """Конец прогона. Последний этап закрывается, пишется итог.
+
+        interrupted — этап оборван посреди работы, какой бы он ни был: так
+        бывает в CLI, где Ctrl+C выбрасывает исключение прямо из этапа
+        (в окне «Стоп» лишь просит конвейер остановиться, и подготовка и
+        итоги доделываются)."""
         lines = []
         with self._lock:
             if self.state in _FINAL:
@@ -248,13 +262,13 @@ class ActivityMonitor:
                 self.outcome_note = note
                 return
             now = self._clock()
-            # Ошибка обрывает тот этап, на котором случилась. «Стоп» — тоже,
-            # кроме итогов: их конвейер доводит до конца и после остановки
-            # (отдаёт неперепроверенные адреса как Unknown, сверяет счёт).
+            # Ошибка обрывает тот этап, на котором случилась. «Стоп» — только
+            # те, что на него реагируют (INTERRUPTIBLE); подготовку и итоги
+            # конвейер доводит до конца и после остановки.
             cut = ""
             if outcome == "failed":
                 cut = "failed"
-            elif outcome == "stopped" and self.stage_key != "finish":
+            elif interrupted or (outcome == "stopped" and self.stage_key in INTERRUPTIBLE):
                 cut = "stopped"
             lines.extend(self._close_stage(now, cut))
             self.state = outcome if outcome in _FINAL else "done"
@@ -389,18 +403,33 @@ class ActivityMonitor:
             self.skip_in_total = False
 
     def set_paused(self, paused):
-        """Пауза включена или снята. И то и другое — событие.
+        """Пауза включена или снята.
 
-        Молчание на паузе — не молчание движка: без этого после пяти минут
-        паузы «Продолжить» сразу давало «Похоже на зависание», потому что
-        последнее событие было пять минут назад, ДО паузы."""
+        Время, которое пауза ДЕРЖАЛА работу, из тишины вычитается: без этого
+        после пяти минут паузы «Продолжить» сразу давало «Похоже на
+        зависание» — последнее событие было пять минут назад, до паузы."""
         with self._lock:
             self._note_paused(bool(paused), self._clock())
 
     def _note_paused(self, paused, now):
-        if paused != self.paused:
-            self.paused = paused
-            self.last_event = now
+        """Вычитание, а не сброс. Сброс (тишина = 0 при любом нажатии) прятал
+        настоящее зависание: застрявший этап после «Пауза»/«Продолжить»
+        показывался «Работает · последнее событие только что» (рецензия
+        17.10.2026). Вычитается только пауза на этапе, который она
+        действительно останавливает: на подготовке работа идёт и на паузе,
+        и её тишина — тишина движка, а не кнопки."""
+        if paused == self.paused:
+            return
+        self.paused = paused
+        if paused:
+            self._pause_started = now
+            return
+        started, self._pause_started = self._pause_started, None
+        if started is None or self.last_event is None or self.stage_key not in PAUSABLE:
+            return
+        # Тишина до паузы сохраняется, время самой паузы — нет.
+        held_from = max(started, self.last_event)
+        self.last_event += max(0.0, now - held_from)
 
     def set_net_budget(self, seconds):
         """Сколько может законно идти одна проверка адреса (см. net_budget)."""
@@ -639,7 +668,11 @@ def describe(snap):
         return {"level": "paused", "title": "На паузе",
                 "detail": " · ".join(parts + [
                     "новых проверок нет, пока не нажмёте «Продолжить»"])}
-    if snap["paused"]:
+    if snap["paused"] and stage == "finish":
+        # Итоги идут ПОСЛЕ проверки: обещать «включится с проверки адресов»
+        # здесь — обещать то, чего не будет.
+        parts.append("пауза уже не действует: проверка закончена, подводятся итоги")
+    elif snap["paused"]:
         # Пауза нажата, но этот этап ею не останавливается — так и говорим,
         # а живость оцениваем как обычно: подготовка идёт и может встать.
         nxt = "поиск по доркам" if snap["kind"] == "parser" else "проверка адресов"
@@ -664,9 +697,14 @@ def describe(snap):
         # Зависание — только то, что дольше самой долгой законной проверки
         # с запасом минуту: при большом таймауте один адрес молчит минутами.
         slow_at, stall_at = NET_SLOW, max(NET_STALL, longest + 60.0)
-        why_slow = ("ответов нет %s — серверы отвечают медленно; одна проверка "
-                    "может идти до %s" % (fmt_duration(silence),
-                                          fmt_duration(longest) if longest else "3 мин"))
+        limit = fmt_duration(longest) if longest else "3 мин"
+        if snap["kind"] == "parser":
+            why_slow = ("ответов нет %s — поисковик или прокси отвечают медленно; "
+                        "один запрос с повторами может идти до %s"
+                        % (fmt_duration(silence), limit))
+        else:
+            why_slow = ("ответов нет %s — серверы отвечают медленно; одна проверка "
+                        "может идти до %s" % (fmt_duration(silence), limit))
     elif network:
         # Сетевой этап, а занятых потоков нет: это не «сервер медлит», а
         # «никто ничего не ждёт» — так и говорим.
@@ -896,7 +934,7 @@ class PipelineActivityMixin:
         t = self.__dict__.get("_worker")
         return t.is_alive() if t is not None else None
 
-    def _finish_activity(self, failed=False):
+    def _finish_activity(self, failed=False, interrupted=False):
         """Итог прогона — по тому, ЧТО его закончило, одним местом.
 
         Порядок важен: блокировка (порт 25 закрыт, ни один прокси не ожил)
@@ -912,7 +950,7 @@ class PipelineActivityMixin:
             outcome, note = "stopped", ""
         else:
             outcome, note = "done", ""
-        self.activity.finish(outcome, note)
+        self.activity.finish(outcome, note, interrupted=interrupted)
         pulse = self.__dict__.get("_pulse")
         if pulse is not None:
             pulse.stop()

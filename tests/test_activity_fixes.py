@@ -462,8 +462,35 @@ def test_cli_failure_names_the_cause_above_the_summary(monkeypatch, tmp_path, ca
     assert "✗ Проверка адресов — оборвано ошибкой" in err, err
 
 
+class _МедленныйВывод:
+    """Консоль, которая пишет медленно: каждая запись отпускает поток.
+
+    Гонка «строка журнала между проверкой флага и печатью» на обычной
+    консоли редка (рецензия: 1 склейка на 9 прогонов), и тест без замедления
+    её почти не видел. Здесь окно гонки шире любого планировщика, так что
+    без замка склейка — не случайность, а правило."""
+
+    def __init__(self):
+        self.части = []
+        self._замок = threading.Lock()
+
+    def write(self, текст):
+        time.sleep(0.0005)
+        with self._замок:
+            self.части.append(текст)
+        return len(текст)
+
+    def flush(self):
+        pass
+
+    def текст(self):
+        with self._замок:
+            return "".join(self.части)
+
+
 def test_cli_lines_never_glue_to_progress_under_threads(monkeypatch, tmp_path, capsys):
     from core.pipeline import ValidationPipeline
+    консоль = _МедленныйВывод()
 
     class _Многопоточный(ValidationPipeline):
         def setup(self, **kw):
@@ -474,24 +501,300 @@ def test_cli_lines_never_glue_to_progress_under_threads(monkeypatch, tmp_path, c
             on_log, on_progress = self.callbacks["on_log"], self.callbacks["on_progress"]
 
             def прогресс():
-                for i in range(400):
-                    on_progress(i, 400)
+                for i in range(150):
+                    on_progress(i, 150)
 
             def журнал():
-                for i in range(60):
+                for i in range(40):
                     on_log("[INFO] строка %d" % i, "info")
-            потоки = [threading.Thread(target=прогресс) for _ in range(6)]
+            потоки = [threading.Thread(target=прогресс) for _ in range(4)]
             потоки += [threading.Thread(target=журнал) for _ in range(3)]
+            monkeypatch.setattr(sys, "stderr", консоль)
             for t in потоки:
                 t.start()
             for t in потоки:
                 t.join()
+            monkeypatch.setattr(sys, "stderr", sys.__stderr__)
             self.is_running = False
             self._finish_activity()
             self.callbacks["on_complete"]()
 
     assert _cli(monkeypatch, tmp_path, _Многопоточный) == 0
-    err = capsys.readouterr().err
+    err = консоль.текст()
     склейки = re.findall(r"\(\d+%\)\d\d:\d\d:\d\d", err)
     assert склейки == [], "строк журнала приклеилось к прогрессу: %d" % len(склейки)
-    assert err.count("[INFO] строка ") == 180
+    assert err.count("[INFO] строка ") == 120
+
+
+def test_proxy_checker_drops_queued_but_unstarted_after_stop():
+    """«Стоп» на переборе: набранные в очередь, но не начатые прокси не
+    проверяются — иначе «Стоп» ждал бы ещё восьми кругов таймаута."""
+    from core.async_proxy import run_async_checker
+    флаг = {"стоп": False}
+
+    def прокси():
+        for i in range(100):
+            if i == 16:          # очередь двух воркеров (16) уже набрана
+                флаг["стоп"] = True
+            yield "127.0.0.1:1"
+    _живые, проверщик = run_async_checker(
+        прокси(), workers=2, timeout=0.5, mode="http", return_checker=True,
+        should_stop=lambda: флаг["стоп"])
+    assert проверщик.checked_count == 0, проверщик.checked_count
+
+
+# ══════════════════════════════ вторая рецензия (17.10.2026)
+
+def test_pause_does_not_hide_a_hang_that_began_before_it():
+    """Пауза вычитает своё время из тишины, а не обнуляет её: зависание,
+    которое было до «Пауза»/«Продолжить», остаётся зависанием."""
+    m, часы, _ = монитор()
+    m.stage("check")
+    часы.прошло(200)                            # никто ничего не делает
+    assert уровень(m) == "stall"
+    m.set_paused(True)
+    assert уровень(m) == "paused"
+    часы.прошло(2)
+    m.set_paused(False)
+    assert уровень(m) == "stall", describe(m.snapshot())
+
+
+def test_pause_button_on_preparation_does_not_reset_silence():
+    m, часы, _ = монитор()
+    m.stage("proxies")
+    часы.прошло(400)
+    assert уровень(m) == "stall"
+    assert уровень(m, paused=True) == "stall", "нажатие «Пауза» спрятало зависание"
+    часы.прошло(5)
+    assert уровень(m, paused=False) == "stall"
+
+
+def test_pause_on_summary_does_not_promise_a_check():
+    m, _часы, _ = монитор()
+    m.stage("check")
+    m.stage("finish")
+    d = describe(m.snapshot(paused=True))
+    assert "пауза уже не действует" in d["detail"], d
+    assert "включится" not in d["detail"], d
+
+
+def test_stages_that_complete_after_stop_keep_their_check_mark():
+    """Подготовка «Стоп» не слушает и доходит до конца — она пройдена."""
+    m, часы, строки = монитор()
+    m.stage("lists")
+    m.request_stop()
+    часы.прошло(30)
+    m.stage("filters")
+    часы.прошло(2)
+    m.finish("stopped")
+    тексты = [т for _тег, т in строки]
+    assert "✓ Обновление списков одноразовых доменов — 30 с" in тексты, тексты
+    assert "✓ Загрузка фильтров спама — 2 с" in тексты, тексты
+    assert not any(т.startswith("✗") for т in тексты), тексты
+
+
+def test_parser_stall_threshold_follows_its_timeout():
+    from core.parser_pipeline import ParserPipeline
+    m, часы, _ = монитор(kind="parser")
+    ParserPipeline(dork_sources=[{"type": "text", "content": "x"}], proxies=[],
+                   max_threads=1, timeout=120, activity=m)
+    assert m.net_longest == 360
+    m.stage("p_search")
+    m.enter()
+    часы.прошло(300)
+    d = describe(m.snapshot())
+    assert d["level"] == "slow" and "поисковик" in d["detail"], d
+    часы.прошло(121)
+    assert уровень(m) == "stall"
+
+
+def test_pause_then_stop_in_retry_loses_no_address(monkeypatch):
+    import core.pipeline as модуль
+    monkeypatch.setattr(модуль, "DEFAULT_RETRY_DELAY", 0.0)
+    p, строки, результаты = _конвейер()
+    p.network = _СетьСоСбоем()
+    p.callbacks["on_phase"] = lambda имя, n=0: (p.pause() if имя == "retry"
+                                                 and not p.is_paused else None)
+    адреса = ["r%d@example.com" % i for i in range(6)]
+    поток = threading.Thread(target=p.run_pipeline, args=(
+        [{"type": "text", "content": "\n".join(адреса)}],),
+        kwargs=dict(threads=2, fix_typos=True, check_spam=False, deep_ping=True,
+                    enable_ai=False), daemon=True)
+    поток.start()
+    assert _ждать(lambda: p.activity.stage_key == "retry", 30)
+    time.sleep(1.0)
+    p.stop()
+    поток.join(60)
+    assert sorted(e for e, _s in результаты) == sorted(адреса), "адреса пропали из выдачи"
+    assert not any("ПОТЕРЯНО" in т for _тег, т in строки)
+
+
+class _МедленнаяСеть(_Net):
+    def check_email(self, email, **_kw):
+        time.sleep(0.2)
+        return super().check_email(email)
+
+
+def test_stop_mid_run_is_not_a_loss_and_frees_the_feeder():
+    p, строки, результаты = _конвейер()
+    p.network = _МедленнаяСеть()
+    до = {t.ident for t in threading.enumerate()}
+    база = "\n".join("s%d@example.com" % i for i in range(40))
+    поток = threading.Thread(target=p.run_pipeline, args=(
+        [{"type": "text", "content": база}],),
+        kwargs=dict(threads=2, fix_typos=True, check_spam=False, deep_ping=True,
+                    enable_ai=False), daemon=True)
+    поток.start()
+    assert _ждать(lambda: len(результаты) >= 3, 60)
+    p.stop()
+    поток.join(60)
+    assert not поток.is_alive()
+    тексты = [т for _тег, т in строки]
+    assert not any("ПОТЕРЯНО" in т for т in тексты), тексты
+    assert any(т.startswith("[INFO] Остановлено: показано") for т in тексты), тексты
+
+    def фидеры():
+        return [t for t in threading.enumerate()
+                if t.ident not in до and "feeder_thread" in t.name and t.is_alive()]
+    assert _ждать(lambda: not фидеры(), 5), "фидер повис на полной очереди"
+
+
+def test_stop_during_preparation_skips_the_rest(monkeypatch):
+    import core.pipeline_setup as подготовка
+    p, строки, _р = _конвейер()
+
+    class _Списки:
+        def download_all(self, log_callback=None):
+            p.stop()                            # «Стоп» нажат на этапе списков
+
+    monkeypatch.setattr(подготовка, "BlacklistDownloader", _Списки)
+    p.setup(timeout=5, enable_ai=True, proxies=["127.0.0.1:1"], threads=2,
+            use_cache=False)
+    этапы = [т for тег, т in строки if тег == "stage"]
+    assert "▶ Обновление списков одноразовых доменов" in этапы, этапы
+    assert "▶ Загрузка фильтров спама" not in этапы, этапы
+    assert "▶ Проверка прокси" not in этапы, этапы
+    assert p.activity.stage_key == "lists"
+
+
+def test_proxy_sweep_stops_on_stop():
+    from core.proxy_probe import filter_live_proxies
+    проверено = {"n": 0}
+
+    def прогресс(c, t):
+        проверено["n"] = c
+
+    def прокси():
+        for _ in range(5000):
+            yield "127.0.0.1:1"
+    начало = time.monotonic()
+    живые, увидено = filter_live_proxies(
+        прокси(), timeout=0.5, threads=4, progress_callback=прогресс,
+        should_stop=lambda: проверено["n"] >= 3)
+    assert живые == []
+    assert увидено < 200, увидено
+    assert time.monotonic() - начало < 30
+
+
+def _сбор_со_стопом(monkeypatch, где):
+    import core.parser_pipeline as модуль
+    from core.activity import ActivityMonitor
+    строки, завершено, перебор = [], [], []
+    сбор = {}
+
+    class _Модель:
+        def __init__(self, *a, **kw):
+            if где == "модель":
+                сбор["p"].stop()
+
+    class _Пусто:
+        def __init__(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr(модуль, "MLPredictor", _Модель)
+    monkeypatch.setattr(модуль, "NameExtractor", _Пусто)
+    monkeypatch.setattr(модуль, "DuckDuckGoEngine", _Поисковик)
+    mon = ActivityMonitor(kind="parser", emit=lambda т, тег: строки.append(т))
+    p = модуль.ParserPipeline(
+        dork_sources=[{"type": "text", "content": "alpha\nbeta"}],
+        proxies=["127.0.0.1:1"], max_threads=2, timeout=1,
+        on_log=lambda т, *a: строки.append(т),
+        on_complete=lambda aborted=False: завершено.append(aborted), activity=mon)
+    сбор["p"] = p
+
+    def проверка(**kw):
+        перебор.append(kw)
+        if где == "прокси":
+            p.stop()
+    p.proxy_manager.check_all_proxies = проверка
+    p.run()
+    return строки, завершено, перебор
+
+
+def test_parser_stop_while_model_loads_never_searches(monkeypatch):
+    строки, завершено, перебор = _сбор_со_стопом(monkeypatch, "модель")
+    assert завершено == [True]
+    assert перебор == [], "после «Стопа» всё равно перебирались прокси"
+    assert "▶ Поиск по доркам" not in строки, строки
+    assert any("остановлен до начала поиска" in т for т in строки), строки
+
+
+def test_parser_stop_during_proxy_check_never_searches(monkeypatch):
+    строки, завершено, перебор = _сбор_со_стопом(monkeypatch, "прокси")
+    assert завершено == [True]
+    assert callable(перебор[0].get("should_stop")), "перебору не передан «Стоп»"
+    assert "▶ Поиск по доркам" not in строки, строки
+
+
+class _ПустойПоисковик(_Поисковик):
+    def search_generator(self, query):
+        time.sleep(0.05)
+        return
+        yield
+
+
+def test_parser_pause_then_stop_takes_no_new_dork(monkeypatch):
+    p, завершено = _сбор_в_фоне(monkeypatch, "\n".join("q%d" % i for i in range(300)),
+                                поисковик=_ПустойПоисковик, потоков=3)
+    assert _ждать(lambda: p.processed_dorks > 5, 30)
+    p.pause()
+    time.sleep(0.6)                              # начатые дорки доделаны
+    было = p.processed_dorks
+    p.stop()
+    p.join(10)
+    assert not p.is_alive()
+    assert p.processed_dorks == было, "после «Стопа» взяты новые дорки"
+    assert завершено == [True]
+
+
+def test_cancelled_launch_records_the_outcome_before_releasing_the_flag(окно_сбора):
+    видно = []
+    исходный = окно_сбора.parser_activity.finish
+
+    def finish(*a, **kw):
+        видно.append(окно_сбора.__dict__.get("_parser_launching"))
+        return исходный(*a, **kw)
+    окно_сбора.parser_activity.finish = finish
+    assert окно_сбора.parser_start({})["ok"] is True
+    окно_сбора.parser_stop({})
+    _ЗапускПодКонтролем.можно.set()
+    assert _ждать(lambda: видно, 10)
+    assert видно == [True], "флаг «запускается» снят раньше итога — полоса мигнёт «dead»"
+
+
+def test_cli_ctrl_c_on_summary_marks_it_cut(monkeypatch, tmp_path, capsys):
+    from core.pipeline import ValidationPipeline
+
+    class _ПрерванНаИтогах(ValidationPipeline):
+        def setup(self, **kw):
+            pass
+
+        def run_pipeline(self, sources, **kw):
+            self._stage("check")
+            self._stage("finish")
+            raise KeyboardInterrupt
+
+    _cli(monkeypatch, tmp_path, _ПрерванНаИтогах)
+    err = capsys.readouterr().err
+    assert "✗ Подведение итогов — остановлено через" in err, err
+    assert "✓ Подведение итогов" not in err, err

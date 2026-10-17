@@ -311,7 +311,7 @@ def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None,
 
 
 def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None,
-                        log_callback=None, enough=0):
+                        log_callback=None, enough=0, should_stop=None):
     """Проверяет прокси и возвращает (живые, сколько всего увидели).
 
     Вход может быть генератором: список в миллионы строк материализовать
@@ -329,6 +329,11 @@ def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None,
     Останов ленивый: подача просто перестаёт отдавать новые адреса, а уже
     начатые проверки доводятся до конца. Резать их на полуслове незачем —
     это оборванные соединения на чужих серверах.
+
+    should_stop — «Стоп» владельца. Тот же ленивый останов, плюс уже
+    набранные в очередь, но не начатые адреса отбрасываются (см.
+    AsyncProxyChecker). Без него «Стоп» на переборе ждал конца всего файла —
+    на списке владельца до 82 минут «Останавливаю».
     """
     if not proxies or isinstance(proxies, (str, bytes)) or not hasattr(proxies, "__iter__"):
         return [], 0
@@ -355,6 +360,8 @@ def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None,
 
     def counted(source):
         for item in source:
+            if should_stop is not None and should_stop():
+                return
             if enough and live_now["n"] >= enough:
                 stopped["early"] = True
                 if log_callback:
@@ -370,7 +377,8 @@ def filter_live_proxies(proxies, timeout, threads=100, progress_callback=None,
         workers=threads,
         timeout=timeout,
         mode="smtp",
-        progress_callback=on_prog
+        progress_callback=on_prog,
+        should_stop=should_stop,
     )
 
     return live_proxies, seen["total"]
