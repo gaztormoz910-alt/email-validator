@@ -1181,7 +1181,9 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                         f"{waited:.1f}с.", "info")
 
         self._phase("", 0)
-        self._stage("finish")
+        # Оборванное чтение базы обрывает ПРОВЕРКУ: «✗» ей, а не итогам,
+        # которые после этого отрабатывают целиком.
+        self._stage("finish", cut="failed" if feeder_error else None)
 
         # Страховка: всё, что осталось в очереди — не перепроверено (нажали «Стоп»,
         # выключен deep_ping, или прогон прервался). Раньше такие адреса молча
@@ -1339,7 +1341,10 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         # до конца. Нажали «Стоп» — память цела, и продолжение работает
         # ровно так, как обещает его название.
         try:
-            if resume and not self._stop_requested:
+            # Не стирать и после обрыва чтения базы: прогон до конца не
+            # дошёл, и следующий запуск обязан продолжить, а не проверять
+            # по сети заново всё уже проверенное (рецензия 17.10.2026).
+            if resume and not self._stop_requested and not feeder_error:
                 state.clear()
         except Exception:
             pass
@@ -1388,7 +1393,7 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         self.is_running = False
         # Оборванное чтение базы — провал, а не «Готово»: проверена лишь
         # часть, и итог обязан это сказать.
-        self._finish_activity(failed=bool(feeder_error))
+        self._finish_activity(failed=bool(feeder_error), stage_done=True)
         self.callbacks['on_complete']()
 
     def start(self, email_sources, threads, timeout, fix_typos, check_spam,

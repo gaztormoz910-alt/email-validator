@@ -99,8 +99,14 @@ def test_resume_state_is_wiped_after_a_finished_run():
     окне больше нет, память не стиралась бы никогда — и второй запуск того
     же файла проверил бы НОЛЬ адресов, без единого способа это исправить.
     """
+    import re
     source = read("core/pipeline.py")
-    assert "if resume and not self._stop_requested:" in source, (
+    # «and not feeder_error» добавлено 17.10.2026: прогон, у которого
+    # оборвалось чтение базы, до конца не дошёл, и его память стирать нельзя.
+    # Что законченный прогон память стирает, проверяется и вживую —
+    # test_activity_fixes.py::test_feeder_read_error_keeps_resume_memory…
+    assert re.search(r"if resume and not self\._stop_requested(?: and not feeder_error)?:",
+                     source), (
         "память о прогоне не стирается — повторный прогон даст ноль адресов")
     assert "state.clear()" in source, "стирание не вызывается"
 

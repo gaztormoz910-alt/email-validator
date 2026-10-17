@@ -79,10 +79,11 @@ _SILENT = {"start"}
 PAUSABLE = {"check", "retry", "p_search"}
 
 # Этапы, которые «Стоп» действительно обрывает: бросают недоделанное и уходят.
-# Остальные (списки, фильтры, профили, прогрев ИИ, Tor) доводятся до конца и
-# после «Стопа» — пометить их «✗ остановлено» значило бы соврать, что они
-# прерваны, хотя они прошли целиком (рецензия 17.10.2026).
-INTERRUPTIBLE = PAUSABLE | {"proxies", "p_proxies"}
+# Остальные (списки, фильтры, прогрев ИИ, загрузка модели сбора) доводятся до
+# конца и после «Стопа» — пометить их «✗ остановлено» значило бы соврать, что
+# они прерваны, хотя они прошли целиком (рецензия 17.10.2026). Профили прокси
+# и подъём Tor «Стоп» обрывает с третьего круга исправлений.
+INTERRUPTIBLE = PAUSABLE | {"proxies", "p_proxies", "profiles", "p_tor"}
 
 # Сетевой этап с занятыми потоками может молчать дольше: пока идёт проверка
 # адреса, сеть не сообщает о себе ни разу, и долгое молчание — это медленный
@@ -216,7 +217,7 @@ class ActivityMonitor:
             self.stage_started = now
             self.last_event = now
 
-    def stage(self, key):
+    def stage(self, key, cut=None):
         """Новый этап. Пишет в журнал «✓ прошлый — за сколько» и «▶ новый».
 
         Строки уходят ВНЕ замка: emit может вернуться сюда же через beat, и
@@ -234,7 +235,10 @@ class ActivityMonitor:
             # Переход этапа после «Стоп» — это не «этап пройден», а «этап
             # оборван»: конвейер проскакивает к итогам, бросив проверку. Но
             # только у этапов, которые «Стоп» и правда обрывает.
-            cut = "stopped" if self.stopping and self.stage_key in INTERRUPTIBLE else ""
+            # cut задан явно — вызывающий знает лучше: оборванное чтение базы
+            # закрывает проверку как «оборвано ошибкой», хотя прогон идёт дальше.
+            if cut is None:
+                cut = "stopped" if self.stopping and self.stage_key in INTERRUPTIBLE else ""
             lines.extend(self._close_stage(now, cut))
             self.stage_key = key
             self.stage_started = now
@@ -245,7 +249,7 @@ class ActivityMonitor:
                 lines.append(("▶ %s" % STAGES.get(key, (key,))[0], "stage"))
         self._emit(lines)
 
-    def finish(self, outcome="done", note="", interrupted=False):
+    def finish(self, outcome="done", note="", interrupted=False, stage_done=False):
         """Конец прогона. Последний этап закрывается, пишется итог.
 
         interrupted — этап оборван посреди работы, какой бы он ни был: так
@@ -265,8 +269,13 @@ class ActivityMonitor:
             # Ошибка обрывает тот этап, на котором случилась. «Стоп» — только
             # те, что на него реагируют (INTERRUPTIBLE); подготовку и итоги
             # конвейер доводит до конца и после остановки.
+            # stage_done — текущий этап доработал до конца, даже если итог
+            # прогона «ошибка»: так кончаются итоги после обрыва чтения базы,
+            # где ошибка случилась на проверке, а не на итогах.
             cut = ""
-            if outcome == "failed":
+            if stage_done:
+                cut = ""
+            elif outcome == "failed":
                 cut = "failed"
             elif interrupted or (outcome == "stopped" and self.stage_key in INTERRUPTIBLE):
                 cut = "stopped"
@@ -427,7 +436,12 @@ class ActivityMonitor:
             # перепроверки не продлевает срок (wait() не зовётся), и после
             # «Продолжить» эта часть ожидания иначе засчиталась бы молчанием
             # — ложное «Похоже на зависание» (рецензия 17.10.2026, третья).
-            if self.wait_until is not None and self.last_event is not None:
+            # Только когда в работе никого: тогда тишина во время ожидания и
+            # не оценивается («Ждёт по плану»). Если проверка висит в работе,
+            # её молчание — настоящее, и нажатие паузы не вправе его стереть
+            # (рецензия 17.10.2026, четвёртая).
+            if (self.wait_until is not None and self.last_event is not None
+                    and self.inflight == 0):
                 self.last_event = max(self.last_event, min(now, self.wait_until))
             return
         started, self._pause_started = self._pause_started, None
@@ -935,14 +949,14 @@ class PipelineActivityMixin:
     def _init_activity(self):
         observe_callbacks(getattr(self, "callbacks", None), self.activity)
 
-    def _stage(self, key):
-        self.activity.stage(key)
+    def _stage(self, key, cut=None):
+        self.activity.stage(key, cut=cut)
 
     def _worker_alive(self):
         t = self.__dict__.get("_worker")
         return t.is_alive() if t is not None else None
 
-    def _finish_activity(self, failed=False, interrupted=False):
+    def _finish_activity(self, failed=False, interrupted=False, stage_done=False):
         """Итог прогона — по тому, ЧТО его закончило, одним местом.
 
         Порядок важен: блокировка (порт 25 закрыт, ни один прокси не ожил)
@@ -958,7 +972,7 @@ class PipelineActivityMixin:
             outcome, note = "stopped", ""
         else:
             outcome, note = "done", ""
-        self.activity.finish(outcome, note, interrupted=interrupted)
+        self.activity.finish(outcome, note, interrupted=interrupted, stage_done=stage_done)
         pulse = self.__dict__.get("_pulse")
         if pulse is not None:
             pulse.stop()

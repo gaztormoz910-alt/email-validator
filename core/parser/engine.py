@@ -326,6 +326,11 @@ class DuckDuckGoEngine:
                             self._log(f"[DDG] Стр.{pages_fetched + 1}: {len(target_urls)} ссылок → скрапинг целевых сайтов...")
                             scraped_count = 0
                             for target in target_urls:
+                                # Обход ссылок тоже слышит «Стоп»: у каждой
+                                # таймаут 12 с, и без этого поток после
+                                # «Стопа» доделывал весь список.
+                                if self._is_stopped():
+                                    return
                                 page_content = self._scrape_target_url(session, target, proxies)
                                 if page_content:
                                     scraped_count += 1

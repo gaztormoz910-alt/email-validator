@@ -190,7 +190,7 @@ def is_dirty_rdns(hostname):
 
 
 def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None,
-                    probe_outlook=True):
+                    probe_outlook=True, should_stop=None):
     """Профилирует прокси и говорит, для каких провайдеров он пригоден.
 
     За один проход выясняем всё, что определяет пригодность:
@@ -229,6 +229,10 @@ def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None,
                  "asn": None, "asn_country": "", "asn_org": "",
                  "ip_type": "unknown", "yahoo_ok": None, "icloud_ok": None}
 
+        # «Стоп»: ещё не начатый прокси не профилируем. Начатые доводятся —
+        # рвать SMTP-диалог на полуслове незачем.
+        if should_stop is not None and should_stop():
+            return proxy, None
         ok, latency, exit_ip, reason = probe_proxy_target(
             proxy, EXIT_IP_PROBE_HOST, timeout=timeout, want_exit_ip=True)
         if not exit_ip:
@@ -299,6 +303,8 @@ def profile_proxies(proxies, timeout=10, workers=30, progress_callback=None,
 
     with ThreadPoolExecutor(max_workers=min(workers, max(1, len(proxies)))) as pool:
         for proxy, info in pool.map(profile_one, proxies):
+            if info is None:
+                continue                      # отброшен «Стопом»
             result[proxy] = info
             with lock:
                 done += 1

@@ -246,8 +246,12 @@ def cmd_validate(args):
         while поток.is_alive():
             поток.join(0.25)
 
+    прервано = False
+    # Второй Ctrl+C — «выйти сразу». Но собранное всё равно пишется в файл:
+    # журнал сделанного уже на диске, и потерянные из выдачи адреса следующий
+    # запуск счёл бы проверенными (рецензия 17.10.2026, четвёртая).
+    сразу = False
     try:
-        прервано = False
         try:
             ждать()
         except KeyboardInterrupt:
@@ -255,7 +259,12 @@ def cmd_validate(args):
             pipeline.stop()
             print("\nПрервано. Доделываю начатые проверки и сохраняю результат "
                   "(Ctrl+C ещё раз — выйти сразу).", file=sys.stderr)
-            ждать()
+            try:
+                ждать()
+            except KeyboardInterrupt:
+                сразу = True
+                print("\nВыхожу сразу: записываю то, что уже проверено.", file=sys.stderr)
+                pipeline._finish_activity(interrupted=True)
         if сбой and isinstance(сбой[0], KeyboardInterrupt):
             # Прерывание выброшено самим этапом, а не пришло в главный
             # поток: этап оборван на полуслове — галочка «✓» была бы ложью.
@@ -265,10 +274,6 @@ def cmd_validate(args):
             pipeline._finish_activity(interrupted=True)
         elif сбой:
             raise сбой[0]
-    except KeyboardInterrupt:
-        # Второй Ctrl+C: выходим сразу, не дожидаясь начатых проверок.
-        pipeline._finish_activity(interrupted=True)
-        raise
     except Exception as exc:
         # Ошибка внутри — итог «прервано ошибкой», а не «готово». Причина
         # строкой [DEAD] — ДО итога, как в окне: трассировка Python выйдет
@@ -293,7 +298,11 @@ def cmd_validate(args):
               % pipeline.blocked_reason, file=sys.stderr)
         return 3
 
-    rows = [_row(entry) for entry in results]
+    # Снимок под замком: после второго Ctrl+C поток прогона ещё жив и может
+    # дописывать результаты, пока мы пишем файл.
+    with lock:
+        снимок = list(results)
+    rows = [_row(entry) for entry in снимок]
 
     if args.status:
         wanted = {s.strip().lower() for s in args.status.split(",")}
@@ -329,7 +338,31 @@ def cmd_validate(args):
     for row in rows:
         counts[row["status"]] = counts.get(row["status"], 0) + 1
     on_log("[INFO] Итог: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
-    return 0 if done.is_set() else 2
+    # 2 — прогон прерван: Ctrl+C или оборванное ошибкой чтение базы. С тех
+    # пор как Ctrl+C стал «Стопом», конвейер и после него зовёт on_complete,
+    # так что по одному done уже не понять, дошёл ли прогон до конца —
+    # частичный файл получал код 0, как законченный (рецензия 17.10.2026).
+    код = 0 if done.is_set() and pipeline.activity.state == "done" and not прервано else 2
+    if сразу:
+        _выйти_сразу(код)
+    return код
+
+
+def _выйти_сразу(код):
+    """Второй Ctrl+C: выход, не дожидаясь начатых проверок.
+
+    Обычный возврат из main() ждал бы потоки пулов (ThreadPoolExecutor
+    присоединяет их при завершении интерпретатора и сначала доделывает всю
+    очередь), а поток прогона, пишущий в stderr во время завершения, ронял
+    Python с «Fatal Python error: _enter_buffered_busy». Файл с собранным к
+    этому моменту уже записан. Вынесено в функцию, чтобы тест мог её
+    подменить: настоящий os._exit оборвал бы и сам pytest."""
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(код)
 
 
 def cmd_bounces(args):
