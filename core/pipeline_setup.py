@@ -362,6 +362,13 @@ class PipelineSetupMixin:
             BlacklistDownloader().download_all(log_callback=self.callbacks['on_log'])
         except Exception as e:
             self.callbacks['on_log'](f"[DEAD] Обновление списков не удалось ({type(e).__name__}), использую локальные.", "dead")
+        # «Стоп» на подготовке: дальше не идём. Раньше подготовка проверяла
+        # остановку только после порта 25 и доделывала всё — фильтры, полный
+        # перебор прокси, профили, прогрев ИИ, — а окно всё это время писало
+        # «Останавливаю» (рецензия 17.10.2026). run_pipeline увидит флаг и
+        # закончит прогон, не тронув ни одного адреса.
+        if getattr(self, "_stop_requested", False):
+            return
 
         self._stage("filters")
         # Список бесплатных почтовиков. Он НЕ для отбраковки, а для скоринга:
@@ -441,11 +448,21 @@ class PipelineSetupMixin:
             except Exception:
                 enough = 0
 
+            if getattr(self, "_stop_requested", False):
+                return
             live_proxies, total_seen = filter_live_proxies(
                 proxies, timeout=timeout, threads=threads,
                 progress_callback=proxy_progress,
                 log_callback=self.callbacks.get('on_log'),
-                enough=max(0, enough))
+                enough=max(0, enough),
+                should_stop=lambda: getattr(self, "_stop_requested", False))
+            if getattr(self, "_stop_requested", False):
+                # Ни «живых 0 из N» (это объявило бы прогон заблокированным,
+                # хотя его остановили вы), ни профилей с прогревом ИИ.
+                self.callbacks['on_log'](
+                    "[INFO] Перебор прокси прерван «Стопом»: проверено %d, живых %d."
+                    % (total_seen, len(live_proxies)), "info")
+                return
             # Итог перебора говорится числом И смыслом. «Найдено 54 из 26390»
             # само по себе не отвечает на вопрос, который у владельца в
             # голове: «а проверятся ли теперь мои почты».
@@ -489,6 +506,8 @@ class PipelineSetupMixin:
             # PTR) и Outlook/iCloud (нужна чистая репутация) после этого
             # работала вслепую.
             self.network = NetworkValidator(timeout=timeout, proxies=proxies)
+            if getattr(self, "_stop_requested", False):
+                return
             if live_proxies:
                 self._stage("profiles")
             proxy_profiles = self._profile_live_proxies(
@@ -595,6 +614,8 @@ class PipelineSetupMixin:
             # на месте. Обновляем в фоне, чтобы не держать воркеры.
             self._start_profile_refresher(timeout=timeout, workers=threads)
         
+        if getattr(self, "_stop_requested", False):
+            return
         if enable_ai:
             self._stage("ai")
             self.callbacks['on_log']("[INFO] Прогрев и обучение Нейросети (TensorFlow + NaiveBayes)...", "info")

@@ -226,6 +226,10 @@ def cmd_validate(args):
     except KeyboardInterrupt:
         pipeline.stop()
         print("\nПрервано. Сохраняю то, что успели проверить.", file=sys.stderr)
+        # Ctrl+C выбрасывает исключение прямо из текущего этапа, каким бы он
+        # ни был — даже из итогов, которые «Стоп» в окне доделывает. Значит
+        # этап оборван, и галочка «✓» у него была бы ложью.
+        pipeline._finish_activity(interrupted=True)
     except Exception as exc:
         # Ошибка внутри — итог «прервано ошибкой», а не «готово». Причина
         # строкой [DEAD] — ДО итога, как в окне: трассировка Python выйдет

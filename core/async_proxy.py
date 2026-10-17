@@ -20,7 +20,7 @@ import struct
 
 class AsyncProxyChecker:
     def __init__(self, proxies, workers: int = 500, timeout: float = 5.0,
-                 mode: str = "http", progress_callback=None):
+                 mode: str = "http", progress_callback=None, should_stop=None):
         """mode: "http" (для парсера) или "smtp" (для валидатора).
 
         proxies — список ЛИБО генератор. Генератор нужен для больших файлов:
@@ -33,6 +33,11 @@ class AsyncProxyChecker:
         self.timeout = timeout
         self.mode = mode
         self.progress_callback = progress_callback
+        # «Стоп» владельца: начатые проверки доводятся до конца (рвать
+        # соединения на полуслове незачем), а набранные в очередь, но не
+        # начатые — отбрасываются. Очередь держит до 8 порций на воркер, и
+        # без этого «Стоп» ждал бы ещё восьми кругов таймаута.
+        self.should_stop = should_stop
 
         self.queue = asyncio.Queue()
         self.live_proxies = []
@@ -269,6 +274,10 @@ class AsyncProxyChecker:
                 await asyncio.sleep(0.01)
                 continue
             proxy = await self.queue.get()
+            stop = getattr(self, "should_stop", None)
+            if stop is not None and stop():
+                self.queue.task_done()
+                continue
             protocol = "socks5"
             ip = ""
             port = 0
@@ -364,6 +373,9 @@ class AsyncProxyChecker:
         текущая порция.
         """
         for proxy in source:
+            stop = getattr(self, "should_stop", None)
+            if stop is not None and stop():
+                break
             await self.queue.put(proxy)
             self.total += 1
         self._feed_done = True
@@ -399,9 +411,10 @@ class AsyncProxyChecker:
 
 
 def run_async_checker(proxies, workers=500, timeout=5.0, mode="http",
-                      progress_callback=None, return_checker=False):
+                      progress_callback=None, return_checker=False, should_stop=None):
     """Синхронная обёртка. return_checker=True отдаёт и сам чекер с диагнозами."""
-    checker = AsyncProxyChecker(proxies, workers, timeout, mode, progress_callback)
+    checker = AsyncProxyChecker(proxies, workers, timeout, mode, progress_callback,
+                                should_stop=should_stop)
 
     def finish(result):
         return (result, checker) if return_checker else result

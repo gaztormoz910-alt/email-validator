@@ -81,7 +81,8 @@ class ProxyManager:
     def get_total_count(self):
         return len(self.proxies)
 
-    def check_all_proxies(self, max_workers=50, test_url="https://www.bing.com", progress_callback=None):
+    def check_all_proxies(self, max_workers=50, test_url="https://www.bing.com", progress_callback=None,
+                          should_stop=None):
         """
         Проверяет все прокси асинхронно через режим HTTP (gstatic.com 204).
         """
@@ -94,7 +95,9 @@ class ProxyManager:
             workers=max_workers,
             timeout=self.timeout,
             mode="http",
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            # «Стоп» сбора: не начатые проверки отбрасываются.
+            should_stop=should_stop,
         )
         
         live_set = set(live_list)

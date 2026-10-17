@@ -781,6 +781,22 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
             # минуту писала «медленно», через три — «похоже на зависание».
             пропущено = 0
 
+            def положить(item):
+                """В очередь — но не повиснуть на ней после «Стопа».
+
+                Очередь ограничена (2×потоков), а работники на «Стопе» уходят,
+                не разбирая её. Блокирующий put() без срока оставлял фидер
+                висеть навсегда — с открытым файлом базы и состоянием прогона
+                (рецензия 17.10.2026). Пока очередь не полна, put проходит
+                сразу, так что ждущий get() работник без адреса не останется."""
+                while True:
+                    try:
+                        task_queue.put(item, timeout=0.5)
+                        return True
+                    except queue.Full:
+                        if not self.is_running:
+                            return False
+
             def отметить_пропуск():
                 nonlocal пропущено
                 пропущено += 1
@@ -829,11 +845,13 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                     отметить_пропуск()
                     continue
 
+                if not положить((email, data)):
+                    break
                 queued_count += 1
-                task_queue.put((email, data))
-                
+
             for _ in range(safe_threads):
-                task_queue.put(None)
+                if not положить(None):
+                    break
 
             # Уточняем знаменатель прогресса: в очередь попали только уникальные
             # адреса, а стартовая оценка считалась по сырым строкам. Без этого
@@ -941,6 +959,12 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                     while self.is_paused and self.is_running:
                         time.sleep(0.5)
                     if not self.is_running:
+                        # «Стоп»: адрес не перепроверен — назад в очередь, и
+                        # страховка ниже отдаст его как Unknown с первой
+                        # причиной. Раньше он молча пропадал из выдачи: пул
+                        # уже взял его, а страховка видит только то, что в
+                        # пул не попало («ПОТЕРЯНО АДРЕСОВ» в журнале).
+                        greylisted_queue.put(entry)
                         return
 
                     # Куда идти повтору, зависит от того, ПОЧЕМУ адрес
@@ -1271,7 +1295,18 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         with self._emitted_lock:
             emitted = self._emitted
         expected = total_emails if isinstance(total_emails, int) else 0
-        if expected and emitted != expected:
+        if self._stop_requested:
+            # Остановлено вами: непроверенное не выдаётся и не теряется — его
+            # проверит продолжение прогона. Сверять «принято» с «показано»
+            # тут не с чем: после «Стопа» фидер не дочитывает файл, и
+            # «принято» — лишь оценка строк. Раньше здесь после КАЖДОГО «Стопа»
+            # стояло «[DEAD] ПОТЕРЯНО АДРЕСОВ … Это сбой … сообщите о нём»,
+            # и настоящую потерю было не отличить от штатной остановки.
+            self.callbacks['on_log'](
+                f"[INFO] Остановлено: показано {emitted}. Непроверенные адреса "
+                "будут проверены при следующем запуске той же базы — уже "
+                "проверенные повторно не проверяются.", "info")
+        elif expected and emitted != expected:
             lost = expected - emitted
             if lost > 0:
                 self.callbacks['on_log'](
