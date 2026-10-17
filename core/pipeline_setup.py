@@ -147,6 +147,16 @@ class PipelineSetupMixin:
                         progress_callback=on_prof,
                         should_stop=lambda: getattr(self, "_stop_requested", False)))
 
+                if getattr(self, "_stop_requested", False):
+                    # «Стоп» оборвал профилирование: снята лишь часть пула.
+                    # Сводка по ней читалась бы как приговор ВСЕМУ пулу —
+                    # «PTR нет ни у одного», «0 годных для Outlook» — и
+                    # уходила бы в панель окна (рецензия 17.10.2026, пятая).
+                    self.callbacks['on_log'](
+                        "[INFO] Профилирование прервано «Стопом»: снято %d из %d."
+                        % (len(proxy_profiles), len(live_proxies)), "info")
+                    return proxy_profiles
+
                 vals = list(proxy_profiles.values())
                 ptr_n = sum(1 for v in vals if v["has_ptr"] is True)
                 bl_n = sum(1 for v in vals if v["in_dnsbl"])

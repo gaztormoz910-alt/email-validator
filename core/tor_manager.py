@@ -65,12 +65,39 @@ class TorInstance:
         start_time = time.time()
         bootstrapped = False
         last_progress = ""
+        # Вывод tor читает отдельный поток. readline() прямо здесь блокировал
+        # цикл, пока tor молчит: ни «Стоп», ни предел в 90 с не срабатывали до
+        # его следующей строки (рецензия 17.10.2026, пятая). После подъёма
+        # поток дочитывает вывод вхолостую — иначе переполненная труба
+        # остановила бы сам tor, когда он снова захочет что-то написать.
+        import queue as _queue
+        строки = _queue.Queue()
+        слушать = threading.Event()
+        слушать.set()
+        вывод = self.process.stdout
+
+        def читать():
+            try:
+                for строка in вывод:
+                    if слушать.is_set():
+                        строки.put(строка)
+            except Exception:
+                pass
+            finally:
+                строки.put(None)
+
+        threading.Thread(target=читать, name="tor-stdout-%d" % self.index,
+                         daemon=True).start()
         while time.time() - start_time < 90:
             if stop():
+                слушать.clear()
                 self._log(f"[Система] Запуск Tor #{self.index} прерван «Стопом».", "info")
                 self.stop()
                 return False
-            line = self.process.stdout.readline()
+            try:
+                line = строки.get(timeout=0.25)
+            except _queue.Empty:
+                continue
             if not line: break
             if "Bootstrapped" in line:
                 if "100%" in line:
@@ -84,6 +111,7 @@ class TorInstance:
                             last_progress = percent
                     except Exception: pass
                 
+        слушать.clear()
         if bootstrapped:
             self._log(f"[Система] Tor #{self.index} успешно запущен (Порт {self.tor_port})", "success")
             return True

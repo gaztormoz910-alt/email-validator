@@ -277,6 +277,11 @@ class ActivityMonitor:
                 cut = ""
             elif outcome == "failed":
                 cut = "failed"
+            elif outcome == "blocked":
+                # Этап, на котором прогон упёрся (Tor не поднялся, порт 25
+                # закрыт, ни один прокси не ожил), — не «пройден»: «✓» рядом
+                # с [DEAD] сбивал с толку (рецензия 17.10.2026, пятая).
+                cut = "blocked"
             elif interrupted or (outcome == "stopped" and self.stage_key in INTERRUPTIBLE):
                 cut = "stopped"
             lines.extend(self._close_stage(now, cut))
@@ -320,6 +325,8 @@ class ActivityMonitor:
         label = STAGES.get(prev, (prev,))[0]
         if cut == "failed":
             text = "✗ %s — оборвано ошибкой через %s" % (label, fmt_duration(took))
+        elif cut == "blocked":
+            text = "✗ %s — дальше не пройти, через %s" % (label, fmt_duration(took))
         elif cut:
             text = "✗ %s — остановлено через %s" % (label, fmt_duration(took))
         else:

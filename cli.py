@@ -17,10 +17,12 @@
 """
 
 import argparse
+import contextlib
 import csv
 import io
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -298,10 +300,27 @@ def cmd_validate(args):
               % pipeline.blocked_reason, file=sys.stderr)
         return 3
 
-    # Снимок под замком: после второго Ctrl+C поток прогона ещё жив и может
-    # дописывать результаты, пока мы пишем файл.
-    with lock:
+    # Дальше пишется результат, и Ctrl+C его больше не обрывает: файл,
+    # оборванный на полуслове, хуже ожидания в несколько секунд, а журнал
+    # сделанного к этому моменту уже на диске — недописанные адреса
+    # следующий запуск счёл бы проверенными (рецензия 17.10.2026, пятая).
+    with _без_прерываний():
+        return _записать_итог(args, pipeline, results, lock, done, on_log,
+                              прервано, сразу)
+
+
+def _записать_итог(args, pipeline, results, lock, done, on_log, прервано, сразу):
+    """Снимок результатов, фильтры, отписки, запись, код возврата."""
+    # После второго Ctrl+C поток прогона ещё жив. Замок результатов
+    # удерживается до самого выхода: проверка, закончившаяся во время
+    # записи, не сможет ни попасть в результаты после снимка, ни быть
+    # помеченной сделанной — отметка идёт только после выдачи (on_result).
+    if сразу:
+        lock.acquire()
         снимок = list(results)
+    else:
+        with lock:
+            снимок = list(results)
     rows = [_row(entry) for entry in снимок]
 
     if args.status:
@@ -346,6 +365,30 @@ def cmd_validate(args):
     if сразу:
         _выйти_сразу(код)
     return код
+
+
+@contextlib.contextmanager
+def _без_прерываний():
+    """Ctrl+C не действует, пока пишется результат.
+
+    Ставится только из главного потока — обработчик сигнала можно менять
+    лишь там; вызов из другого потока (так бывает в тестах) идёт без
+    защиты. Прежний обработчик возвращается при любом исходе."""
+    поставлен = False
+    прежний = None
+    if threading.current_thread() is threading.main_thread():
+        try:
+            прежний = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            поставлен = True
+        except (ValueError, OSError):
+            поставлен = False
+    try:
+        yield
+    finally:
+        if поставлен:
+            signal.signal(signal.SIGINT, прежний if прежний is not None
+                          else signal.default_int_handler)
 
 
 def _выйти_сразу(код):
