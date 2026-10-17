@@ -210,26 +210,65 @@ def cmd_validate(args):
     pipeline.activity.begin()
     pulse.start()
 
+    # Прогон — в своём потоке, а главный только ждёт его короткими join().
+    #
+    # Раньше прогон шёл в главном потоке, и Ctrl+C вёл себя плохо (рецензия
+    # 17.10.2026, третья): на Windows ожидание рабочих потоков без срока
+    # (join() внутри run_pipeline) не прерывается, и Ctrl+C доходил только
+    # после всего прохода; а пришедший посреди этапа KeyboardInterrupt
+    # обрывал его на полуслове — перепроверка ждала все поданные адреса,
+    # результат снимался, пока потоки ещё доделывали начатое. Теперь Ctrl+C —
+    # это «Стоп», как в окне: начатое доделывается, неперепроверенное
+    # выдаётся как Unknown, конвейер выходит сам. Второй Ctrl+C — выйти сразу.
+    сбой = []
+
+    def прогон():
+        try:
+            # confirm_valid ставится ПОЛЕМ, а не параметром: run_pipeline его
+            # не принимает, а читает у объекта. Флаг был объявлен и никуда не
+            # подключён — из командной строки второе мнение не работало вовсе.
+            pipeline.confirm_valid = not args.no_confirm_valid
+            pipeline.setup(timeout=args.timeout, enable_ai=not args.no_ai,
+                           proxies=proxies, threads=args.threads,
+                           use_cache=not args.no_cache)
+            pipeline.run_pipeline(sources, threads=args.threads, fix_typos=True,
+                                  check_spam=True, deep_ping=True,
+                                  enable_ai=not args.no_ai,
+                                  enable_osint=not args.no_osint,
+                                  resume=not args.no_resume)
+        except BaseException as exc:      # решает главный поток, ниже
+            сбой.append(exc)
+
+    поток = threading.Thread(target=прогон, name="cli-run", daemon=True)
+    поток.start()
+
+    def ждать():
+        while поток.is_alive():
+            поток.join(0.25)
+
     try:
-        # confirm_valid ставится ПОЛЕМ, а не параметром: run_pipeline его не
-        # принимает, а читает у объекта. Флаг был объявлен и никуда не
-        # подключён — из командной строки второе мнение не работало вовсе.
-        pipeline.confirm_valid = not args.no_confirm_valid
-        pipeline.setup(timeout=args.timeout, enable_ai=not args.no_ai,
-                       proxies=proxies, threads=args.threads,
-                       use_cache=not args.no_cache)
-        pipeline.run_pipeline(sources, threads=args.threads, fix_typos=True,
-                              check_spam=True, deep_ping=True,
-                              enable_ai=not args.no_ai,
-                              enable_osint=not args.no_osint,
-                              resume=not args.no_resume)
+        прервано = False
+        try:
+            ждать()
+        except KeyboardInterrupt:
+            прервано = True
+            pipeline.stop()
+            print("\nПрервано. Доделываю начатые проверки и сохраняю результат "
+                  "(Ctrl+C ещё раз — выйти сразу).", file=sys.stderr)
+            ждать()
+        if сбой and isinstance(сбой[0], KeyboardInterrupt):
+            # Прерывание выброшено самим этапом, а не пришло в главный
+            # поток: этап оборван на полуслове — галочка «✓» была бы ложью.
+            if not прервано:
+                pipeline.stop()
+                print("\nПрервано. Сохраняю то, что успели проверить.", file=sys.stderr)
+            pipeline._finish_activity(interrupted=True)
+        elif сбой:
+            raise сбой[0]
     except KeyboardInterrupt:
-        pipeline.stop()
-        print("\nПрервано. Сохраняю то, что успели проверить.", file=sys.stderr)
-        # Ctrl+C выбрасывает исключение прямо из текущего этапа, каким бы он
-        # ни был — даже из итогов, которые «Стоп» в окне доделывает. Значит
-        # этап оборван, и галочка «✓» у него была бы ложью.
+        # Второй Ctrl+C: выходим сразу, не дожидаясь начатых проверок.
         pipeline._finish_activity(interrupted=True)
+        raise
     except Exception as exc:
         # Ошибка внутри — итог «прервано ошибкой», а не «готово». Причина
         # строкой [DEAD] — ДО итога, как в окне: трассировка Python выйдет

@@ -423,6 +423,12 @@ class ActivityMonitor:
         self.paused = paused
         if paused:
             self._pause_started = now
+            # Ожидание по плану до паузы — не тишина: на паузе цикл
+            # перепроверки не продлевает срок (wait() не зовётся), и после
+            # «Продолжить» эта часть ожидания иначе засчиталась бы молчанием
+            # — ложное «Похоже на зависание» (рецензия 17.10.2026, третья).
+            if self.wait_until is not None and self.last_event is not None:
+                self.last_event = max(self.last_event, min(now, self.wait_until))
             return
         started, self._pause_started = self._pause_started, None
         if started is None or self.last_event is None or self.stage_key not in PAUSABLE:
@@ -699,9 +705,11 @@ def describe(snap):
         slow_at, stall_at = NET_SLOW, max(NET_STALL, longest + 60.0)
         limit = fmt_duration(longest) if longest else "3 мин"
         if snap["kind"] == "parser":
-            why_slow = ("ответов нет %s — поисковик или прокси отвечают медленно; "
-                        "один запрос с повторами может идти до %s"
-                        % (fmt_duration(silence), limit))
+            # Без числа-потолка: поисковик молча повторяет запрос через другие
+            # прокси (до 50 раз у DuckDuckGo), и «до N» было бы неправдой.
+            why_slow = ("ответов нет %s — поисковик или прокси отвечают медленно, "
+                        "запросы повторяются через другие прокси"
+                        % fmt_duration(silence))
         else:
             why_slow = ("ответов нет %s — серверы отвечают медленно; одна проверка "
                         "может идти до %s" % (fmt_duration(silence), limit))

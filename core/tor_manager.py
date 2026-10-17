@@ -32,7 +32,12 @@ class TorInstance:
         except Exception as e:
             print(f"TorInstance log error: {e}")
 
-    def start(self):
+    def start(self, should_stop=None):
+        # should_stop — «Стоп» сбора. Подъём узла идёт до 90 с, и раньше
+        # «Стоп» во время него ждал конца подъёма (рецензия 17.10.2026).
+        stop = should_stop or (lambda: False)
+        if stop():
+            return False
         self.data_dir.mkdir(parents=True, exist_ok=True)
         torrc_path = self.tor_dir / f"torrc_{self.index}"
         data_dir_str = str(self.data_dir).replace("\\", "/")
@@ -61,6 +66,10 @@ class TorInstance:
         bootstrapped = False
         last_progress = ""
         while time.time() - start_time < 90:
+            if stop():
+                self._log(f"[Система] Запуск Tor #{self.index} прерван «Стопом».", "info")
+                self.stop()
+                return False
             line = self.process.stdout.readline()
             if not line: break
             if "Bootstrapped" in line:
@@ -271,7 +280,19 @@ class TorManager:
                 except Exception: pass
             return False
 
-    def start(self, num_instances=1):
+    def start(self, num_instances=1, should_stop=None):
+        stop = should_stop or (lambda: False)
+
+        def пауза(секунд):
+            """Сон короткими шагами: «Стоп» прерывает и разнос запусков, и
+            выдержку перед повторной попыткой. Ложь — значит нажали «Стоп»."""
+            конец = time.time() + секунд
+            while time.time() < конец:
+                if stop():
+                    return False
+                time.sleep(min(0.25, max(0.0, конец - time.time())))
+            return not stop()
+
         if not self.check_and_download():
             return False
             
@@ -291,19 +312,23 @@ class TorManager:
         
         def start_instance(idx):
             # Stagger startup to avoid hammering the Snowflake broker simultaneously
-            time.sleep(idx * 6.0)
-            
+            if not пауза(idx * 6.0):
+                return
+
             for attempt in range(2): # 2 attempts per instance
                 inst = TorInstance(idx, self.base_dir, self.tor_exe,
                                    self.log_callback)
-                if inst.start():
+                if inst.start(should_stop=stop):
                     with self._lock:
                         self.instances.append(inst)
+                    return
+                if stop():
                     return
                 # If failed, wait a bit before retrying
                 if attempt == 0:
                     self._log(f"[Система] Повторная попытка запуска Tor #{idx}...", "warning")
-                    time.sleep(10.0)
+                    if not пауза(10.0):
+                        return
                 
         threads = []
         for i in range(num_instances):

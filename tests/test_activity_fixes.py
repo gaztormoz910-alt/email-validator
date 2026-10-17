@@ -629,6 +629,45 @@ def test_pause_then_stop_in_retry_loses_no_address(monkeypatch):
     assert not any("ПОТЕРЯНО" in т for _тег, т in строки)
 
 
+class _ПерепроверкаВисит(_СетьСоСбоем):
+    """Первый ответ — сбой; перепроверка ждёт команды. Так две перепроверки
+    заняты, а остальные стоят в очереди пула — ровно то место, где адрес
+    раньше пропадал при «Стопе»."""
+
+    def __init__(self):
+        super().__init__()
+        self.пусти = threading.Event()
+        self.висят = 0
+        self._замок = threading.Lock()
+
+    def check_email(self, email, **kw):
+        if self.спрошено.get(email):
+            with self._замок:
+                self.висят += 1
+            self.пусти.wait(30)
+        return super().check_email(email, **kw)
+
+
+def test_stop_during_retry_returns_queued_addresses(monkeypatch):
+    import core.pipeline as модуль
+    monkeypatch.setattr(модуль, "DEFAULT_RETRY_DELAY", 0.0)
+    p, строки, результаты = _конвейер()
+    сеть = p.network = _ПерепроверкаВисит()
+    адреса = ["q%d@example.com" % i for i in range(6)]
+    поток = threading.Thread(target=p.run_pipeline, args=(
+        [{"type": "text", "content": "\n".join(адреса)}],),
+        kwargs=dict(threads=2, fix_typos=True, check_spam=False, deep_ping=True,
+                    enable_ai=False), daemon=True)
+    поток.start()
+    assert _ждать(lambda: сеть.висят >= 2, 30), "перепроверка не началась"
+    p.stop()                                    # 4 адреса ещё в очереди пула
+    сеть.пусти.set()
+    поток.join(60)
+    assert not поток.is_alive()
+    assert sorted(e for e, _s in результаты) == sorted(адреса), "адреса пропали из выдачи"
+    assert not any("ПОТЕРЯНО" in т for _тег, т in строки)
+
+
 class _МедленнаяСеть(_Net):
     def check_email(self, email, **_kw):
         time.sleep(0.2)
@@ -798,3 +837,215 @@ def test_cli_ctrl_c_on_summary_marks_it_cut(monkeypatch, tmp_path, capsys):
     err = capsys.readouterr().err
     assert "✗ Подведение итогов — остановлено через" in err, err
     assert "✓ Подведение итогов" not in err, err
+
+
+# ══════════════════════════════ третья рецензия (17.10.2026)
+
+def test_pause_during_a_planned_wait_is_not_a_hang_after_resume():
+    """Ожидание по плану до паузы — не тишина, и после «Продолжить» тоже."""
+    m, часы, _ = монитор()
+    m.stage("retry")
+    m.beat()
+    m.wait(420, "ближайший отложенный адрес созреет")
+    часы.прошло(200)
+    m.set_paused(True)
+    часы.прошло(800)                             # срок ожидания уже прошёл
+    m.set_paused(False)
+    часы.прошло(0.1)
+    assert уровень(m) == "ok", describe(m.snapshot())
+
+
+def test_parser_slow_text_promises_no_limit():
+    m, часы, _ = монитор(kind="parser")
+    m.set_net_budget(45)
+    m.stage("p_search")
+    m.enter()
+    часы.прошло(60)
+    d = describe(m.snapshot())
+    assert d["level"] == "slow", d
+    assert "повторяются через другие прокси" in d["detail"] and " до " not in d["detail"], d
+
+
+def test_proxy_sweep_stop_line_says_read_not_checked(monkeypatch):
+    import core.network as сеть
+    p, строки, _р = _конвейер()
+
+    def перебор(proxies, **kw):
+        p.stop()
+        return [], 7
+    monkeypatch.setattr(сеть, "filter_live_proxies", перебор)
+    monkeypatch.setattr("core.pipeline_setup.BlacklistDownloader",
+                        type("Б", (), {"download_all": lambda self, log_callback=None: None}))
+    p.setup(timeout=5, enable_ai=False, proxies=["127.0.0.1:1"], threads=2, use_cache=False)
+    тексты = [т for _тег, т in строки]
+    assert any("прочитано 7, живых 0" in т for т in тексты), тексты
+    assert not getattr(p, "blocked_reason", ""), "остановку объявили блокировкой"
+
+
+class _СчётнаяСеть(_Net):
+    def __init__(self):
+        self.вызовов = 0
+        self._замок = threading.Lock()
+
+    def check_email(self, email, **_kw):
+        with self._замок:
+            self.вызовов += 1
+        time.sleep(0.1)
+        return super().check_email(email)
+
+
+def test_pause_then_stop_makes_no_new_network_check():
+    p, _строки, результаты = _конвейер()
+    сеть = p.network = _СчётнаяСеть()
+    база = "\n".join("p%d@example.com" % i for i in range(30))
+    поток = threading.Thread(target=p.run_pipeline, args=(
+        [{"type": "text", "content": база}],),
+        kwargs=dict(threads=2, fix_typos=True, check_spam=False, deep_ping=True,
+                    enable_ai=False), daemon=True)
+    поток.start()
+    assert _ждать(lambda: len(результаты) >= 2, 60)
+    p.pause()
+    time.sleep(0.6)                              # начатые проверки доделаны
+    было = сеть.вызовов
+    p.stop()
+    поток.join(60)
+    assert not поток.is_alive()
+    assert сеть.вызовов == было, "после «Пауза» → «Стоп» пошли новые проверки"
+
+
+def test_feeder_read_error_does_not_hang_the_run(monkeypatch):
+    from core.streamer import StreamLoader
+
+    def обрыв(self):
+        for i in range(3):
+            yield "f%d@example.com" % i, {}
+        raise OSError("диск отвалился")
+    monkeypatch.setattr(StreamLoader, "stream_emails", обрыв)
+    p, строки, результаты = _конвейер()
+    поток = threading.Thread(target=p.run_pipeline, args=(
+        [{"type": "text", "content": "x@example.com"}],),
+        kwargs=dict(threads=2, fix_typos=True, check_spam=False, deep_ping=True,
+                    enable_ai=False), daemon=True)
+    поток.start()
+    поток.join(60)
+    assert not поток.is_alive(), "прогон завис после обрыва чтения базы"
+    assert sorted(e for e, _s in результаты) == ["f0@example.com", "f1@example.com",
+                                                "f2@example.com"]
+    assert any("Чтение базы оборвалось" in т and "диск отвалился" in т
+               for _тег, т in строки)
+    assert p.activity.state == "failed"
+
+
+def test_stop_also_stops_the_profile_refresher():
+    p, _строки, _р = _конвейер()
+    p.is_running = True
+    p._start_profile_refresher(timeout=1, workers=1, interval=600)
+    p.stop()
+    assert p._refresh_stop.is_set()
+    p._refresh_thread.join(5)
+    assert not p._refresh_thread.is_alive()
+
+
+class _ПерепроверкаПадает(_СетьСоСбоем):
+    def check_email(self, email, **kw):
+        if self.спрошено.get(email):
+            raise RuntimeError("сеть сломалась на перепроверке")
+        return super().check_email(email, **kw)
+
+
+def test_crash_in_retry_still_returns_the_address(monkeypatch):
+    import core.pipeline as модуль
+    monkeypatch.setattr(модуль, "DEFAULT_RETRY_DELAY", 0.0)
+    p, строки, результаты = _конвейер()
+    p.network = _ПерепроверкаПадает()
+    адреса = ["e%d@example.com" % i for i in range(3)]
+    p.run_pipeline([{"type": "text", "content": "\n".join(адреса)}], threads=2,
+                   fix_typos=True, check_spam=False, deep_ping=True, enable_ai=False)
+    assert sorted(e for e, _s in результаты) == адреса, "адрес пропал после сбоя перепроверки"
+    assert {s for _e, s in результаты} == {"Unknown"}
+    assert not any("ПОТЕРЯНО" in т for _тег, т in строки)
+
+
+def test_cli_ctrl_c_stops_like_the_window_and_keeps_started_work(monkeypatch, tmp_path, capsys):
+    import _thread
+    from core.pipeline import ValidationPipeline
+
+    class _Долгий(ValidationPipeline):
+        def setup(self, **kw):
+            pass
+
+        def run_pipeline(self, sources, **kw):
+            self.is_running = True
+            self._stage("check")
+            threading.Timer(0.3, _thread.interrupt_main).start()
+            while self.is_running:                # проверка идёт до «Стопа»
+                time.sleep(0.05)
+            # начатая до Ctrl+C проверка доделана и выдана
+            self.callbacks["on_result"]("a@example.com", "Valid", "250 OK", "mx", {})
+            self._finish_activity()
+            self.callbacks["on_complete"]()
+
+    _cli(monkeypatch, tmp_path, _Долгий)
+    err = capsys.readouterr().err
+    assert "Доделываю начатые проверки" in err, err
+    assert "■ Остановлено по вашей команде" in err, err
+    assert "a@example.com" in (tmp_path / "out.csv").read_text(encoding="utf-8-sig"), (
+        "доделанная после Ctrl+C проверка не попала в файл")
+
+
+def test_duckduckgo_stops_retrying_on_stop(monkeypatch):
+    import requests
+    import core.parser.engine as движки
+    попыток = {"n": 0}
+
+    def пост(self, *a, **kw):
+        попыток["n"] += 1
+        raise requests.exceptions.Timeout("молчит")
+    monkeypatch.setattr(requests.Session, "post", пост)
+    monkeypatch.setattr(движки.time, "sleep", lambda s: None)
+
+    class _Прокси:
+        timeout = 1
+
+        def get_proxy(self):
+            return "socks5://127.0.0.1:1"
+
+        def get_total_count(self):
+            return 1
+
+        def mark_fail(self, url):
+            pass
+
+        def mark_success(self, url):
+            pass
+    движок = движки.DuckDuckGoEngine(_Прокси(), on_log=lambda т: None,
+                                     is_stopped=lambda: попыток["n"] >= 2)
+    assert list(движок.search_generator("site:example.com")) == []
+    assert попыток["n"] == 2, попыток
+
+
+def test_tor_start_gives_up_at_once_on_stop(monkeypatch):
+    import core.tor_manager as тор
+    запуски = []
+
+    class _Узел:
+        def __init__(self, *a, **kw):
+            pass
+
+        def start(self, should_stop=None):
+            запуски.append(bool(should_stop and should_stop()))
+            return False
+
+    monkeypatch.setattr(тор, "TorInstance", _Узел)
+    менеджер = object.__new__(тор.TorManager)
+    менеджер.log_callback = lambda *a, **k: None
+    менеджер.base_dir = менеджер.tor_exe = None
+    менеджер.instances = []
+    менеджер.check_and_download = lambda: True
+    менеджер._kill_orphans = lambda: None
+    стоп = threading.Event()
+    threading.Timer(0.3, стоп.set).start()
+    начало = time.monotonic()
+    assert менеджер.start(num_instances=3, should_stop=стоп.is_set) is False
+    # Без «Стопа» это разнос 0/6/12 с и выдержка 10 с перед повтором.
+    assert time.monotonic() - начало < 3, time.monotonic() - начало
