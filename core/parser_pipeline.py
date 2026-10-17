@@ -307,7 +307,11 @@ class ParserPipeline(threading.Thread):
             
             if self._stopped_before_search():
                 return
-            if not self.tor_manager.start(num_instances=num_tor_instances):
+            if not self.tor_manager.start(num_instances=num_tor_instances,
+                                          should_stop=self._stop_event.is_set):
+                # Подъём прерван «Стопом» — это остановка, а не «Tor не смог».
+                if self._stopped_before_search():
+                    return
                 self.log("[Ошибка] Не удалось запустить Tor. Парсинг невозможен.")
                 self._complete(aborted=True)
                 return
@@ -385,7 +389,8 @@ class ParserPipeline(threading.Thread):
             elif self.engine_name == "Yahoo (Proxies)":
                 engine = YahooEngine(self.proxy_manager, on_log=self.log, is_stopped=lambda: self._stop_event.is_set())
             else:
-                engine = DuckDuckGoEngine(self.proxy_manager, on_log=self.log)
+                engine = DuckDuckGoEngine(self.proxy_manager, on_log=self.log,
+                                          is_stopped=lambda: self._stop_event.is_set())
                 
             while not self._stop_event.is_set():
                 while self._pause_event.is_set() and not self._stop_event.is_set():

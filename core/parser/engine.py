@@ -132,9 +132,13 @@ class DuckDuckGoEngine:
     Implements infinite pagination, heavy error handling, proxy rotation,
     and target URL scraping for deep email extraction.
     """
-    def __init__(self, proxy_manager: Any, max_retries: int = 50, max_results_per_dork: int = 500, on_log: Optional[Any] = None) -> None:
+    def __init__(self, proxy_manager: Any, max_retries: int = 50, max_results_per_dork: int = 500, on_log: Optional[Any] = None, is_stopped: Optional[Any] = None) -> None:
         self.proxy_manager = proxy_manager
         self.max_retries = max_retries
+        # «Стоп» сбора. У AOL/Yahoo он был, у DuckDuckGo — нет: после «Стопа»
+        # каждый поток дорабатывал весь круг до 50 попыток по таймауту, и окно
+        # минутами писало «Останавливаю» (рецензия 17.10.2026, третья).
+        self._is_stopped = is_stopped or (lambda: False)
         self.max_results = max_results_per_dork
         self.on_log = on_log
         
@@ -262,6 +266,8 @@ class DuckDuckGoEngine:
                 success: bool = False
                 
                 while retries < self.max_retries:
+                    if self._is_stopped():
+                        return
                     proxy_url: Optional[str] = self.proxy_manager.get_proxy()
                     
                     # Если прокси загружены, но живых не осталось - прерываем

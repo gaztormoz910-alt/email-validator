@@ -458,6 +458,12 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                 return
             while self.is_paused:
                 time.sleep(0.5)
+            if not self.is_running:
+                # Вышли из паузы по «Стопу»: адрес не проверяем — раньше каждый
+                # поток, державший адрес, делал после «Стопа» полную сетевую
+                # проверку. Адрес не помечен сделанным, и продолжение прогона
+                # проверит его. False — «вердикта нет», в прогресс не идёт.
+                return False
 
             email, data = item
 
@@ -773,7 +779,7 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         already_done = 0
         queued_count = 0
 
-        def feeder_thread():
+        def feeder_body():
             nonlocal duplicates_skipped, queued_count, already_done
             # Всё пропущенное без проверки — для журнала активности. На
             # продолжении прогона фидер минутами проматывает проверенное, не
@@ -879,6 +885,37 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                     "(один ящик записан по-разному — двойная отправка предотвращена). "
                     f"К проверке: {queued_count}.", "info")
 
+        feeder_error = []
+
+        def feeder_thread():
+            """Фидер под защитой: сбой чтения базы — провал с причиной.
+
+            Раньше исключение посреди файла (сетевой или съёмный диск,
+            облачный файл не подкачался) убивало фидер молча: сигналы конца
+            в очередь не попадали, работники навсегда висли в get() без
+            срока, и прогон не кончался никогда — «Стоп» тоже не помогал
+            (рецензия 17.10.2026, третья)."""
+            nonlocal total_emails, feeder_finished
+            try:
+                feeder_body()
+            except Exception as exc:
+                feeder_error.append(exc)
+                self.callbacks['on_log'](
+                    f"[DEAD] Чтение базы оборвалось: {type(exc).__name__}: {exc}. "
+                    f"Проверяются только прочитанные до сбоя адреса ({queued_count}).",
+                    "dead")
+                feeder_finished = True
+                total_emails = queued_count
+                self.activity.retotal(queued_count)
+                for _ in range(safe_threads):
+                    while True:
+                        try:
+                            task_queue.put(None, timeout=0.5)
+                            break
+                        except queue.Full:
+                            if not self.is_running:
+                                break
+
         self._stage("check")
         t_feeder = threading.Thread(target=feeder_thread, daemon=True)
         t_feeder.start()
@@ -948,7 +985,7 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                 retry_count = 0
                 retry_lock = threading.Lock()
 
-                def retry_one(entry):
+                def retry_body(entry):
                     """Обрабатывает один отложенный адрес. Вызывается из пула потоков."""
                     nonlocal retry_count, processed_count
                     (email, data, is_role, _due,
@@ -1021,6 +1058,32 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                         processed_count += 1
                         current = processed_count
                     self.callbacks['on_progress'](current, total_emails)
+
+                def retry_one(entry):
+                    """retry_body под защитой, как адрес основного прохода.
+
+                    Исключение в перепроверке (в сети или в лестнице после
+                    вердикта) раньше уносило адрес: он не выдавался и в
+                    очередь не возвращался — только строка [DEAD] в журнале.
+                    Теперь он выдаётся как Unknown «Processing error», ровно
+                    как в основном проходе (worker_loop)."""
+                    nonlocal processed_count
+                    try:
+                        retry_body(entry)
+                    except Exception as e:
+                        email, data = entry[0], entry[1]
+                        self.callbacks['on_log'](
+                            f"[DEAD] Ошибка перепроверки {email}: {type(e).__name__}: {e}",
+                            "dead")
+                        try:
+                            self._emit(email, "Unknown",
+                                       f"Processing error: {type(e).__name__}", "N/A", data)
+                        except Exception:
+                            pass
+                        with progress_lock:
+                            processed_count += 1
+                            current = processed_count
+                        self.callbacks['on_progress'](current, total_emails)
 
                 # Забираем всё из очереди и обрабатываем ПАРАЛЛЕЛЬНО, но не раньше
                 # срока каждой записи.
@@ -1323,7 +1386,9 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                 "info")
 
         self.is_running = False
-        self._finish_activity()
+        # Оборванное чтение базы — провал, а не «Готово»: проверена лишь
+        # часть, и итог обязан это сказать.
+        self._finish_activity(failed=bool(feeder_error))
         self.callbacks['on_complete']()
 
     def start(self, email_sources, threads, timeout, fix_typos, check_spam,
@@ -1398,6 +1463,10 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         # остаётся «на паузе» навсегда, и следующий запуск стартует замершим.
         self.is_paused = False
         self.activity.set_paused(False)
+        # Фоновое обновление профилей прокси — тоже работа прогона. Раньше
+        # после «Стопа» на подготовке оно жило до следующего пробуждения
+        # (до 10 минут) и ходило в сеть.
+        self._stop_profile_refresher()
 
     def pause(self):
         self.is_paused = not self.is_paused
