@@ -339,6 +339,11 @@ class TorManager:
         for t in threads:
             t.join()
             
+        if not self.instances and stop():
+            # Подъём оборван «Стопом» — это не «Tor не смог»: строка [DEAD]
+            # рядом с нажатым «Стопом» была ложной тревогой.
+            self._log("[Система] Запуск Tor остановлен.", "info")
+            return False
         if len(self.instances) > 0:
             self._remember_pids()
             self._log(f"[Система] {len(self.instances)}/{num_instances} Tor-узлов успешно запущены!", "success")

@@ -329,7 +329,15 @@ class ValidatorApi(SourcesMixin, ParserMixin, ActivityBridgeMixin):
         if причина:
             self._on_log("[DEAD] Проверка не выполнялась: %s." % причина, "dead")
             return
-        self._on_log("[INFO] Проверка завершена.", "info")
+        # Итог — по тому, чем прогон кончился: «завершена» после «Стопа» или
+        # после ошибки вводила в заблуждение (рецензия 17.10.2026).
+        исход = getattr(getattr(self.pipeline, "activity", None), "state", "")
+        if исход == "stopped":
+            self._on_log("[INFO] Проверка остановлена.", "info")
+        elif исход == "failed":
+            self._on_log("[DEAD] Проверка прервана ошибкой — причина в журнале выше.", "dead")
+        else:
+            self._on_log("[INFO] Проверка завершена.", "info")
 
     def _on_proxy_profile(self, summary):
         self._proxy_summary = summary

@@ -144,7 +144,8 @@ class PipelineSetupMixin:
                 if fresh_needed:
                     proxy_profiles.update(profile_proxies(
                         fresh_needed, timeout=timeout, workers=threads,
-                        progress_callback=on_prof))
+                        progress_callback=on_prof,
+                        should_stop=lambda: getattr(self, "_stop_requested", False)))
 
                 vals = list(proxy_profiles.values())
                 ptr_n = sum(1 for v in vals if v["has_ptr"] is True)
@@ -607,6 +608,11 @@ class PipelineSetupMixin:
         if self.cleaner is not None:
             self.cleaner.установить_проверку_домена(self._домен_принимает_почту)
 
+        # «Стоп» на профилях: фоновое обновление не запускаем вовсе. Раньше
+        # оно стартовало уже ПОСЛЕ «Стопа» с новым, невзведённым флагом и
+        # жило до 10 минут (рецензия 17.10.2026, четвёртая).
+        if getattr(self, "_stop_requested", False):
+            return
         if proxy_profiles:
             self.network.set_proxy_profiles(proxy_profiles)
             # Профиль протухает: у ротирующегося прокси выходной IP меняется

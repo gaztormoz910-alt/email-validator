@@ -985,7 +985,8 @@ def test_cli_ctrl_c_stops_like_the_window_and_keeps_started_work(monkeypatch, tm
             self._finish_activity()
             self.callbacks["on_complete"]()
 
-    _cli(monkeypatch, tmp_path, _Долгий)
+    код = _cli(monkeypatch, tmp_path, _Долгий)
+    assert код == 2, "прерванный прогон вернул код успеха"
     err = capsys.readouterr().err
     assert "Доделываю начатые проверки" in err, err
     assert "■ Остановлено по вашей команде" in err, err
@@ -1049,3 +1050,191 @@ def test_tor_start_gives_up_at_once_on_stop(monkeypatch):
     assert менеджер.start(num_instances=3, should_stop=стоп.is_set) is False
     # Без «Стопа» это разнос 0/6/12 с и выдержка 10 с перед повтором.
     assert time.monotonic() - начало < 3, time.monotonic() - начало
+
+
+# ══════════════════════════════ четвёртая рецензия (17.10.2026)
+
+def test_cli_second_ctrl_c_still_writes_what_is_collected(monkeypatch, tmp_path, capsys):
+    """Второй Ctrl+C — выход сразу, но собранное записано и код 2."""
+    import _thread
+    import cli
+    from core.pipeline import ValidationPipeline
+    отпусти = threading.Event()
+    выходы = []
+    monkeypatch.setattr(cli, "_выйти_сразу", lambda код: выходы.append(код))
+
+    class _Зависший(ValidationPipeline):
+        def setup(self, **kw):
+            pass
+
+        def run_pipeline(self, sources, **kw):
+            self.is_running = True
+            self._stage("check")
+            self.callbacks["on_result"]("early@example.com", "Valid", "250 OK", "mx", {})
+            threading.Timer(0.3, _thread.interrupt_main).start()
+            threading.Timer(1.0, _thread.interrupt_main).start()
+            отпусти.wait(30)            # начатая проверка висит и после «Стопа»
+
+    try:
+        код = _cli(monkeypatch, tmp_path, _Зависший)
+    finally:
+        отпусти.set()
+    assert выходы == [2] and код == 2, (выходы, код)
+    assert "early@example.com" in (tmp_path / "out.csv").read_text(encoding="utf-8-sig")
+    assert "Выхожу сразу" in capsys.readouterr().err
+
+
+def test_feeder_read_error_keeps_resume_memory_and_blames_the_check(monkeypatch):
+    from core.runstate import RunState
+    from core.streamer import StreamLoader
+    стёрто = []
+    исходный = RunState.clear
+    monkeypatch.setattr(RunState, "clear", lambda self: (стёрто.append(1), исходный(self)))
+
+    # Контроль: обычный прогон до конца память стирает.
+    p, _строки, _р = _конвейер()
+    p.run_pipeline([{"type": "text", "content": "ok1@example.com"}], threads=1,
+                   fix_typos=True, check_spam=False, deep_ping=True, enable_ai=False)
+    assert стёрто == [1]
+
+    def обрыв(self):
+        yield "g0@example.com", {}
+        raise OSError("диск отвалился")
+    monkeypatch.setattr(StreamLoader, "stream_emails", обрыв)
+    p, строки, _р = _конвейер()
+    p.run_pipeline([{"type": "text", "content": "x@example.com"}], threads=1,
+                   fix_typos=True, check_spam=False, deep_ping=True, enable_ai=False)
+    assert стёрто == [1], "после обрыва чтения память продолжения стёрта"
+    этапы = [т for тег, т in строки if тег == "stage"]
+    assert any(т.startswith("✗ Проверка адресов — оборвано ошибкой") for т in этапы), этапы
+    assert any(т.startswith("✓ Подведение итогов") for т in этапы), этапы
+
+
+def test_pause_during_a_wait_does_not_hide_a_hung_check():
+    m, часы, _ = монитор()
+    m.stage("retry")
+    m.enter()                                    # эта проверка повисла
+    m.wait(420, "ближайший отложенный адрес созреет")
+    часы.прошло(250)
+    assert уровень(m) == "stall"
+    m.set_paused(True)
+    часы.прошло(5)
+    m.set_paused(False)
+    assert уровень(m) == "stall", describe(m.snapshot())
+
+
+def test_stop_skips_profiling_of_unstarted_proxies(monkeypatch):
+    import core.proxy_probe as пробы
+    вызовы = []
+    monkeypatch.setattr(пробы, "probe_proxy_target",
+                        lambda *a, **kw: (вызовы.append(a[0]), (False, None, None, "x"))[1])
+    итог = пробы.profile_proxies(["127.0.0.1:1", "127.0.0.1:2"], timeout=1, workers=2,
+                                 should_stop=lambda: True)
+    assert итог == {} and вызовы == []
+
+
+def test_stop_during_profiles_starts_no_refresher(monkeypatch):
+    import core.network as сеть
+    import core.pipeline_setup as подготовка
+    p, _строки, _р = _конвейер()
+    monkeypatch.setattr(подготовка, "BlacklistDownloader",
+                        type("Б", (), {"download_all": lambda self, log_callback=None: None}))
+    monkeypatch.setattr(сеть, "filter_live_proxies",
+                        lambda proxies, **kw: (["127.0.0.1:1"], 1))
+
+    def профили(live, timeout, threads):
+        p.stop()                                 # «Стоп» нажат на профилях
+        return {"127.0.0.1:1": {"has_ptr": True}}
+    p._profile_live_proxies = профили
+    p.setup(timeout=5, enable_ai=False, proxies=["127.0.0.1:1"], threads=2, use_cache=False)
+    assert "_refresh_thread" not in p.__dict__, "обновление профилей запущено после «Стопа»"
+
+
+def test_window_says_how_the_run_ended():
+    from ui.webapp import ValidatorApi
+    логи = []
+    окно = ValidatorApi.__new__(ValidatorApi)
+    окно._on_log = lambda m, t="info": логи.append(m)
+    for исход, слова in (("stopped", "Проверка остановлена"),
+                         ("failed", "Проверка прервана ошибкой"),
+                         ("done", "Проверка завершена")):
+        логи.clear()
+        окно.pipeline = type("P", (), {"blocked_reason": "",
+                                      "activity": type("A", (), {"state": исход})()})()
+        окно._on_complete()
+        assert any(слова in m for m in логи), (исход, логи)
+
+
+def test_tor_stage_cut_by_stop_gets_a_cross():
+    m, часы, строки = монитор(kind="parser")
+    m.stage("p_tor")
+    m.request_stop()
+    часы.прошло(4)
+    m.finish("stopped")
+    assert "✗ Запуск Tor — остановлено через 4 с" in [т for _тег, т in строки]
+
+
+def test_tor_stopped_start_is_not_reported_as_failure(monkeypatch):
+    import core.tor_manager as тор
+    логи = []
+
+    class _Узел:
+        def __init__(self, *a, **kw):
+            pass
+
+        def start(self, should_stop=None):
+            return False
+
+    monkeypatch.setattr(тор, "TorInstance", _Узел)
+    менеджер = object.__new__(тор.TorManager)
+    менеджер.log_callback = lambda *a, **k: None
+    менеджер._log = lambda т, *a, **k: логи.append(т)
+    менеджер.base_dir = менеджер.tor_exe = None
+    менеджер.instances = []
+    менеджер.check_and_download = lambda: True
+    менеджер._kill_orphans = lambda: None
+    assert менеджер.start(num_instances=1, should_stop=lambda: True) is False
+    assert not any("[DEAD]" in т for т in логи), логи
+    assert any("Запуск Tor остановлен" in т for т in логи), логи
+
+
+def test_duckduckgo_link_walk_stops_on_stop(monkeypatch):
+    import requests
+    import core.parser.engine as движки
+    заходов = {"n": 0}
+    ссылки = "".join('<a href="//duckduckgo.com/l/?uddg=https%%3A%%2F%%2Fsite%d.example%%2F&x=1">r</a>' % i
+                     for i in range(5))
+
+    class _Ответ:
+        status_code = 200
+        text = "<html>duckduckgo results " + ссылки + "</html>"
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(requests.Session, "post", lambda self, *a, **kw: _Ответ())
+
+    def заход(*a, **kw):
+        заходов["n"] += 1
+        raise requests.exceptions.Timeout("сайт молчит")
+    monkeypatch.setattr(движки, "_get_verified", заход)
+    monkeypatch.setattr(движки.time, "sleep", lambda s: None)
+
+    class _Прокси:
+        timeout = 1
+
+        def get_proxy(self):
+            return None
+
+        def get_total_count(self):
+            return 0
+
+        def mark_fail(self, url):
+            pass
+
+        def mark_success(self, url):
+            pass
+    движок = движки.DuckDuckGoEngine(_Прокси(), on_log=lambda т: None,
+                                     is_stopped=lambda: заходов["n"] >= 1)
+    list(движок.search_generator("site:example.com"))
+    assert заходов["n"] == 1, заходов
