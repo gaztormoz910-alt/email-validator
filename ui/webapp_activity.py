@@ -132,7 +132,10 @@ class ActivityBridgeMixin:
         elif stopped:
             outcome, note = "stopped", ""
         else:
-            outcome, note = "blocked", "сбор не смог начаться — причина строкой выше"
+            # «В журнале выше», а не «строкой выше»: между причиной и итогом
+            # стоит строка этапа «✗ … дальше не пройти», а в полосе окна строк
+            # «выше» нет вовсе (рецензия 18.10.2026, шестая).
+            outcome, note = "blocked", "сбор не смог начаться — причина в журнале выше"
         self.parser_activity.finish(outcome, note)
         pulse = self.__dict__.get("_parser_pulse")
         if pulse is not None:
