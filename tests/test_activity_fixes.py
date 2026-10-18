@@ -1383,3 +1383,51 @@ def test_after_second_ctrl_c_late_results_cannot_be_marked_done(monkeypatch, tmp
         отпусти.set()
     assert not поздний.wait(0.5), "поток прогона выдал результат после снимка"
     assert "late@example.com" not in (tmp_path / "out.csv").read_text(encoding="utf-8-sig")
+
+
+# ══════════════════════════════ шестая рецензия (18.10.2026)
+
+def test_second_ctrl_c_with_a_failing_write_exits_at_once(monkeypatch, tmp_path):
+    """Запись упала после второго Ctrl+C — выход сразу с кодом 1, а не
+    вечное ожидание пула, который ждёт удержанный замок результатов."""
+    import _thread
+    import cli
+    from core.pipeline import ValidationPipeline
+    отпусти = threading.Event()
+    выходы = []
+    monkeypatch.setattr(cli, "_выйти_сразу", lambda код: выходы.append(код))
+
+    class _Зависший(ValidationPipeline):
+        def setup(self, **kw):
+            pass
+
+        def run_pipeline(self, sources, **kw):
+            self.is_running = True
+            self._stage("check")
+            self.callbacks["on_result"]("early@example.com", "Valid", "250 OK", "mx", {})
+            threading.Timer(0.3, _thread.interrupt_main).start()
+            threading.Timer(1.0, _thread.interrupt_main).start()
+            отпусти.wait(30)
+
+    monkeypatch.setattr(cli, "ValidationPipeline", _Зависший)
+    база = tmp_path / "base.txt"
+    база.write_text("a@example.com\n", encoding="utf-8")
+    нет_папки = tmp_path / "нет" / "out.csv"
+    try:
+        with pytest.raises(OSError):
+            cli.main(["validate", "--emails", str(база), "--allow-direct",
+                      "-o", str(нет_папки), "--no-ai"])
+    finally:
+        отпусти.set()
+    assert выходы == [1], выходы
+
+
+def test_parser_blocked_note_points_to_the_journal_not_a_line():
+    from ui.webapp import ValidatorApi
+    окно = ValidatorApi()
+    окно.parser = type("P", (), {"_stop_event": threading.Event(), "failed_reason": ""})()
+    окно.parser_activity.begin()
+    окно._finish_parser_activity(True)
+    d = describe(окно.parser_activity.snapshot())
+    assert d["level"] == "blocked"
+    assert "в журнале выше" in d["detail"] and "строкой выше" not in d["detail"], d
