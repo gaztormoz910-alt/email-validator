@@ -218,3 +218,32 @@ def test_failing_print_of_the_cause_still_exits_at_once(monkeypatch, tmp_path):
     finally:
         отпусти.set()
     assert выходы == [1], выходы
+
+
+def test_inherited_sig_ign_is_respected(monkeypatch, tmp_path):
+    """Родитель велел Ctrl+C игнорировать («cmd &» в скрипте, «trap '' INT»)
+    — CLI не ставит поверх свой обработчик: прогон доходит до конца, код 0,
+    и после возврата снова SIG_IGN."""
+    from core.pipeline import ValidationPipeline
+    во_время = []
+
+    class _Смотрит(ValidationPipeline):
+        def setup(self, **kw):
+            pass
+
+        def run_pipeline(self, sources, **kw):
+            self._stage("check")
+            во_время.append(signal.getsignal(signal.SIGINT))
+            self.callbacks["on_result"]("a@example.com", "Valid", "250 OK", "mx", {})
+            self._finish_activity()
+            self.callbacks["on_complete"]()
+
+    до = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        код = _прогон(monkeypatch, tmp_path, _Смотрит)
+        после = signal.getsignal(signal.SIGINT)
+    finally:
+        signal.signal(signal.SIGINT, до)
+    assert во_время == [signal.SIG_IGN], "унаследованный SIG_IGN подменён на время прогона"
+    assert после == signal.SIG_IGN
+    assert код == 0
