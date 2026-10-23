@@ -211,8 +211,6 @@ def cmd_validate(args):
     # Пишется в обход наблюдения — сам пульс событием не считается.
     from core.activity import Pulse
     pulse = Pulse(pipeline.activity, emit=lambda text, tag: on_log(text, tag))
-    pipeline.activity.begin()
-    pulse.start()
 
     # Прогон — в своём потоке, а главный ждёт его и слушает Ctrl+C.
     #
@@ -252,7 +250,6 @@ def cmd_validate(args):
             сбой.append(exc)
 
     поток = threading.Thread(target=прогон, name="cli-run", daemon=True)
-    поток.start()
 
     прервано = False
     # Второй Ctrl+C — «выйти сразу». Но собранное всё равно пишется в файл:
@@ -274,6 +271,20 @@ def cmd_validate(args):
     def _на_ctrl_c(signum, frame):
         нажатия.append(signum)
 
+    def вернуть_прежний():
+        """Снять наш обработчик: поставить тот, что стоял до прогона."""
+        if слушаем:
+            try:
+                signal.signal(signal.SIGINT, прежний_sigint
+                              if прежний_sigint is not None
+                              else signal.default_int_handler)
+            except (ValueError, OSError):
+                pass
+
+    # Обработчик ставится ДО запуска пульса и прогона. Раньше он ставился
+    # после поток.start(), и Ctrl+C в этот миг бросал KeyboardInterrupt мимо
+    # всей обработки: прогон уже шёл, а CLI выходил с трассировкой, без
+    # «Стопа» и без файла (проверка 23.10.2026).
     if слушаем:
         try:
             прежний_sigint = signal.getsignal(signal.SIGINT)
@@ -281,7 +292,13 @@ def cmd_validate(args):
         except (ValueError, OSError):
             слушаем = False
 
+    # Дошёл ли главный до конца ожидания штатно. Только тогда дальше идёт
+    # запись результата, и обработчик меняется сразу на SIG_IGN (см. finally).
+    дошли = False
     try:
+        pipeline.activity.begin()
+        pulse.start()
+        поток.start()
         # Главный ждёт конца прогона короткими join() и после каждого смотрит
         # на число нажатий: первое — «Стоп» (доделать начатое), второе —
         # «выйти сразу». Реакция на нажатие — не позже чем через 0.25 с.
@@ -306,6 +323,7 @@ def cmd_validate(args):
             pipeline._finish_activity(interrupted=True)
         elif сбой:
             raise сбой[0]
+        дошли = True
     except Exception as exc:
         # Ошибка внутри — итог «прервано ошибкой», а не «готово». Причина
         # строкой [DEAD] — ДО итога, как в окне: трассировка Python выйдет
@@ -315,35 +333,56 @@ def cmd_validate(args):
         pipeline._finish_activity(failed=True)
         raise
     finally:
-        # Обработчик Ctrl+C снимается ДО записи: дальше за прерывания отвечает
-        # _без_прерываний() (SIG_IGN), а чужой обработчик там был бы лишним.
-        if слушаем:
-            try:
-                signal.signal(signal.SIGINT, прежний_sigint
-                              if прежний_sigint is not None
-                              else signal.default_int_handler)
-            except (ValueError, OSError):
-                pass
+        # Наш обработчик Ctrl+C снимается здесь. Если дальше запись — сразу на
+        # SIG_IGN, без промежутка с прежним обработчиком: раньше между его
+        # возвратом и _без_прерываний() Ctrl+C снова бросал KeyboardInterrupt,
+        # и законченный прогон выходил без файла, хотя журнал сделанного уже
+        # на диске (проверка 23.10.2026). Исходный обработчик вернёт
+        # _без_прерываний() после записи. Если дальше записи нет (ошибка) —
+        # исходный возвращается сразу.
+        #
         # Итог «готово / остановлено / не выполнялось» и конец пульса — при
         # любом исходе. Повторный вызов после run_pipeline ничего не делает.
-        pipeline._finish_activity()
-        pulse.stop()
-    if not args.quiet:
-        print(file=sys.stderr)
+        # Мост SIG_IGN ставится, только если и это прошло: исключение здесь
+        # иначе унесло бы с собой SIG_IGN, и Ctrl+C в процессе не работал бы.
+        итог_подведён = False
+        try:
+            pipeline._finish_activity()
+            pulse.stop()
+            итог_подведён = True
+        finally:
+            if дошли and итог_подведён and слушаем:
+                try:
+                    signal.signal(signal.SIGINT, signal.SIG_IGN)
+                except (ValueError, OSError):
+                    вернуть_прежний()
+            else:
+                вернуть_прежний()
+    try:
+        if not args.quiet:
+            print(file=sys.stderr)
 
-    # Прогон остановлен до первого адреса (порт 25 закрыт, ни один прокси
-    # не ожил). Пустой файл с кодом 0 выглядел бы как законченная проверка
-    # базы, в которой просто ничего не нашлось.
-    if getattr(pipeline, "blocked_reason", ""):
-        print("Проверка не выполнялась: %s. Подробности — в строках [DEAD] выше."
-              % pipeline.blocked_reason, file=sys.stderr)
-        return 3
+        # Прогон остановлен до первого адреса (порт 25 закрыт, ни один прокси
+        # не ожил). Пустой файл с кодом 0 выглядел бы как законченная проверка
+        # базы, в которой просто ничего не нашлось.
+        if getattr(pipeline, "blocked_reason", ""):
+            вернуть_прежний()
+            print("Проверка не выполнялась: %s. Подробности — в строках [DEAD] выше."
+                  % pipeline.blocked_reason, file=sys.stderr)
+            return 3
+    except BaseException:
+        вернуть_прежний()
+        raise
 
     # Дальше пишется результат, и Ctrl+C его больше не обрывает: файл,
     # оборванный на полуслове, хуже ожидания в несколько секунд, а журнал
     # сделанного к этому моменту уже на диске — недописанные адреса
     # следующий запуск счёл бы проверенными (рецензия 17.10.2026, пятая).
-    with _без_прерываний():
+    исходный = None
+    if слушаем:
+        исходный = (прежний_sigint if прежний_sigint is not None
+                    else signal.default_int_handler)
+    with _без_прерываний(вернуть=исходный):
         if not сразу:
             return _записать_итог(args, pipeline, results, lock, done, on_log,
                                   прервано, сразу)
@@ -355,10 +394,15 @@ def cmd_validate(args):
             # запись упала (файл открыт в Excel, нет папки, полон диск), выход
             # интерпретатора ждал бы потоки пула перепроверки, а те — этот
             # замок: процесс висел бы, и Ctrl+C уже не помогал (рецензия
-            # 18.10.2026, шестая). Причина печатается, выход — сразу.
-            import traceback
-            traceback.print_exc()
-            _выйти_сразу(1)
+            # 18.10.2026, шестая). Причина печатается, выход — сразу. Выход —
+            # в finally: если упадёт и сама печать (stderr в файл на том же
+            # полном диске), процесс всё равно не повиснет (проверка
+            # 23.10.2026).
+            try:
+                import traceback
+                traceback.print_exc()
+            finally:
+                _выйти_сразу(1)
             raise
 
 
@@ -421,12 +465,14 @@ def _записать_итог(args, pipeline, results, lock, done, on_log, пр
 
 
 @contextlib.contextmanager
-def _без_прерываний():
+def _без_прерываний(вернуть=None):
     """Ctrl+C не действует, пока пишется результат.
 
     Ставится только из главного потока — обработчик сигнала можно менять
     лишь там; вызов из другого потока (так бывает в тестах) идёт без
-    защиты. Прежний обработчик возвращается при любом исходе."""
+    защиты. При любом исходе ставится `вернуть`, а если он не задан — тот
+    обработчик, что стоял на входе. cmd_validate передаёт исходный: к входу
+    сюда стоит уже не он, а SIG_IGN-мост без окна для KeyboardInterrupt."""
     поставлен = False
     прежний = None
     if threading.current_thread() is threading.main_thread():
@@ -440,7 +486,8 @@ def _без_прерываний():
         yield
     finally:
         if поставлен:
-            signal.signal(signal.SIGINT, прежний if прежний is not None
+            итог = вернуть if вернуть is not None else прежний
+            signal.signal(signal.SIGINT, итог if итог is not None
                           else signal.default_int_handler)
 
 
