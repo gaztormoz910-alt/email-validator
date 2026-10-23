@@ -24,6 +24,25 @@ import time
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _ctrl_c_работает():
+    """Ctrl+C в этих тестах обязан доходить до CLI, как бы ни запустили pytest.
+
+    Запущенный фоном («pytest &» в скрипте) процесс наследует SIGINT=SIG_IGN,
+    и тогда CLI честно не ставит свой обработчик (cli.py уважает унаследованный
+    SIG_IGN), а _thread.interrupt_main ничего не делает — тесты упали бы ложно.
+    На время теста ставится обычный обработчик, после — прежний."""
+    import signal as _signal
+    прежний = _signal.getsignal(_signal.SIGINT)
+    if прежний == _signal.SIG_IGN:
+        _signal.signal(_signal.SIGINT, _signal.default_int_handler)
+    try:
+        yield
+    finally:
+        if прежний == _signal.SIG_IGN:
+            _signal.signal(_signal.SIGINT, прежний)
+
+
 def _прогон(monkeypatch, tmp_path, класс):
     import cli
     monkeypatch.setattr(cli, "ValidationPipeline", класс)
