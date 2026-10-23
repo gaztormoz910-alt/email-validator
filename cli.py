@@ -288,7 +288,15 @@ def cmd_validate(args):
     if слушаем:
         try:
             прежний_sigint = signal.getsignal(signal.SIGINT)
-            signal.signal(signal.SIGINT, _на_ctrl_c)
+            if прежний_sigint == signal.SIG_IGN:
+                # Родитель велел Ctrl+C игнорировать: фоновая команда «&» в
+                # неинтерактивном sh, «trap '' INT» в скрипте. Перекрыть это
+                # своим обработчиком значит остановить прогон, от которого
+                # Ctrl+C прямо отвели (код 2 вместо 0, «по вашей команде» —
+                # неправда). Так и было до 55632b7 (проверка 23.10.2026).
+                слушаем = False
+            else:
+                signal.signal(signal.SIGINT, _на_ctrl_c)
         except (ValueError, OSError):
             слушаем = False
 
