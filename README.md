@@ -12,7 +12,7 @@
 Python и все библиотеки лежат внутри — ставить отдельно ничего не нужно.
 Постоянная ссылка всегда отдаёт свежую сборку:
 
-    https://github.com/gaztormoz910-alt/email-validator/releases/latest
+    .../releases/latest
 
 | Система | Файл | Что делать |
 |---|---|---|

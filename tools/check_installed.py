@@ -41,8 +41,8 @@ except Exception:
 sys.path.insert(0, КОРЕНЬ)
 
 ИМЯ = "MailFact"
-ВЛАДЕЛЕЦ = "gaztormoz910-alt"
-РЕПОЗИТОРИЙ = "email-validator"
+ВЛАДЕЛЕЦ = os.environ.get("GITHUB_REPOSITORY_OWNER", "validator")
+РЕПОЗИТОРИЙ = os.environ.get("GITHUB_REPOSITORY_NAME", "email-validator")
 ССЫЛКА = ("https://github.com/%s/%s/releases/latest/download/%s-setup.exe"
           % (ВЛАДЕЛЕЦ, РЕПОЗИТОРИЙ, ИМЯ))
 

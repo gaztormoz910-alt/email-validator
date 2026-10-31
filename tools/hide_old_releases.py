@@ -38,7 +38,7 @@ except Exception:
     pass
 
 API = "https://api.github.com"
-РЕПОЗИТОРИЙ = "gaztormoz910-alt/email-validator"
+РЕПОЗИТОРИЙ = os.environ.get("GITHUB_REPOSITORY", "validator/email-validator")
 ПОПЫТОК_НАЙТИ_НОВЫЙ = 6
 ПАУЗА_С = 10
 
