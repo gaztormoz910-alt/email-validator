@@ -208,5 +208,59 @@ class TestFreeProviderClassification(unittest.TestCase):
             self.assertEqual(r["provider_type"], "Free")
         self.assertEqual(len(set(scores.values())), 1, f"скоры разошлись: {scores}")
 
+
+class TestAuditSubsystemsCoverage(unittest.TestCase):
+    """Тесты подсистем, исправленных в ходе устранения дефектов аудита."""
+
+    def test_gravatar_lru_move_to_end(self):
+        from core.gravatar import GravatarChecker
+        checker = GravatarChecker()
+        with checker._cache_lock:
+            checker._cache.clear()
+            checker._cache["first@test.com"] = False
+            checker._cache["second@test.com"] = True
+            self.assertEqual(list(checker._cache.keys()), ["first@test.com", "second@test.com"])
+
+        # При повторном обращении к "first@test.com" запись должна переместиться в конец (LRU)
+        res = checker.has_gravatar("first@test.com")
+        self.assertFalse(res)
+        with checker._cache_lock:
+            self.assertEqual(list(checker._cache.keys())[-1], "first@test.com")
+
+    def test_spam_filter_loaded_and_detects(self):
+        from core.filters import SpamFilter
+        sf = SpamFilter()
+        self.assertGreater(sf.get_count(), 0)
+        self.assertTrue(sf.is_spam_or_disposable("trash@mailinator.com"))
+        self.assertFalse(sf.is_spam_or_disposable("valid@gmail.com"))
+
+    def test_domain_age_datetime_utc_safety(self):
+        import datetime
+        from core.pipeline import _utc_now, _as_utc
+        now = _utc_now()
+        self.assertIsNotNone(now.tzinfo)
+
+        # Naive datetime
+        naive = datetime.datetime(2020, 1, 1, 12, 0, 0)
+        aware_converted = _as_utc(naive)
+        self.assertIsNotNone(aware_converted.tzinfo)
+        diff_naive = (now - aware_converted).days
+        self.assertGreater(diff_naive, 365)
+
+        # Aware datetime
+        aware = datetime.datetime(2020, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+        diff_aware = (now - _as_utc(aware)).days
+        self.assertEqual(diff_naive, diff_aware)
+
+    def test_mail_from_pool_no_strict_spf(self):
+        from core.network import MAIL_FROM_POOL
+        self.assertGreaterEqual(len(MAIL_FROM_POOL), 3)
+        for sender in MAIL_FROM_POOL:
+            # Не должно быть доменов со строгим SPF (-all)
+            self.assertNotIn("@outlook.com", sender.lower())
+            self.assertNotIn("@yahoo.com", sender.lower())
+
+
 if __name__ == '__main__':
     unittest.main()
+
