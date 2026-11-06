@@ -21,6 +21,7 @@
 раскладке — нет, зато после перевода раскладки строка становится нормальным
 адресом. Оба случая закреплены тестами (tests/test_input_guard.py).
 """
+import csv
 import io
 import os
 import re
@@ -65,6 +66,18 @@ DORK_OPERATORS = (
     "allintext:", "allinurl:", "cache:", "related:", "link:", "before:",
     "after:", "define:", "imagesize:",
 )
+
+# Оператор считается оператором только в начале слова: в начале строки, после
+# пробела, кавычки, скобки, знака (`-site:`, `+site:`) или разделителя без
+# пробела (`"@gmail.com",site:…`, `"@gmail.com"|site:…`). Простое вхождение
+# подстроки находило `ext:` в «Next:» и «Text:», и строка базы с такой
+# заметкой в поле уезжала в поисковые запросы (рецензия правки E5, 03.11.2026).
+_DORK_OPERATOR_RE = re.compile(
+    r"(?:^|[\s\"'(+,;|-])(?:%s)" % "|".join(re.escape(op) for op in DORK_OPERATORS))
+
+# «|» с пробелами по краям — оператор ИЛИ поисковика (`"a@x.com" | "b@y.com"`),
+# а не разделитель полей: выгрузки с разделителем «|» пишут поля впритык.
+_SEARCH_OR_RE = re.compile(r"\s\|\s")
 
 # Домены верхнего уровня не на латинице. Полного списка IANA тут нет и не
 # нужно: важно отличить существующий кириллический домен от буквенной каши,
@@ -185,9 +198,20 @@ def looks_like_email(value):
     local, _, domain = value.partition("@")
     if not local or not domain or " " in value:
         return False
+    # Двоеточия не бывает ни в имени ящика без кавычек, ни в домене. Пока
+    # операторы поиска узнавались подстрокой, `website:@gmail.com` уходил в
+    # запросы; после сужения до начала слова он прошёл бы за адрес
+    # (рецензия правки E5, 06.11.2026).
+    if ":" in value:
+        return False
     # Длины по БАЙТАМ в UTF-8, а не по символам: кириллическое имя из сорока
-    # букв укладывается в лимит по символам и вылетает по байтам.
-    if len(local.encode("utf-8")) > 64 or len(domain.encode("utf-8")) > 255:
+    # букв укладывается в лимит по символам и вылетает по байтам. Одиночный
+    # суррогат в UTF-8 не кодируется: из вставки через JSON он приходит
+    # настоящим, и проверка падала вместо ответа — это не адрес.
+    try:
+        if len(local.encode("utf-8")) > 64 or len(domain.encode("utf-8")) > 255:
+            return False
+    except UnicodeError:
         return False
     return _tld_exists(domain)
 
@@ -226,16 +250,76 @@ def looks_like_proxy(value):
     return had_scheme and _is_host(value)
 
 
+def _base_line_with_quotes(value):
+    """Строка базы: «"Имя" <адрес>» или поля через разделитель, одно из которых — адрес.
+
+    Поле с подстановкой (`"*@gmail.com"`) адресом не считается: это шаблон
+    поискового запроса, а не ящик.
+    """
+    # Мусор на входе — «не строка базы», а не падение (test_robustness).
+    if not isinstance(value, str) or not value:
+        return False
+    в_скобках = re.search(r"<([^<>]+)>", value)
+    if в_скобках and _is_plain_address(в_скобках.group(1).strip()):
+        return True
+    for separator in FIELD_SEPARATORS:
+        if separator not in value:
+            continue
+        if separator == "|" and _SEARCH_OR_RE.search(value):
+            continue        # это «ИЛИ» поисковика, а не поля базы
+        поля = _csv_fields(value, separator)
+        if поля and any(_is_plain_address(поле.strip()) for поле in поля):
+            return True
+    return False
+
+
+def _csv_fields(value, separator):
+    """Поля строки, разобранной как CSV с этим разделителем; None — это не CSV.
+
+    Разбор строгий: за закрывающей кавычкой поля может стоять только
+    разделитель (пробелы перед ним прощаются). Выгрузка так и пишет, а запрос
+    «"адрес" слово» — нет: `"ivan@gmail.com"|"anna@gmail.com" marketing` и та
+    же строка через запятую на b68b9a8 были запросами, а простое разбиение по
+    разделителю делало их строками базы. Поле запросов отвергало такой список
+    целиком (проверка полноты правки E5, 04.11.2026). Модуль csv, а не split:
+    разделитель внутри кавычек (`"Petrov, Ivan"`) — часть поля, а не граница.
+    """
+    # Мусор на входе — «не CSV», а не падение (test_robustness). Разделитель —
+    # только из своих: с Python 3.13 csv сам отвергает кавычку и перевод
+    # строки в роли разделителя исключением ValueError, а на 3.11 молчит.
+    if not isinstance(value, str) or separator not in tuple(FIELD_SEPARATORS):
+        return None
+    value = re.sub(r'"[ ]+(?=%s)' % re.escape(separator), '"', value)
+    try:
+        return next(csv.reader([value], delimiter=separator, skipinitialspace=True,
+                               strict=True), None)
+    except csv.Error:
+        return None
+
+
+def _is_plain_address(value):
+    """Адрес без подстановочных знаков поиска."""
+    value = str(value or "").strip().strip("<>\"'")
+    return "*" not in value and "%" not in value and looks_like_email(value)
+
+
 def looks_like_dork(value):
     """Похожа ли строка на поисковый запрос."""
     value = str(value or "").strip()
     if not value:
         return False
     lowered = value.lower()
-    if any(op in lowered for op in DORK_OPERATORS):
+    if _DORK_OPERATOR_RE.search(lowered):
         return True
-    # Запрос в кавычках — тоже запрос: `"@aol.com" контакты`.
-    if '"' in value and " " in value:
+    # Запрос в кавычках — тоже запрос: `"@aol.com" контакты`. Но СТРОКА БАЗЫ
+    # с кавычками — не запрос: CSV-выгрузка `"ivan@gmail.com","Ivan Petrov","US"`
+    # и форма почтовика `"Ivan Petrov" <ivan@gmail.com>` тоже содержат и
+    # кавычку, и пробел. Замерено 03.11.2026 (аудит, .unlazy/rivals/ОТЧЁТ.md,
+    # E5): такой файл окно отвергало ЦЕЛИКОМ со словами «Это поисковые запросы».
+    #
+    # Отличается строка базы СТРОЕНИЕМ, а не тем, что в ней есть адрес: запрос
+    # `"ivan@gmail.com" телефон` и шаблон `"*@gmail.com" marketing` — запросы.
+    if '"' in value and " " in value and not _base_line_with_quotes(value):
         return True
     # Просто несколько слов без собаки и без двоеточия.
     if " " in value and "@" not in value and ":" not in value:
@@ -257,6 +341,12 @@ def detect_kind(line):
 
     if looks_like_dork(line):
         return KIND_DORK
+    # Строка базы с кавычками — адрес по тому же правилу, по которому она не
+    # запрос: одно решение, а не два. Поля ниже разбираются простым split, и
+    # ячейка `"ivan@gmail.com   "` с пробелами внутри кавычек там не узнаётся —
+    # строка выходила «непонятной» (рецензия правки E5, 06.11.2026).
+    if '"' in line and _base_line_with_quotes(line):
+        return KIND_EMAIL
     if looks_like_proxy(line):
         return KIND_PROXY
     if looks_like_email(line):
@@ -277,7 +367,12 @@ def detect_kind(line):
     for separator in FIELD_SEPARATORS:
         if separator in line:
             for part in line.split(separator):
-                if looks_like_email(part.strip()):
+                # Поле бывает и «ключ:значение»: `mailto:адрес`, `Email:адрес`,
+                # `"email":"адрес"` из JSON Lines. Двоеточия в адресе не
+                # бывает, и поле дробится по нему так же, как вся строка ниже
+                # (рецензия 5-го круга правки E5, 06.11.2026: без этого окно
+                # отвергало такие списки, которые принимало на b68b9a8).
+                if any(looks_like_email(кусок.strip()) for кусок in part.split(":")):
                     return KIND_EMAIL
     # Разделитель-двоеточие разбирается отдельно: у прокси он же служит
     # разделителем host:port, и до сюда доходят только строки, прокси не
@@ -308,12 +403,30 @@ def layout_suggestion(line):
     return fixed if detect_kind(fixed) != KIND_UNKNOWN else None
 
 
-def classify(lines, limit=SAMPLE_LINES):
+def _dork_by_old_rules(line):
+    """Запрос по правилам b68b9a8: оператор где угодно в строке или кавычка с пробелом."""
+    # Мусор на входе — «не запрос», а не падение (test_robustness).
+    if not isinstance(line, str):
+        return False
+    lowered = line.lower()
+    return any(op in lowered for op in DORK_OPERATORS) or ('"' in line and " " in line)
+
+
+def classify(lines, limit=SAMPLE_LINES, query_field=False):
     """Сводка по выборке строк: чего сколько и что это в целом.
 
     Возвращает словарь с числом строк каждого типа, доминирующим типом и
     примерами непонятных строк — их показывают владельцу, чтобы он видел, на
     чём именно споткнулась проверка, а не «в файле ошибка».
+
+    `query_field` — для поля запросов. Строка в кавычках с пробелом бывает и
+    строкой базы, и запросом: `"ivan@gmail.com", телефон директора`,
+    `"a@x.com"|"Oleg Petrov"`. Оператор внутри слова — тоже: `website:`,
+    `text:`. Строение их не различает, а поле — различает. Что вставлено в
+    поле запросов, то и есть запрос по прежним правилам (b68b9a8). Строкой
+    базы такую строку считает только поле адресов. Без этого поле запросов
+    отвергало списки, которые на b68b9a8 принимало (проверка полноты и
+    рецензия правки E5, 04–06.11.2026).
     """
     counts = {KIND_EMAIL: 0, KIND_PROXY: 0, KIND_DORK: 0, KIND_UNKNOWN: 0}
     samples = {KIND_EMAIL: [], KIND_PROXY: [], KIND_DORK: [], KIND_UNKNOWN: []}
@@ -336,6 +449,8 @@ def classify(lines, limit=SAMPLE_LINES):
         if seen > limit:
             break
         kind = detect_kind(line)
+        if query_field and kind != KIND_DORK and _dork_by_old_rules(line):
+            kind = KIND_DORK
         counts[kind] += 1
         if len(samples[kind]) < 3:
             samples[kind].append(line)
@@ -369,7 +484,7 @@ def check(lines, expected, limit=SAMPLE_LINES):
     так, чтобы её можно было показать владельцу без переписывания: она
     называет, что распознано, и куда это нести.
     """
-    summary = classify(lines, limit=limit)
+    summary = classify(lines, limit=limit, query_field=(expected == KIND_DORK))
     counts = summary["counts"]
     checked = summary["checked"]
 

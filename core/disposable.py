@@ -404,18 +404,16 @@ DISPOSABLE_DOMAINS = {
     "luxusmail.org",
     "emailable.rocks",
     "emailnax.com",
-    "burnermail.io",
     "mailgw.com",
     "tempmailo.com",
     "emaildrop.io",
     "inboxkitten.com",
     "mailpoof.com",
-    "33mail.com",
-    "anonaddy.com", "anonaddy.me",
-    "simplelogin.io", "simplelogin.co",
-    # duck.com, relay.firefox.com, privaterelay.appleid.com — НЕ одноразовые,
-    # это приватные relay-сервисы реальных людей (DuckDuckGo, Firefox, Apple).
-    # Ниже стоит защита, чтобы внешний список не вернул их обратно.
+    # Пересылок здесь нет НАМЕРЕННО — ни DuckDuckGo, Firefox и Apple, ни
+    # SimpleLogin, addy.io, Proton Pass, 33mail, Burner Mail. Их полный перечень
+    # и причина — в NEVER_DISPOSABLE ниже. Раньше часть из них (anonaddy.*,
+    # simplelogin.*, 33mail.com, burnermail.io) стояла в этом списке, и живой
+    # контакт получал «Trap/Disposable» без единого вопроса серверу.
     "icloud.com.disposable",
 }
 
@@ -431,11 +429,100 @@ DISPOSABLE_DOMAINS = {
 # сознательно — прямо над этой строкой стоит комментарий об этом, — а
 # автообновляемый data/disposable_more.txt возвращал duck.com обратно, и
 # решение молча отменялось скачанным файлом.
+#
+# ЭТО ЕДИНСТВЕННЫЙ ПЕРЕЧЕНЬ ПЕРЕСЫЛОК В ПРОГРАММЕ. core/heuristics.py берёт
+# его отсюда же (PRIVACY_RELAY_DOMAINS): там был свой перечень из 14 доменов с
+# пометкой «core/disposable.py специально не считает их одноразовыми», а здесь
+# стояли три. Восемь из тех четырнадцати этот модуль хоронил (аудит 03.11.2026,
+# .unlazy/rivals/ОТЧЁТ.md, E1) — два списка одного знания разошлись молча.
+#
+# Граница — по тому, живёт ли адрес. Пересылка живёт, пока её не отключил
+# хозяин, и всё это время письма доходят до него. spamgourmet.com сюда не
+# входит: его адреса сами умирают после заданного числа писем, то есть созданы,
+# чтобы их бросить, — это одноразовый ящик по определению программы.
 NEVER_DISPOSABLE = frozenset({
     "duck.com",                     # DuckDuckGo Email Protection
-    "relay.firefox.com",            # Firefox Relay
+    "relay.firefox.com",            # Firefox Relay (старые адреса)
+    "mozmail.com",                  # Firefox Relay
     "privaterelay.appleid.com",     # Apple «Скрыть мою почту»
+    "icloud.com",                   # Apple «Скрыть мою почту» (новые адреса)
+    "simplelogin.com", "simplelogin.io", "simplelogin.co",
+    "simplelogin.fr", "aleeas.com", "slmail.me", "8shield.net",   # SimpleLogin
+    # Общие пулы SimpleLogin: MX у всех четырёх — mx1/mx2.simplelogin.co (замер
+    # DNS 04.11.2026), сайт ведёт на simplelogin.io. slmails.com стоит в
+    # скачиваемом data/disposable_more.txt, и его пользователи получали
+    # Trap/Disposable: первый перечень его не знал.
+    "dralias.com", "silomails.com", "slmails.com", "8alias.com",
+    "anonaddy.com", "anonaddy.me", "addy.io",                     # addy.io
+    "passmail.net", "passmail.com", "passinbox.com", "passfwd.com",   # Proton Pass
+    "pass2mail.com",                # Proton Pass: сайт ведёт на proton.me/pass, MX — simplelogin.co
+    "33mail.com",                   # 33mail
+    "burnermail.io",                # Burner Mail
+    "erine.email",                  # Erine Email
+    # Forward Email: домены для платных клиентов (пост команды сервиса на
+    # discuss.privacyguides.net, 02.01.2024); MX — mx1/mx2.forwardemail.net.
+    "mailsire.com", "hideaddress.net", "secret.fyi", "hash.fyi",
+    # Маски Abine Blur (IronVest): справка IronVest велит внести @opayq.com в
+    # безопасные отправители, письмо пересылается «from a MASKED EMAIL you
+    # created using Blur». Хоронил его даже курируемый data/disposable.txt.
+    "opayq.com",
+    # Те же маски Blur: MX blurme.net — smtp7.opayq.com, у blurmail.net — те же
+    # серверы, что у opayq.com, у обоих SPF include:opayq.com (замер DNS 06.11.2026).
+    "blurme.net", "blurmail.net",
 })
+
+
+# Живые почтовики, которых программа знает по своим таблицам (core/filters.py,
+# BLACKLIST_SENTINELS). Достаются лениво и один раз: core.filters при импорте
+# собирает стража из таблиц провайдеров, а зовут отсюда на каждый адрес базы.
+_ЖИВЫЕ_ПОЧТОВИКИ = None
+
+
+def _живые_почтовики():
+    global _ЖИВЫЕ_ПОЧТОВИКИ
+    if _ЖИВЫЕ_ПОЧТОВИКИ is None:
+        try:
+            from core.filters import BLACKLIST_SENTINELS
+            стражи = frozenset(BLACKLIST_SENTINELS)
+        except Exception:
+            # Без стража проверка работает как раньше, а не падает: зовут
+            # отсюда из рабочих потоков, где исключение стоит потерянного адреса.
+            стражи = frozenset()
+        # Почтовая инфраструктура крупных служб (таблица ниже) — тоже живая
+        # почта. forwardemail.net, где живут support@ и abuse@ самого сервиса,
+        # и yandex.net хоронил широкий сборник, хотя программа сама числит их
+        # «никогда не одноразовыми» (вторая проверка полноты, 06.11.2026).
+        _ЖИВЫЕ_ПОЧТОВИКИ = стражи | _MX_NEVER_DISPOSABLE
+    return _ЖИВЫЕ_ПОЧТОВИКИ
+
+
+def _цепочка(domain):
+    """Домен и его родители до второго уровня: `a.b.c.com` → a.b.c.com, b.c.com, c.com."""
+    # Мусор на входе — пустая цепочка, а не падение: зовут отсюда из рабочих
+    # потоков, где исключение стоит потерянного адреса (test_robustness).
+    if not isinstance(domain, str) or not domain:
+        return []
+    метки = domain.split(".")
+    return [".".join(метки[i:]) for i in range(len(метки) - 1)]
+
+
+def is_protected_domain(domain) -> bool:
+    """Домен, который одноразовым не бывает ни по какому списку.
+
+    Пересылка — не одноразовый ящик, и её поддомены тоже: у addy.io и 33mail
+    ящик пользователя — это `user.anonaddy.com` и `bearcat.33mail.com`. Живой
+    почтовик одноразовым не бывает, в каком бы списке он ни оказался:
+    скачанные списки страж чистит при загрузке (core/filters.py), а встроенный
+    набор выше — нет, и anonaddy.me с simplelogin.io, которых программа сама
+    числит живыми, хоронились именно им (аудит, E2). Одно правило на все пути —
+    список, базу и шаг по почтовому серверу (core/settle.py).
+    """
+    if not isinstance(domain, str) or not domain:
+        return False
+    domain = domain.lower().strip()
+    if any(звено in NEVER_DISPOSABLE for звено in _цепочка(domain)):
+        return True
+    return domain in _живые_почтовики()
 
 
 def is_disposable(email: str) -> bool:
@@ -447,9 +534,9 @@ def is_disposable(email: str) -> bool:
         return False
     domain = email.rsplit("@", 1)[1].lower().strip()
 
-    # Пересылка — не одноразовый ящик. Проверяется ПЕРВОЙ: иначе достаточно
-    # одной строки в скачанном списке, чтобы живой контакт получил приговор.
-    if domain in NEVER_DISPOSABLE:
+    # Защищённый домен проверяется ПЕРВЫМ: иначе достаточно одной строки в
+    # скачанном списке, чтобы живой контакт получил приговор.
+    if is_protected_domain(domain):
         return False
 
     if domain in DISPOSABLE_DOMAINS:

@@ -49,14 +49,13 @@ def local_part_entropy(local: str) -> float:
 
 # Приватные relay-сервисы выдают случайные локальные части, но за ними стоят
 # РЕАЛЬНЫЕ люди: Apple Private Relay включён у миллионов по умолчанию.
-# core/disposable.py специально не считает их одноразовыми — здесь та же логика.
-PRIVACY_RELAY_DOMAINS = {
-    "privaterelay.appleid.com", "icloud.com",
-    "duck.com", "relay.firefox.com", "mozmail.com",
-    "anonaddy.me", "anonaddy.com", "addy.io",
-    "simplelogin.io", "simplelogin.com", "aleeas.com", "slmail.me",
-    "passinbox.com", "passmail.net",
-}
+#
+# Перечень — ТОТ ЖЕ объект, что в core/disposable.py, а не копия. Здесь стоял
+# свой список из 14 доменов с пометкой «core/disposable.py специально не
+# считает их одноразовыми», а там было три, и восемь из этих четырнадцати
+# хоронились как одноразовые (аудит 03.11.2026, E1). Один перечень на обе
+# проверки не может разойтись.
+from core.disposable import NEVER_DISPOSABLE as PRIVACY_RELAY_DOMAINS  # noqa: E402
 
 
 # Минимальная длина префикса, который считаем осмысленным именем. Короче —
@@ -110,8 +109,11 @@ def looks_machine_generated(email: str) -> bool:
     local = local.lower()
     domain = domain.lower()
 
-    # Приватный relay — случайная локальная часть тут норма, а не признак бота
-    if domain in PRIVACY_RELAY_DOMAINS:
+    # Приватный relay — случайная локальная часть тут норма, а не признак бота.
+    # Поддомен тоже: у addy.io и 33mail ящик пользователя — `user.anonaddy.com`,
+    # `bearcat.33mail.com`, и фильтр одноразовых считает его пересылкой.
+    метки = domain.split(".")
+    if any(".".join(метки[i:]) in PRIVACY_RELAY_DOMAINS for i in range(len(метки) - 1)):
         return False
 
     # Короткие адреса не судим: 'ivan', 'jhn', 'ao' — нормальные человеческие

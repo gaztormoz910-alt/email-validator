@@ -720,11 +720,11 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                           reason=res.get("reason", ""))
                     return False   # вердикта нет, прогресс не двигаем
 
-                # Ловушка антивирусного вендора: MX домена ведёт на honeypot
-                # (Trend Micro Email Security, FireEye, Agari), и движок
-                # НАМЕРЕННО туда не пошёл — попасть в их чёрный список дороже
-                # любого вердикта. «Trap/Disposable» — это «писать нельзя», а
-                # не «ящика нет», и в кэш такой статус не кладётся вовсе.
+                # Сырой статус trap — «писать нельзя», а не «ящика нет», и в
+                # кэш он не кладётся вовсе. MX охранного вендора его больше НЕ
+                # даёт: «туда не ходили» теперь честное unknown (core/network.py,
+                # шаг 2; аудит 03.11.2026, E4). Ветка остаётся для любого
+                # будущего источника trap — выдача у него должна быть та же.
                 if raw_status == "trap":
                     self._emit_trap(email, data, res.get("reason", ""),
                                     "AV Vendor", "trap", enable_ai,
@@ -1048,8 +1048,8 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                         return
 
                     if raw_status == "trap":
-                        # То же, что и на основном проходе: ловушка вендора —
-                        # это «писать нельзя», а не «ящика нет».
+                        # То же, что и на основном проходе: сырой trap — это
+                        # «писать нельзя», а не «ящика нет».
                         self._emit_trap(email, data, res.get("reason", ""),
                                         "AV Vendor", "trap", enable_ai,
                                         mx=res.get("mx_record", "N/A"))

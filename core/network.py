@@ -1265,16 +1265,38 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
                     "mx_record": "N/A",
                     "mx_rejected": [х for х, _п in отброшено]}
 
-        # Шаг 2: Защита от попадания в Blacklist (AV Honeypot-ловушки)
+        # Шаг 2: MX у охранного вендора (FireEye, PhishLine, PerimeterWatch,
+        # Agari, Trend Micro Email Security).
+        #
+        # Сюда намеренно НЕ ходим: проба к их серверам может занести наш
+        # выходной адрес в их списки угроз, и это дороже любого вердикта
+        # (docs/КРИТЕРИИ.md, п. 23 — «такой адрес не трогаем вовсе»).
+        #
+        # Но «не проверяли» — не «писать нельзя». Раньше здесь выходил статус
+        # trap → «Trap/Disposable», и живой сотрудник такой компании уходил в
+        # «Не слать» без единого RCPT (аудит 03.11.2026, .unlazy/rivals/ОТЧЁТ.md,
+        # E4). Теперь — честное unknown с причиной. Повтора нет: в причине нет
+        # признаков временного сбоя (_TRANSIENT_MARKERS в core/pipeline.py), а
+        # «не проверяется» стоит среди постоянных — повтор не запустится и
+        # тогда, когда текст причины когда-нибудь допишут словами о прокси.
         av_vendors = [
             "fireeye.com",
             "phishline.com", "perimeterwatch.com",
             "agari.com", "emailsecurity.trendmicro.com"
         ]
         for mx in mx_records:
-            mx_lower = mx.lower()
-            if any(vendor in mx_lower for vendor in av_vendors):
-                return {"status": "trap", "reason": "AV Vendor (Dangerous)", "mx_record": mx}
+            # По границе метки, а не подстрокой: `mx.sagari.com` — не Agari, а
+            # `mail.notfireeye.com.br` — не FireEye. Ошибка здесь стоила бы
+            # постоянного Unknown без пробы и без повтора (рецензия, 03.11.2026).
+            mx_lower = mx.lower().rstrip(".")
+            vendor = next((v for v in av_vendors
+                           if mx_lower == v or mx_lower.endswith("." + v)), "")
+            if vendor:
+                return {"status": "unknown",
+                        "reason": ("MX охранного вендора (%s): ящик не проверяется "
+                                   "намеренно — проба могла бы занести наш адрес в "
+                                   "их списки угроз; есть ли ящик, неизвестно" % vendor),
+                        "mx_record": mx, "security_vendor_mx": vendor}
 
         primary_mx = mx_records[0]
 

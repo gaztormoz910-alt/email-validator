@@ -168,10 +168,13 @@ def test_зона_в_списке_не_хоронит_домен(зона, ад�
         DISPOSABLE_DOMAINS.update(было)
 
 
+# 33mail.com стоял здесь третьим образцом до 03.11.2026; теперь он пересылка
+# (core/disposable.NEVER_DISPOSABLE, аудит E1), и его место занял mail-tester.com
+# — тоже сервис с одним хозяином и поддоменами srv1, srv2…
 @pytest.mark.parametrize("сервис,адрес", [
     ("mailinator.com", "a@foo.mailinator.com"),
     ("gaggle.net", "b@asd5.gaggle.net"),
-    ("33mail.com", "c@bearcat.33mail.com"),
+    ("mail-tester.com", "c@srv1.mail-tester.com"),
 ])
 def test_поддомен_настоящего_сервиса_по_прежнему_ловится(сервис, адрес):
     """Контроль на обратное: разбор родителей нужен и должен работать."""

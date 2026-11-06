@@ -318,7 +318,12 @@ def test_d05_поддомен_настоящего_сервиса_по_преж�
         extend_disposable_domains({"gaggle.net", "33mail.com",
                                    "mail-tester.com"})
         assert is_disposable("a@asd5.gaggle.net")
-        assert is_disposable("b@bearcat.33mail.com")
+        assert is_disposable("b@srv1.mail-tester.com")
+        # 33mail здесь был образцом «сервиса с одним хозяином». С 03.11.2026 он
+        # пересылка (core/disposable.NEVER_DISPOSABLE): ящик пользователя
+        # bearcat.33mail.com доходит до живого человека, и строка в скачанном
+        # списке его не хоронит (аудит, E1).
+        assert not is_disposable("c@bearcat.33mail.com")
     finally:
         DISPOSABLE_DOMAINS.clear()
         DISPOSABLE_DOMAINS.update(было)

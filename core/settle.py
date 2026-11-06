@@ -14,7 +14,7 @@
 ловушка по имени ящика и одноразовый сервис по почтовому серверу.
 """
 from core.cleaner import normalize_for_dedup
-from core.disposable import disposable_mx_owner
+from core.disposable import disposable_mx_owner, is_protected_domain
 from core.heuristics import trap_word_in_local
 from core.verdict import verdict_confidence
 
@@ -100,6 +100,11 @@ class SettleMixin:
         """
         спросить = getattr(self.network, "get_mx_records", None)
         if спросить is None or "@" not in email:
+            return False
+        # Пересылку и живой почтовик не хоронит и почтовый сервер: у масок
+        # opayq.com он чужой (junkemailfilter.com), и строка с ним в любом
+        # списке похоронила бы их все (рецензия правки E1, 06.11.2026).
+        if is_protected_domain(email.rsplit("@", 1)[1]):
             return False
         try:
             mx = спросить(email.rsplit("@", 1)[1].strip().lower())

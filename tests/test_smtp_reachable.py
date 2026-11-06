@@ -298,7 +298,28 @@ def test_says_when_there_are_too_few():
 
 # ═══════════════════════════════ G7: пересылку нельзя объявить одноразовой
 
-RELAYS = ["duck.com", "relay.firefox.com", "privaterelay.appleid.com"]
+# Перечень записан ЗДЕСЬ, а не взят из кода: тест должен падать, если кто-то
+# молча сократит защиту. До 03.11.2026 тут стояли только три первых домена, а
+# остальные пересылки хоронились как одноразовые (аудит, E1).
+RELAYS = [
+    "duck.com", "relay.firefox.com", "privaterelay.appleid.com",
+    "mozmail.com", "icloud.com",
+    "simplelogin.com", "simplelogin.io", "simplelogin.co", "simplelogin.fr",
+    "aleeas.com", "slmail.me", "8shield.net",
+    # Общие пулы SimpleLogin (MX — simplelogin.co). dralias.com и silomails.com
+    # нашла проверка полноты 04.11.2026; slmails.com, который скачиваемый
+    # список хоронил и после первой правки, — разбор её находки. pass2mail.com
+    # — Proton Pass (сайт ведёт на proton.me/pass), MX у него тот же.
+    "dralias.com", "silomails.com", "slmails.com", "8alias.com", "pass2mail.com",
+    "anonaddy.com", "anonaddy.me", "addy.io",
+    "passmail.net", "passmail.com", "passinbox.com", "passfwd.com",
+    "33mail.com", "burnermail.io", "erine.email",
+    # Forward Email: домены для платных клиентов (MX — forwardemail.net).
+    "mailsire.com", "hideaddress.net", "secret.fyi", "hash.fyi",
+    # Маски Abine Blur (IronVest); хоронил даже курируемый список (06.11.2026).
+    # blurme.net и blurmail.net — та же почта: MX и SPF ведут на opayq.com.
+    "opayq.com", "blurme.net", "blurmail.net",
+]
 
 
 @pytest.mark.parametrize("domain", RELAYS)
@@ -328,10 +349,23 @@ def test_relay_guard_does_not_break_real_disposables():
 
 
 def test_relay_guard_lists_exactly_what_the_comment_promised():
-    """Защищены ровно те домены, которые встроенный список назвал не-одноразовыми."""
+    """Защищены ровно те пересылки, что названы в перечне выше, — не меньше и не больше."""
     from core.disposable import NEVER_DISPOSABLE
 
     assert set(NEVER_DISPOSABLE) == set(RELAYS)
+
+
+def test_relay_list_is_one_object_for_both_checks():
+    """Признак «машинное имя» и фильтр одноразовых смотрят в ОДИН перечень.
+
+    Их было два: в core/heuristics.py — 14 доменов с пометкой «core/disposable.py
+    специально не считает их одноразовыми», в core/disposable.py — три. Восемь
+    из четырнадцати хоронились. Один объект разойтись не может.
+    """
+    from core.disposable import NEVER_DISPOSABLE
+    from core.heuristics import PRIVACY_RELAY_DOMAINS
+
+    assert PRIVACY_RELAY_DOMAINS is NEVER_DISPOSABLE
 
 
 def test_relay_is_actually_in_the_shipped_blacklist():

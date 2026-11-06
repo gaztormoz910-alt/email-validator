@@ -1,6 +1,7 @@
 # core/filters.py
 import os
 
+from core.disposable import _MX_NEVER_DISPOSABLE, NEVER_DISPOSABLE
 from core.encoding import open_text
 from core.paths import data_dir as data_dir_of_app
 
@@ -9,7 +10,29 @@ from core.paths import data_dir as data_dir_of_app
 # SpamFilter загружает все .txt из папки подряд, и это удобно ровно до того
 # момента, когда рядом ляжет список БЕСПЛАТНЫХ провайдеров. Тогда gmail.com
 # окажется в чёрном списке, и вся база уедет в Trap/Disposable за один прогон.
-NON_BLACKLIST_FILES = frozenset({"free_providers.txt"})
+FREE_PROVIDERS_FILE = "free_providers.txt"
+NON_BLACKLIST_FILES = frozenset({FREE_PROVIDERS_FILE})
+
+# Широкие скачиваемые сборники одноразовых доменов (core/github_parser.py):
+# unkn0w/disposable-email-domain-list и FGRibreau/mailchecker. Они собирают
+# всё подряд из десятков источников и не ведут списка исключений.
+# disposable.txt (disposable-email-domains) — другой: у него есть allowlist и
+# правило «добавлять с доказательством».
+#
+# ЗАЧЕМ РАЗЛИЧАТЬ. Замерено 03.11.2026 (.unlazy/rivals/ОТЧЁТ.md, E3): 178 из
+# 4465 доменов НАШЕГО ЖЕ списка бесплатных почтовиков хоронились как
+# одноразовые, многие — одной-единственной строкой широкого сборника, среди
+# них hush.ai (Hushmail) и airmail.cc. После правила хоронится 74, каждый по
+# курируемому или встроенному списку либо через родителя-сервис. Когда два
+# наших списка спорят, а подтверждения из курируемого нет, хоронить живой ящик
+# нельзя.
+#
+# ЦЕНА, названная прямо. free_providers.txt (willwhite/freemail) сам засорён:
+# в нём есть junkmail.com, test.com, поддомены сервисов временной почты. Их
+# правило тоже отпускает. В обычном прогоне доказуемо одноразовые ловит шаг по
+# почтовому серверу (core/settle.py, disposable_mx_owner); без глубокой
+# проверки такой адрес становится «Unverified», а не «Годен».
+BROAD_LISTS = frozenset({"disposable_extra.txt", "disposable_more.txt"})
 
 # Санити-контракт для чёрного списка.
 #
@@ -105,11 +128,19 @@ class SpamFilter:
         # список охраняемых доменов. Нужны для разбора и для проверок: без
         # них «выбросили» и «не нашли» выглядели бы одинаково.
         self.dropped_domains = {}
+        # Бесплатные почтовики, которых назвал одноразовыми только широкий
+        # сборник: файл -> отсортированный список. Отдельно от стражей — это
+        # другой повод, и путать их в разборе нельзя.
+        self.free_conflicts = {}
         self._log = log_callback
         self._load_blacklists()
 
     def _load_blacklists(self):
         """Загружает чёрные списки из data/*.txt, отбраковывая подозрительные."""
+        # Принятые списки собираются сначала по файлам, а не сразу в общее
+        # множество: спор с бесплатными почтовиками решается по тому, ОТКУДА
+        # пришла строка (см. BROAD_LISTS).
+        loaded = {}
         if os.path.exists(self.data_dir):
             for filename in sorted(os.listdir(self.data_dir)):
                 if not filename.endswith(".txt") or filename in NON_BLACKLIST_FILES:
@@ -148,7 +179,29 @@ class SpamFilter:
                     self.dropped_domains[filename] = sorted(found)
                     domains = domains - found
 
-                self.blacklist_domains |= domains
+                loaded[filename] = domains
+
+        # Спор со списком бесплатных почтовиков. Домен, который наш же список
+        # называет бесплатным почтовиком, широкий сборник одной своей строкой
+        # не хоронит: нужен курируемый disposable.txt или собственный файл
+        # владельца. Встроенная база core/disposable.py этим не затронута —
+        # её курирует сам проект. Родитель-сервис тоже не затронут: строка
+        # `mail-temp.com` — свидетельство о сервисе, а не о имени, за которое
+        # ручается список бесплатных.
+        free_path = os.path.join(self.data_dir, FREE_PROVIDERS_FILE)
+        free = self._read_domains(free_path) if os.path.exists(free_path) else set()
+        trusted = set()
+        for filename, domains in loaded.items():
+            if filename not in BROAD_LISTS:
+                trusted |= domains
+        for filename in sorted(BROAD_LISTS & set(loaded)):
+            conflict = (loaded[filename] & free) - trusted
+            if conflict:
+                self.free_conflicts[filename] = sorted(conflict)
+                loaded[filename] = loaded[filename] - conflict
+
+        for domains in loaded.values():
+            self.blacklist_domains |= domains
 
         # Жёстко заданный минимум на случай, если файлов нет вовсе
         self.blacklist_domains.update({
@@ -160,8 +213,13 @@ class SpamFilter:
         # ПОСЛЕДНИЙ РУБЕЖ. Ни один охраняемый почтовик не имеет права остаться
         # в чёрном списке — ни из файла, ни из жёсткого минимума выше, ни от
         # будущей правки, которая забудет про отсев. Проверять это в одном
-        # месте дешевле, чем доверять всем местам сразу.
+        # месте дешевле, чем доверять всем местам сразу. То же для пересылок:
+        # письмо через них доходит до живого человека (core/disposable.py).
+        # И для почтовой инфраструктуры крупных служб: forwardemail.net и
+        # yandex.net приходили из широкого сборника (проверка 06.11.2026).
         self.blacklist_domains -= BLACKLIST_SENTINELS
+        self.blacklist_domains -= NEVER_DISPOSABLE
+        self.blacklist_domains -= _MX_NEVER_DISPOSABLE
 
     @staticmethod
     def _read_domains(filepath):
@@ -194,4 +252,11 @@ class SpamFilter:
         if not isinstance(email, str) or "@" not in email:
             return False
         domain = email.rsplit("@", 1)[1].strip().lower()
-        return bool(domain) and domain in self.blacklist_domains
+        if not domain:
+            return False
+        # Поддомен пересылки (`user.anonaddy.com`) — тоже пересылка, даже если
+        # чей-то список назвал его одноразовым отдельной строкой.
+        метки = domain.split(".")
+        if any(".".join(метки[i:]) in NEVER_DISPOSABLE for i in range(len(метки) - 1)):
+            return False
+        return domain in self.blacklist_domains
