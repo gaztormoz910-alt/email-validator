@@ -48,6 +48,19 @@ def _enrich_signature(enable_osint, enable_ai):
     except Exception:
         country_mode = "?"
     return f"osint={bool(enable_osint)};ai={bool(enable_ai)};country={country_mode}"
+def _has_confirmed_first(name):
+    """Есть ли в имени кусок, который знает индекс популярных имён (от трёх букв)."""
+    try:
+        from core.parser.names_index import is_known_name
+    except Exception:
+        return False
+    for part in (name or "").replace(",", " ").split():
+        word = part.strip(".'-").lower()
+        if len(word) >= 3 and is_known_name(word):
+            return True
+    return False
+
+
 def _utc_now():
     """Текущее время как aware-datetime в UTC."""
     return datetime.datetime.now(datetime.timezone.utc)
@@ -276,8 +289,15 @@ class EnrichmentMixin:
                 # tests/test_result_cache.py этого метода не знает.
                 узнать = getattr(self.name_extractor, "last_name_source", None)
                 name_source = (узнать() if callable(узнать) else "") or "адрес"
-            if name and enable_ai and not self.ml_predictor.is_person(name):
-                name, name_source = "", ""   # NER распознал организацию, не человека
+            # NER распознал организацию, а не человека. Но слово модели не
+            # перебивает индекс популярных имён: по одной строке без
+            # контекста spaCy ошибается в обе стороны — замерено 07.11.2026:
+            # «Diksha» и «Gaurav Kolwar» он человеком НЕ считает, а «Acme
+            # Tech» и «Kava Terasports» считает. Подтверждённое имя — уже
+            # проверенный факт, а мусор отсекает проверка разбора.
+            if (name and enable_ai and not _has_confirmed_first(name)
+                    and not self.ml_predictor.is_person(name)):
+                name, name_source = "", ""
 
         # --- Страна --------------------------------------------------------
         # Порядок принципиален. Домен знает страну ТОЧНО (web.de — Германия),
@@ -461,5 +481,11 @@ class EnrichmentMixin:
         # В кэш уходит SMTP-статус, а не отображаемый: ролевой ящик
         # показывается как Role-based, но доказан-то он как Valid.
         if self.cache:
-            self.cache.put(email, original_smtp_status, res.get("reason", ""),
+            # Брошенный «Стопом» прогон в кэш не пишет: адрес мог не пройти
+            # второе мнение, и «Годен» на 30 суток без него — ложный вердикт.
+            # Ссылка берётся один раз: итоги прогона обнуляют self.cache.
+            cache = self.cache
+            if cache is None or getattr(self, "_aborting", False):
+                return
+            cache.put(email, original_smtp_status, res.get("reason", ""),
                            mx_host or "N/A", data)

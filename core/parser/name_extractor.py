@@ -1,9 +1,13 @@
 import re
 import os
+import functools
 import wordsegment
 import threading
 from .osint import OSINTOperator
-from .names_index import is_known_name
+from .names_index import is_known_name, countries_for
+from .name_quality import (NameQuality, letters_only, is_latin, LEANING_FIRST_RANK,
+                           LEANING_SURNAME_TOP, LEANING_STRONG_FIRST, SPLIT_FIRST_RANK)
+from .name_words import scripts_of, consistent_with_address, _KEYBOARD_JUNK, _NOT_NAME_WORDS
 from .translit import variants as translit_variants
 
 _nd = None
@@ -78,6 +82,89 @@ def get_name_dataset():
                 except ImportError:
                     _nd = None
     return _nd
+
+
+@functools.lru_cache(maxsize=262144)
+def name_ranks(word):
+    """(лучший ранг как ИМЯ, лучший ранг как ФАМИЛИЯ) в базе на 138 млн.
+
+    Таблицы базы читаются напрямую, мимо её search(): поиск стоит 41 мкс,
+    прямой доступ — 0,05 (замерено 07.11.2026). Строгий разбор спрашивает
+    базу о каждом куске слитной строки — сотни раз на адрес, — и через
+    search() это тормозило бы прогон.
+
+    Ранг — место в стране, где имя чаще всего. Само «есть в базе» ничего не
+    значит (там есть и 'aaa'), поэтому правила смотрят на ранг.
+    """
+    if not isinstance(word, str) or not word:
+        return None, None
+    nd = get_name_dataset()
+    if nd is None:
+        return None, None
+    key = word.strip().title()
+
+    def best(table):
+        info = table.get(key) if isinstance(table, dict) else None
+        if not info:
+            return None
+        ranks = [r for r in (info.get("rank") or {}).values() if r]
+        return min(ranks) if ranks else None
+
+    return best(getattr(nd, "first_names", None)), best(getattr(nd, "last_names", None))
+
+
+@functools.lru_cache(maxsize=65536)
+def surname_leaning(word):
+    """Имя, которое в СВОЕЙ главной стране чаще фамилия: Kowalska, Sharma.
+
+    Сравнение по лучшим рангам вообще путало страны: у Paras лучший ранг
+    имени и лучший ранг фамилии могли прийти из разных стран, и сильное
+    индийское имя записывалось в фамилии. Здесь берётся страна, где слово
+    чаще всего ИМЯ, и в ней же смотрится его место среди фамилий.
+    """
+    if not isinstance(word, str) or not word:
+        return False
+    nd = get_name_dataset()
+    if nd is None:
+        return False
+    key = word.strip().title()
+    firsts = getattr(nd, "first_names", None)
+    lasts = getattr(nd, "last_names", None)
+    if not isinstance(firsts, dict) or not isinstance(lasts, dict):
+        return False
+    first = {c: r for c, r in ((firsts.get(key) or {}).get("rank") or {}).items() if r}
+    if not first:
+        return False
+    country, rank = min(first.items(), key=lambda item: item[1])
+    surnames = {c: r for c, r in ((lasts.get(key) or {}).get("rank") or {}).items() if r}
+    # Фамилия из первой десятки, которая как имя не входит и в полсотню,
+    # — фамилия: Patel (2-я фамилия базы, 89-е имя), Singh. Kumar (12-е
+    # имя), Kim (10-е), Khan (2-е) остаются именами — их так и зовут.
+    if surnames and min(surnames.values()) <= LEANING_SURNAME_TOP and rank > LEANING_STRONG_FIRST:
+        return True
+    if rank <= LEANING_FIRST_RANK:
+        return False
+    last = surnames.get(country)
+    return bool(last) and last < rank
+
+
+@functools.lru_cache(maxsize=65536)
+def gender_share(word):
+    """Доля самого частого пола у слова как имени в базе (0.5–1.0) или None.
+
+    Признак имени, независимый от рангов: см. GENDERED_SHARE в
+    core/parser/name_evidence.py.
+    """
+    if not isinstance(word, str) or not word:
+        return None
+    nd = get_name_dataset()
+    firsts = getattr(nd, "first_names", None) if nd is not None else None
+    if not isinstance(firsts, dict):
+        return None
+    shares = [v for v in ((firsts.get(word.strip().title()) or {}).get("gender") or {}).values()
+              if isinstance(v, (int, float))]
+    return max(shares) if shares else None
+
 
 def split_name(full_name):
     """Разбивает готовое имя на имя и фамилию.
@@ -177,6 +264,16 @@ class NameExtractor:
             "price", "myers", "long", "foster", "sanders", "ross", "morales", "powell",
             "sullivan", "russell", "ortiz", "jenkins", "gutierrez", "perry", "butler", "barnes"
         }
+
+        # Строгая проверка кусков имени (core/parser/name_quality.py). Ей
+        # отдаются те же знания, что и прежнему разбору: индекс популярных
+        # имён, база фамилий, английский словарь и перечень имён-слов.
+        self.quality = NameQuality(
+            is_first=is_known_name, name_ranks=name_ranks,
+            english_words=self.english_words, countries_for=countries_for,
+            english_surnames=self.name_exceptions,
+            word_counts=getattr(wordsegment, "UNIGRAMS", None),
+            leaning=surname_leaning, gender_share=gender_share)
 
     def _is_generic_word(self, word):
         """Returns True if the word is a generic dictionary word and not a common name."""
@@ -449,17 +546,22 @@ class NameExtractor:
     # склеивать их в фамилию бессмысленно.
     _MAX_SEGMENTS = 5
 
-    def _finalize(self, parts, email, from_separators=False):
-        """Общая проверка разобранных кусков имени для всех трёх стратегий.
+    def _finalize_guess(self, parts, from_separators=False):
+        """Прежний разбор кусков — догадка режима «Заполненность». Список кусков или [].
+
+        Работает только тогда, когда строгий разбор (_address_name) имени не
+        нашёл, и только в режиме «Заполненность»: это его компромисс «больше
+        имён ценой точности», и неподтверждённое «Kava Terasports» здесь
+        допустимо. Заведомый мусор из результата убирает clean_guess.
 
         from_separators=True означает, что куски пришли из ЯВНЫХ разделителей
         (`leo.fontanieu`, `j_smith`), а не от сегментатора. Границы в этом
         случае поставил сам человек, и чинить их нельзя — см. ниже.
         """
         if not parts:
-            return self._fallback_osint(email)
+            return []
         if len(parts) > self._MAX_SEGMENTS:
-            return self._fallback_osint(email)
+            return []
         # Деловое слово ОТБРАСЫВАЕТСЯ, если оно стоит не первым и без него
         # остаётся человеческая запись.
         #
@@ -471,7 +573,7 @@ class NameExtractor:
             head_is_business = self._has_business_words(parts[:1])
             trimmed = [p for p in parts if not self._has_business_words([p])]
             if head_is_business or len(trimmed) < 2:
-                return self._fallback_osint(email)
+                return []
             parts = trimmed
 
         # Починка развала — только для кусков ОТ СЕГМЕНТАТОРА.
@@ -492,7 +594,7 @@ class NameExtractor:
         role = "last" if is_initial else "first"
 
         if self._is_generic_word(name_to_check):
-            return self._fallback_osint(email)
+            return []
 
         # ОДИНОКИЙ КОРОТКИЙ КУСОК обязан быть подтверждён индексом.
         #
@@ -505,7 +607,7 @@ class NameExtractor:
         # поэтому они проходят. Обломки и инициалы — нет.
         if len(parts) == 1 and len(first_part) < self._SEGMENT_MIN:
             if not is_known_name(first_part):
-                return self._fallback_osint(email)
+                return []
 
         if self.nd and not self._is_valid_name(name_to_check, role=role):
             # Имя может быть записано как фамилия и наоборот — даём второй шанс
@@ -531,34 +633,202 @@ class NameExtractor:
                               and any(len(p) >= self._SEGMENT_MIN for p in parts))
 
                 if not confirmed and not structural:
-                    return self._fallback_osint(email)
+                    return []
 
-        # РЕЖИМ «ТОЧНОСТЬ»: границу, придуманную сегментатором, обязан
-        # подтвердить индекс популярных имён.
-        #
-        # ПОЧЕМУ НЕ БАЗОЙ НА 138 МЛН. Она подтверждает почти любой обломок:
-        # замерено — 'kava', 'white', 'viju', 'upscale', 'installations' и
-        # даже 'aaa' в ней «чьё-то имя где-то в мире». Именно она и
-        # пропускала «Kava Terasports» и «Upscale Installations».
-        #
-        # РАЗДЕЛИТЕЛИ НЕ ПЕРЕСУЖИВАЮТСЯ. Точку в `moein.farsadzadeh`
-        # поставил человек; отбрасывать его разметку из-за того, что
-        # фамилии нет в индексе, значит терять живых людей с неевропейскими
-        # фамилиями. Строгость направлена на НАШУ догадку, а не на его факт.
-        #
-        # ЗАМЕРЕНО на базе владельца, 5000 адресов: имя ставится у 70.5%
-        # против 46.7%. Уходят «Ommma Qqq», «Gitp Rx», «Podvork Us»,
-        # «Varn Ssk», «Qixvar I»; остаются «Simone Varelli», «Usman Rehan»,
-        # «Jennifer Kline», «Satish Verma».
-        if (not from_separators and строгий_режим_имён()
-                and not any(is_known_name(part) for part in parts)):
-            return self._fallback_osint(email)
+        # Режима «Точность» здесь больше нет: в нём эта догадка не
+        # спрашивается вовсе, а строгость живёт в _address_name. Прежняя
+        # проверка «хоть один кусок знает индекс» пропускала имя с обломком
+        # без гласных и инициал на месте имени — у них один кусок индексу
+        # известен.
+        return parts
 
-        # ЧЕЙ это разбор. Границы, поставленные человеком (точка,
-        # подчёркивание, CamelCase), — факт о его адресе. Границы,
-        # угаданные сегментатором, — наша догадка, и называть её фактом
-        # владельцу нельзя: именно так «Kava Terasports» попадало
-        # в окно с подписью «из самого адреса — факт».
+    # ── строгий разбор адреса ───────────────────────────────────────────
+
+    def _split_fused_part(self, part):
+        """Режет слитный кусок между разделителями, только если разрез бесспорный.
+
+        `markjones.jones` — человек поставил точку, но первую половину
+        написал слитно; `rameshkumar.l` — тоже. Режем, только когда куски —
+        частые имена от четырёх букв (Mark|Jones, Ramesh|Kumar), частое
+        имя с частой фамилией (John|Smith), инициал перед частой фамилией
+        (P|Gupta) или частое имя с коротким обломком (Anna|kk). Иначе кусок
+        остаётся как его написал человек: база фамилий знает почти любой
+        обломок, и без этого имя между точками рвалось на мнимые куски
+        («Имя Обломок Фамилия», прогон владельца, 07.11).
+        """
+        quality = self.quality
+        token = letters_only(part)
+        if len(token) < 5 or not is_latin(token):
+            return None
+        if quality.kind_of(token, True) in ("first", "surname"):
+            return None
+        pieces = quality.segment(token)
+        if len(pieces) < 2:
+            return None
+
+        def strong(piece):
+            rank = quality.first_rank(piece)
+            return (len(piece) >= 4 and quality.is_anchor(piece)
+                    and rank is not None and rank <= SPLIT_FIRST_RANK)
+
+        def top_surname(piece):
+            _, last = name_ranks(piece)
+            return len(piece) >= 4 and quality.surname_ok(piece) and last is not None and last <= 500
+
+        words = [p for p, _ in pieces]
+        if all(strong(p) for p in words):
+            return [(p, "first") for p in words]
+        if len(words) == 2:
+            head, tail = words
+            if strong(head) and top_surname(tail):
+                return [(head, "first"), (tail, "surname")]
+            if len(head) == 1 and top_surname(tail):
+                return [(head, "initial"), (tail, "surname")]
+            if strong(head) and len(tail) <= 2 and quality.hard_junk(tail):
+                return [(head, "first"), (tail, "")]
+        return None
+
+    def _address_name(self, email):
+        """Имя из самого адреса, где КАЖДЫЙ кусок подтверждён. Строка или "".
+
+        Одинаково в обоих режимах: подтверждённое имя лучше догадки и в
+        «Заполненности». Границы, поставленные человеком (точка,
+        подчёркивание, CamelCase), — факт о его адресе ("адрес"); границы,
+        которые угадали мы, — догадка ("разбор"), и называть её фактом
+        владельцу нельзя.
+        """
+        username = email.split('@')[0].strip()
+        username_clean = re.sub(r'\d+', '', username)
+        if len(username_clean) < 3:
+            return ""
+        if len(scripts_of(username_clean)) > 1:
+            # «ivanпетров»: смесь алфавитов — украшение, а не имя; профиль
+            # такую смесь отвергает, адрес отвергает так же (рецензия
+            # 08.11.2026, J20).
+            return ""
+        quality = self.quality
+        strict = строгий_режим_имён()
+        # Цифры вместо букв внутри слова: «an0nym0us» — это anonymous, а не
+        # «Anny Mus» (рецензия 08.11.2026, J18).
+        leet = re.sub(r'(?<=[a-z])[013457](?=[a-z])',
+                      lambda m: "oieast"["013457".index(m.group(0))], username.lower())
+        if leet != username.lower():
+            leet_letters = letters_only(re.sub(r'\d+', '', leet))
+            if (leet_letters in _NOT_NAME_WORDS or quality.is_plain_word(leet_letters)
+                    or quality.phrase_only(leet_letters)):
+                return ""
+        kept, source = [], ""
+        if any(sep in username_clean for sep in ['.', '_', '-']):
+            parts, kinds, guessed = [], [], False
+            for raw in re.split(r'[._-]+', username_clean):
+                if not raw.strip():
+                    continue
+                split = self._split_fused_part(raw)
+                if split:
+                    for piece, kind in split:
+                        parts.append(piece)
+                        kinds.append(kind)
+                    guessed = True
+                else:
+                    parts.append(raw)
+                    kinds.append(quality.kind_of(raw, True))
+            kept = quality.finalize(parts, True, kinds)
+            source = "разбор" if guessed else "адрес"
+        else:
+            camel = re.findall(r'[A-Z][a-z]+', username_clean)
+            if len(camel) >= 2 and ''.join(camel) == username_clean:
+                kept = quality.finalize(camel, True)
+                source = "адрес"
+            else:
+                letters = letters_only(username_clean) if is_latin(username_clean) \
+                    else username_clean.lower()
+                # Клавиатурный хвост ника снимается до разбора: «maryasdf» —
+                # это Mary, а разбор отдавал «Marya» (рецензия 08.11.2026).
+                # Только хвосты от четырёх букв: «asd» — это и конец «lucasd»
+                # (Lucas D), и из него выходил «Luc».
+                for junk in sorted(_KEYBOARD_JUNK, key=len, reverse=True):
+                    if len(junk) >= 4 and letters.endswith(junk) and len(letters) - len(junk) >= 3:
+                        letters = letters[:-len(junk)]
+                        break
+                # Строка, в которой имени нет вовсе (лозунг, лепет, фраза).
+                if quality.not_a_name_string(letters):
+                    kept = []
+                # Строка целиком — имя базы, которого индекс не знает
+                # («damilola»): дробить её на «Dami Lola» нельзя.
+                elif quality.whole_first(letters):
+                    kept = [letters]
+                # Строка целиком — английское слово или фраза из слов
+                # («theorist», «glanceobjects», «bethechange»): имени в ней
+                # нет, а найденное внутри — совпадение букв. Но фраза поверх
+                # уверенного имени — сама совпадение: «heat|her|smith» внутри
+                # Heather Smith, «fat|im|am» внутри Fatima (RN-4, RN-8).
+                elif not (quality.is_plain_word(letters) or (
+                        quality.phrase_only(letters)
+                        and not any(k == "first" and quality.confident_first(p)
+                                    for p, k in quality.segment(letters)))):
+                    pieces = quality.split_initial(letters, quality.segment(letters))
+                    pieces = quality.split_short_surname(letters, pieces)
+                    # Спорное начало («its|amy» или «it|samy») — гадание. В
+                    # «Точности» честнее пусто; «Заполненность» принимает
+                    # догадку, и лучшее прочтение там вернее прежнего
+                    # сегментатора («Itsamy Hussain»).
+                    ambiguous = strict and quality.ambiguous_lead(letters, pieces)
+                    # Разбор режет английское слово посередине («ilo|veyou»,
+                    # «ange|leyes»): имя там — совпадение букв, в обоих режимах.
+                    misread = (quality.misaligned(letters, pieces)
+                               or quality.asian_tail_ambiguous(letters, pieces))
+                    if pieces and not ambiguous and not misread:
+                        kept = quality.finalize([p for p, _ in pieces], False,
+                                                [k for _, k in pieces])
+                    if not kept and not ambiguous:
+                        kept = quality.anchor_fallback(letters)
+                source = "разбор"
+        if not kept:
+            return ""
+        self._osint_local.name_source = source
+        return " ".join(part.title() for part in kept)
+
+    def _guess_name(self, email):
+        """Прежний разбор адреса — запасной путь режима «Заполненность».
+
+        Зовётся, только когда строгий разбор имени не нашёл. Из его догадки
+        убирается заведомый мусор (clean_guess): веб-слова, обломки без
+        гласных, буквы-украшения, инициалы рядом с именем.
+        """
+        username = email.split('@')[0].strip()
+        username_clean = re.sub(r'\d+', '', username)
+        if len(username_clean) < 3:
+            return ""
+        parts, from_separators = [], False
+        if any(sep in username_clean for sep in ['.', '_', '-']):
+            clean_parts = [part.title() for part in re.split(r'[._-]', username_clean)
+                           if part.strip()]
+            if clean_parts:
+                # Границы поставил человек точками или подчёркиваниями —
+                # чинить их нельзя.
+                parts = self._finalize_guess(clean_parts, from_separators=True)
+                from_separators = True
+        if not from_separators:
+            camel_case_parts = re.findall(r'[A-Z][a-z]+', username_clean)
+            if len(camel_case_parts) >= 2 and ''.join(camel_case_parts) == username_clean:
+                # CamelCase — тоже явная разметка автора адреса.
+                parts = self._finalize_guess(camel_case_parts, from_separators=True)
+                from_separators = True
+            else:
+                # Слово или фраза из слов («bethechange», «procompressor») — не
+                # имя ни в каком режиме: догадка тут гадала бы по буквам слов.
+                letters = letters_only(username_clean)
+                if (self.quality.is_plain_word(letters) or self.quality.phrase_only(letters)
+                        or self.quality.not_a_name_string(letters)):
+                    return ""
+                segmented = wordsegment.segment(username_clean.lower())
+                if segmented:
+                    parts = self._finalize_guess(segmented)
+        # Границы от сегментатора — догадка, и чистке надо это знать: у
+        # догадки есть заведомо ложные формы, которых нет у разметки человека.
+        parts = self.quality.clean_guess(parts, fused=not from_separators)
+        if not parts:
+            return ""
         self._osint_local.name_source = "адрес" if from_separators else "разбор"
         return " ".join(part.title() for part in parts)
 
@@ -586,46 +856,51 @@ class NameExtractor:
 
         # Сначала факт. last_profile() при этом заполняется для всех — из
         # него берутся ещё локация и соцсети, и второй раз ходить незачем.
+        # Имя из профиля ПРОВЕРЯЕТСЯ: ник («sunil07», «moviebuff»), фирма и
+        # спам именем не считаются, сколько бы их ни писали в анкету.
         confirmed = self._profile_name(email)
         if confirmed:
-            return confirmed
+            return self._address_over_profile(email, confirmed) or confirmed
 
-        username = email.split('@')[0].strip()
-        username_clean = re.sub(r'\d+', '', username)
-        
-        if len(username_clean) < 3:
-            return self._fallback_osint(email)
+        # Затем адрес, где каждый кусок подтверждён, — в обоих режимах.
+        name = self._address_name(email)
+        if name:
+            return name
 
-        # ----------------------------------------------------
-        # Phase 1: Check for common separators (john.doe)
-        # ----------------------------------------------------
-        if any(sep in username_clean for sep in ['.', '_', '-']):
-            parts = re.split(r'[._-]', username_clean)
-            clean_parts = [part.title() for part in parts if part.strip()]
-            
-            if clean_parts:
-                # Границы поставил человек точками или подчёркиваниями —
-                # чинить их нельзя.
-                return self._finalize(clean_parts, email, from_separators=True)
-                
-        # ----------------------------------------------------
-        # Phase 1.5: Check for CamelCase (JohnDoe)
-        # ----------------------------------------------------
-        camel_case_parts = re.findall(r'[A-Z][a-z]+', username_clean)
-        if len(camel_case_parts) >= 2 and ''.join(camel_case_parts) == username_clean:
-            # CamelCase — тоже явная разметка автора адреса.
-            return self._finalize(camel_case_parts, email, from_separators=True)
-            
-        # ----------------------------------------------------
-        # Phase 2: Word segmentation for merged names (robertanderson)
-        # ----------------------------------------------------
-        segmented = wordsegment.segment(username_clean.lower())
-        
-        if segmented:
-            return self._finalize(segmented, email)
-            
+        # «Заполненность»: прежняя догадка, очищенная от заведомого мусора.
+        # «Точность» догадку не берёт: там пусто честнее.
+        if not строгий_режим_имён():
+            name = self._guess_name(email)
+            if name:
+                return name
+
+        # Последним — имя из профиля другим алфавитом («王小明»): лучше оно,
+        # чем ничего, но хуже латиницы из адреса для письма на латинице.
         return self._fallback_osint(email)
-        
+
+    def _address_over_profile(self, email, profile_name):
+        """Имя из адреса, если адрес с разметкой человека спорит с профилем, иначе "".
+
+        `john.smith` с профилем «Crypto King», `rahul.verma` с профилем
+        «King Khan»: оба — факты, но адрес с точками человек написал о себе
+        сам, а в анкету пишут прозвище (рецензия 08.11.2026, J15). Профиль
+        с опорой в адресе («Adam Velardes» у `theadamvelardes`) и профиль у
+        слитного адреса не спорят ни с чем — там адрес границ не знает.
+        """
+        local = email.split("@")[0].strip()
+        clean = re.sub(r"\d+", "", local)
+        marked = (any(sep in clean for sep in "._-")
+                  or (len(re.findall(r"[A-Z][a-z]+", clean)) >= 2))
+        if not marked:
+            return ""
+        if consistent_with_address(profile_name.split(), letters_only(clean).lower(), min_len=2):
+            return ""
+        name = self._address_name(email)
+        if not name:
+            self._osint_local.name_source = "профиль"
+            return ""
+        return name
+
     def last_name_source(self):
         """Откуда взялось имя при последнем разборе В ЭТОМ ПОТОКЕ.
 
@@ -648,19 +923,22 @@ class NameExtractor:
         return getattr(self._osint_local, "profile", {}) or {}
 
     def _profile_name(self, email):
-        """Имя из публичного профиля — или пусто. Заодно запоминает профиль.
+        """Проверенное имя из публичного профиля — или пусто. Заодно запоминает профиль.
 
         Запрос ровно один на адрес: результат кладётся в потоковую ячейку, и
         _fallback_osint им же и пользуется, если разбор адреса ничего не дал.
 
-        Имя, СОВПАДАЮЩЕЕ с локальной частью адреса, за имя не считается:
-        Gravatar отдаёт логин, когда человек имени не указывал вовсе
-        (`johnoakreps@gmail.com` -> «johnoakreps»). Разбор адреса из этого же
-        логина сделает по крайней мере «John Oakreps».
+        Проверка — NameQuality.profile_name. Логин за имя не считается:
+        Gravatar отдаёт его, когда человек имени не указывал вовсе
+        (`johnoakreps@gmail.com` -> «johnoakreps»). Ник с цифрами, ник одним
+        словом без опоры в адресе, фирма, спам и смесь алфавитов — тоже не
+        имя. Имя другим алфавитом откладывается: оно идёт в колонку, только
+        если адрес не дал ничего.
         """
         self._osint_local.profile = {}
         self._osint_local.asked = True
         self._osint_local.name_source = ""
+        self._osint_local.deferred = ""
         if not (self.enable_osint and self.osint_operator):
             return ""
         try:
@@ -670,25 +948,34 @@ class NameExtractor:
         if not profile:
             return ""
         self._osint_local.profile = profile
-        name = (profile.get("name") or "").strip()
+        name = (profile.get("name") or "").strip() if isinstance(profile, dict) else ""
         if not name:
             return ""
-        local_part = email.split("@")[0].strip().lower()
-        squashed = "".join(ch for ch in name.lower() if ch.isalnum())
-        if squashed == "".join(ch for ch in local_part if ch.isalnum()):
-            return ""      # это логин, а не имя
-        self._osint_local.name_source = "профиль"
-        return name
+        local_part = email.split("@")[0].strip()
+        try:
+            accepted, deferred = self.quality.profile_name(name, local_part)
+        except Exception:
+            # Проверка сломалась — имя из анкеты НЕ берём: непроверенное имя
+            # хуже пустого, а адрес ещё может дать своё.
+            accepted, deferred = "", ""
+        self._osint_local.deferred = deferred
+        if accepted:
+            self._osint_local.name_source = "профиль"
+        return accepted
 
     def _fallback_osint(self, email):
         """Запасной путь: разбор адреса ничего не дал.
 
         Профиль здесь уже спрошен в начале extract_name — второй запрос
         делать нельзя, это удвоило бы сетевую нагрузку на всю базу.
+        Отдаётся только ПРОВЕРЕННОЕ имя: раньше здесь возвращалась сырая
+        строка анкеты, и ники вроде «sunnybank2019» обходили проверку на
+        логин, которую _profile_name им только что устроил.
         """
         if not getattr(self._osint_local, "asked", False):
-            return self._profile_name(email)
-        profile = getattr(self._osint_local, "profile", {}) or {}
-        имя = (profile.get("name") or "").strip()
-        self._osint_local.name_source = "профиль" if имя else ""
-        return имя
+            accepted = self._profile_name(email)
+            if accepted:
+                return accepted
+        deferred = getattr(self._osint_local, "deferred", "") or ""
+        self._osint_local.name_source = "профиль" if deferred else ""
+        return deferred

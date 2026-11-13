@@ -422,6 +422,24 @@ input[type="range"]:disabled { cursor: not-allowed; opacity: .55; }
 }
 .progress.is-done .progress__bar { background: var(--ok); }
 
+/* «Стоп» нажат (app.js, quench): полоса гаснет в тот же миг, не дожидаясь
+   ответа моста и перезагрузки страницы. Гасится всё, что движется: бегущая
+   заливка, плавная смена ширины (иначе полоса ещё четверть секунды
+   «съезжала» бы к нулю) и пульс обеих точек состояния. Правило стоит ПОСЛЕ
+   .is-running и не слабее его по весу селектора — оба с !important, и при
+   равном весе побеждает позднее. */
+html.is-halted .progress__track .progress__bar {
+  width: 0 !important;
+  margin-left: 0 !important;
+  animation: none !important;
+  transition: none !important;
+}
+html.is-halted .run-state .dot {
+  background: var(--text-3) !important;
+  animation: none !important;
+}
+html.is-halted .live__dot { animation: none !important; }
+
 /* ============================================================ Панель со вкладками */
 .panel {
   flex: 1; min-height: 0;

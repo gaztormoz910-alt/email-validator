@@ -254,6 +254,8 @@ function setLocked(on) {
    ============================================================ */
 
 const ui = {
+  // Движок ещё бросает остановленный прогон — «Начать» выключено.
+  engineBusy: false,
   tab: "log",
   page: 1,
   groups: ["valid"],
@@ -371,12 +373,12 @@ function renderSources(data) {
   const hint = $("#startHint");
   setText(hint, data.hint);
   hint.classList.toggle("is-ready", !!data.ready);
-  $("#btnStart").disabled = !data.ready || ui.running;
+  $("#btnStart").disabled = !data.ready || ui.running || !!ui.engineBusy;
 
   const pHint = $("#pStartHint");
   setText(pHint, data.parserHint);
   pHint.classList.toggle("is-ready", !!data.parserReady);
-  $("#pBtnStart").disabled = !data.parserReady || parser.running;
+  $("#pBtnStart").disabled = !data.parserReady || parser.running || !!parser.engineBusy;
 }
 
 let countPoll = null;
@@ -450,11 +452,21 @@ function logSpan(line) {
   return span;
 }
 
+/* Номер последней показанной строки. Опросы могут прийти вперемешку, и
+   ответ, отправленный с тем же «после N», принёс бы те же строки второй раз
+   (замерено 07.11.2026: одна строка пульса показана трижды). */
+let logShownTop = 0;
 function appendLog(lines) {
   if (!lines || !lines.length) return;
   const atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 24;
   const frag = document.createDocumentFragment();
-  for (const line of lines) frag.appendChild(logSpan(line));
+  for (const line of lines) {
+    if (typeof line.n === "number") {
+      if (line.n <= logShownTop) continue;
+      logShownTop = line.n;
+    }
+    frag.appendChild(logSpan(line));
+  }
   logBox.appendChild(frag);
   while (logBox.childNodes.length > MAX_LOG_NODES) logBox.removeChild(logBox.firstChild);
   if (atBottom) logBox.scrollTop = logBox.scrollHeight;
@@ -1064,17 +1076,49 @@ let skip = 0;
 let logSeen = 0;                 // номер последней показанной строки лога
 let lastStateOk = Date.now();    // когда мост в последний раз ответил
 
+/* «Стоп» гасит окно В МИГ ЩЕЛЧКА, не дожидаясь моста (жалоба владельца
+   13.11.2026: полоса после «Стопа» ещё мерцала). Между щелчком и ответом
+   проходит время: мост ждёт обработчики событий, стирает таблицу и отметки
+   журнала продолжения — после большого прогона это заметные доли секунды.
+   Всё это время полоса бежала и точка пульсировала, а опрос, ушедший ДО
+   щелчка, возвращался ПОСЛЕ него и заново рисовал «идёт».
+
+   Класс на корне страницы снимает анимации стилем (style.css,
+   html.is-halted) — мгновенно и разом для обоих экранов. Флаг останавливает
+   опросы: запоздалый ответ брошенного прогона в окно не попадает. Отказ
+   моста снимает и то и другое — прогон-то идёт, и врать «остановлено»
+   нельзя. После удачного «Стопа» страница перезагружается, и флаг исчезает
+   вместе с ней. */
+let halted = false;
+function quench(on) {
+  halted = !!on;
+  document.documentElement.classList.toggle("is-halted", halted);
+}
+
+/* Один опрос в полёте: следующий не уходит, пока не вернулся прошлый.
+   Иначе под нагрузкой ответы накладывались друг на друга. */
+let tickBusy = false;
 async function tick() {
+  if (tickBusy) return;
+  tickBusy = true;
+  try { await tickOnce(); } finally { tickBusy = false; }
+}
+
+async function tickOnce() {
+  if (halted) return;
   if (skip > 0) { skip -= 1; return; }
   let s;
   try {
     s = await api("state", { logSince: logSeen });
   } catch {
+    if (halted) return;
     missed += 1;
     skip = Math.min(8, missed);   // мост ещё не поднялся или окно закрывается
     renderNoLink("live", lastStateOk);
     return;
   }
+  // Ответ опроса, ушедшего до «Стопа», — событие брошенного прогона.
+  if (halted) return;
   missed = 0;
   lastStateOk = Date.now();
 
@@ -1128,7 +1172,11 @@ async function tick() {
   const active = s.state === "running" || s.state === "paused";
   show($("#runControls"), active);
   show($("#btnStart"), !active);
-  $("#btnStart").disabled = s.running || $("#startHint").classList.contains("is-ready") === false;
+  // Движок ещё бросает остановленный прогон: окно чистое, но мост откажет —
+  // кнопку держим выключенной, пока он не освободится.
+  ui.engineBusy = !!s.engineBusy;
+  $("#btnStart").disabled = s.running || ui.engineBusy
+    || $("#startHint").classList.contains("is-ready") === false;
   setText($("#btnPause"), s.state === "paused" ? "Продолжить" : "Пауза");
 
   // Запор общий на оба экрана: пока идёт хоть один прогон, менять исходные
@@ -1430,7 +1478,25 @@ $("#btnStart").addEventListener("click", async () => {
   toast("Проверка запущена", "ok");
 });
 $("#btnPause").addEventListener("click", () => api("pause"));
-$("#btnStop").addEventListener("click", () => api("stop"));
+/* «Стоп» — окно как при первом открытии (просьба владельца 06.11.2026).
+   Мост бросает прогон и сбрасывает всё, что показывает окно, а страница
+   перезагружается: так она проходит ровно путь первого открытия, и ни одна
+   её часть — журнал, таблица, грани, вкладка «Прокси», бегущая полоса — не
+   остаётся от прошлого прогона. Раньше обработчик только отправлял команду
+   и не ждал ответа, а окно продолжало жить прошлым прогоном. */
+async function stopAndReset(button, method) {
+  button.disabled = true;
+  // Гасим окно ДО запроса: ответа моста полоса не ждёт (см. quench).
+  quench(true);
+  let res = null;
+  try { res = await api(method); } catch (e) { res = null; }
+  if (res && res.ok) { location.reload(); return; }
+  // Мост отказал — прогон идёт дальше, и окно обязано снова его показывать.
+  quench(false);
+  button.disabled = false;
+  toast((res && res.error) || "Не удалось остановить — попробуйте ещё раз", "bad");
+}
+$("#btnStop").addEventListener("click", () => stopAndReset($("#btnStop"), "stop"));
 
 /* Вкладки. Селекторы привязаны к своему экрану: с появлением второго
    голое ".tab" начало бы гасить и чужие вкладки заодно. */
@@ -1622,16 +1688,20 @@ let parserSkip = 0;
 let lastParserOk = Date.now();
 
 async function parserTick() {
+  if (halted) return;
   if (parserSkip > 0) { parserSkip -= 1; return; }
   let s;
   try {
     s = await api("parser_state");
   } catch {
+    if (halted) return;
     parserMissed += 1;
     parserSkip = Math.min(8, parserMissed);
     renderNoLink("pLive", lastParserOk);
     return;
   }
+  // Как и в tickOnce: ответ, переживший щелчок «Стоп», в окно не рисуется.
+  if (halted) return;
   parserMissed = 0;
   lastParserOk = Date.now();
   renderLive("pLive", s.activity);
@@ -1650,6 +1720,9 @@ async function parserTick() {
 
   parser.state = s.state;
   parser.running = s.running;
+  // Сбор после «Стопа» ещё доживает: окно чистое, но «Начать сбор» откажет —
+  // кнопку держим выключенной, пока он не освободится (как у проверки).
+  parser.engineBusy = !!s.engineBusy;
   syncRunState();
   syncLock();
 
@@ -1671,7 +1744,7 @@ async function parserTick() {
   show($("#pRunControls"), pActive);
   show($("#pBtnStart"), !pActive);
   setText($("#pBtnPause"), s.state === "paused" ? "Продолжить" : "Пауза");
-  $("#pBtnStart").disabled = s.running ||
+  $("#pBtnStart").disabled = s.running || parser.engineBusy ||
     $("#pStartHint").classList.contains("is-ready") === false;
 
   if (parser.tab === "found") await refreshFound();
@@ -1726,7 +1799,7 @@ $("#pBtnStart").addEventListener("click", async () => {
   toast("Сбор запущен", "ok");
 });
 $("#pBtnPause").addEventListener("click", () => api("parser_pause"));
-$("#pBtnStop").addEventListener("click", () => api("parser_stop"));
+$("#pBtnStop").addEventListener("click", () => stopAndReset($("#pBtnStop"), "parser_stop"));
 
 $$("#viewParser .tab").forEach((tab) => tab.addEventListener("click", () => {
   $$("#viewParser .tab").forEach((t) => t.classList.remove("is-active"));

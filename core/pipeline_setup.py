@@ -64,10 +64,13 @@ class PipelineSetupMixin:
         return None
     def _start_profile_refresher(self, timeout, workers, interval=600):
         """Фоновое обновление профиля прокси раз в interval секунд."""
-        self._refresh_stop = threading.Event()
+        self._refresh_stop = stop = threading.Event()
 
         def loop():
-            while not self._refresh_stop.wait(interval):
+            # Своё событие, а не атрибут: новый прогон подменяет атрибут, и
+            # обновлятель прошлого, застигнутый посреди обновления, ждал бы
+            # уже НОВОЕ событие и жил вторым экземпляром (рецензия 07.11.2026).
+            while not stop.wait(interval):
                 if not self.is_running or not self.network:
                     return
                 try:
@@ -85,6 +88,13 @@ class PipelineSetupMixin:
 
         self._refresh_thread = threading.Thread(target=loop, daemon=True)
         self._refresh_thread.start()
+    def _share_abort_event(self):
+        """Сеть берёт событие «Стопа» конвейера: «Стоп», нажатый ещё на
+        подготовке, до создания сети, иначе её не достигал бы."""
+        event = getattr(self, "_abort_event", None)
+        if event is not None and self.network is not None:
+            self.network.abort_event = event
+
     def _stop_profile_refresher(self):
         stop = getattr(self, "_refresh_stop", None)
         if stop is not None:
@@ -517,6 +527,7 @@ class PipelineSetupMixin:
             # PTR) и Outlook/iCloud (нужна чистая репутация) после этого
             # работала вслепую.
             self.network = NetworkValidator(timeout=timeout, proxies=proxies)
+            self._share_abort_event()
             if getattr(self, "_stop_requested", False):
                 return
             if live_proxies:
@@ -527,6 +538,7 @@ class PipelineSetupMixin:
         # Прокси не задавали — сеть ещё не создана, создаём здесь.
         if self.network is None:
             self.network = NetworkValidator(timeout=timeout, proxies=proxies)
+            self._share_abort_event()
         # Сколько может законно идти одна проверка при этом таймауте: по нему
         # журнал активности отличает долгую проверку от зависания.
         self.activity.set_net_budget(net_budget(

@@ -210,18 +210,37 @@ def test_not_a_total_has_no_percentage():
     assert "pct" not in api.state()["proxyProgress"]
 
 
-def test_not_a_total_is_marked_running_until_emails_start():
-    """Пока идёт проверка прокси, окно знает, что показывать надо её."""
+def test_not_a_total_is_marked_running_only_during_the_proxy_stage():
+    """Пока идёт проверка прокси, окно знает, что показывать надо её — и только тогда.
+
+    Прежний признак «бежит» считался по двум счётчикам («прокси видели, а
+    адресов ещё нет») и не был связан ни с прогоном, ни с этапом: после
+    «Стопа» на подготовке или блокировки («ни один прокси не ожил») полоса
+    бежала до закрытия программы (жалоба владельца 06.11.2026). Тест
+    закреплял именно это — «бежит» без всякого прогона.
+    """
     from ui.webapp import ValidatorApi
 
     api = ValidatorApi()
     api._on_proxy_progress(100, 2799)
+    # Прогона нет — полоса не бежит, сколько бы прокси ни видели.
+    assert api.state()["proxyProgress"]["running"] is False
+
+    api.pipeline.is_running = True
+    api.pipeline.activity.stage("proxies")
     assert api.state()["proxyProgress"]["running"] is True
 
     # Пошли адреса — полоса возвращается к ним.
+    api.pipeline.activity.stage("check")
     api._on_progress(5, 100)
     assert api.state()["proxyProgress"]["running"] is False
     assert api.state()["progress"]["pct"] == 5
+
+    # «Стоп» на этапе прокси — полоса больше не бежит.
+    api.pipeline.activity.stage("proxies")
+    assert api.state()["proxyProgress"]["running"] is True
+    api.stop()
+    assert api.state()["proxyProgress"]["running"] is False
 
 
 def test_not_a_total_log_line_does_not_look_like_a_fraction():

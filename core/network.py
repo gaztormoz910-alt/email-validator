@@ -23,6 +23,7 @@ import time
 # Таблицы поведения почтовиков — в core/mail_constants.py: ими пользуются и
 # SMTP-диалог, и профилирование прокси, и проверки по DNS, и скоринг.
 from core.mxguard import filter_mx_hosts, resolves_to_private, REASON_PRIVATE
+from core.network_abort import AbortableMixin
 from core.mail_constants import (                                 # noqa: E402,F401
     YAHOO_DOMAINS, AOL_DOMAINS, NEEDS_CLEAN_IP_DOMAINS, NICHE_FREE_DOMAINS,
     MICROSOFT_DOMAINS, LEGIT_HELO_NAMES, DNSBL_ZONES, SPAMHAUS_ZONE,
@@ -200,7 +201,7 @@ def control_probe_address(domain):
     return "%s@%s" % (_generate_random_local("name"), domain)
 
 
-class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
+class NetworkValidator(AbortableMixin, ProxyPoolMixin, DnsChecksMixin,
                        CatchAllMixin, SecondOpinionMixin, AcceptanceMixin):
     """SMTP-проверка ящика: диалог с сервером и сборка вердикта.
 
@@ -219,6 +220,10 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
         # Потолок времени на ОДИН адрес, независимо от числа MX и повторов.
         # Держит прогон предсказуемым: без него адрес с тремя MX мог висеть минутами.
         self.address_deadline = max(30, min(180, timeout * 6))
+        # «Стоп» из окна: обрывает паузы и ожидание очереди к серверу, и
+        # новая попытка уже не начинается. Без него начатая проверка
+        # доживала до дедлайна адреса со всеми повторами — минуты.
+        self.abort_event = threading.Event()
 
         # Пускать ли DNS через прокси. Выключается только там, где запросы не
         # содержат данных пользователя — например при профилировании самих
@@ -538,18 +543,21 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
         # пяти запросов за восемь секунд. Пауза при этом никуда не делась —
         # каждый поток по-прежнему выдерживает свою, — но ждёт он в стороне,
         # не занимая очередь.
-        time.sleep(self._mx_delay(mx_record))
+        if self._pause(self._mx_delay(mx_record)):
+            return dict(self.ABORTED)
 
         # Rate Limiting: ждём своей очереди к этому MX-серверу (п.3.3)
         sem = self._get_mx_semaphore(mx_record, proxy)
-        sem.acquire()
+        if not self._take(sem):
+            return dict(self.ABORTED)
 
         # И к самому прокси: без этого при 300 потоках и пяти прокси в каждый
         # летело по 60 соединений, дешёвый SOCKS5 рвал связь и получал бан
         # за сбои, которых сам не совершал.
         slot = self.proxy_slot(proxy)
-        if slot is not None:
-            slot.acquire()
+        if slot is not None and not self._take(slot):
+            sem.release()
+            return dict(self.ABORTED)
 
         try:
             # Обращение через выходной IP — считаем нагрузку на его репутацию
@@ -744,10 +752,12 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
         server = None
 
         # Та же причина, что и в _do_single_ping: сон не должен занимать слот.
-        time.sleep(self._mx_delay(mx_record))
+        if self._pause(self._mx_delay(mx_record)):
+            return [dict(self.ABORTED) for _ in addresses]
 
         sem = self._get_mx_semaphore(mx_record, proxy)
-        sem.acquire()
+        if not self._take(sem):
+            return [dict(self.ABORTED) for _ in addresses]
         try:
             server = self._make_smtp_connection(proxy)
             server.connect(mx_record, 25)
@@ -936,6 +946,9 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
             if time.monotonic() > deadline:
                 break
             for attempt in range(max_retries):
+                # «Стоп» — новую попытку не начинаем.
+                if self.aborted():
+                    return dict(self.ABORTED)
                 # Прокси кончились — повторять бессмысленно, только время тратить
                 if self.all_proxies_dead():
                     return {"status": "unknown", "reason": "All Proxies Dead (прямое соединение запрещено)"}
@@ -1135,6 +1148,8 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
     def check_email(self, email: str, avoid_exit_of=None,
                     prefer_exit_of=None) -> dict:
         """Полная сетевая проверка почты с RFC-валидацией, Catch-All детектором и DNS-здоровьем."""
+        if self.aborted():
+            return dict(self.ABORTED, mx_record="N/A")
 
         # Шаг 0: Проверка синтаксиса (п.1.3). IDN проходит — см. validate_email_syntax.
         if not validate_email_syntax(email):
@@ -1371,6 +1386,11 @@ class NetworkValidator(ProxyPoolMixin, DnsChecksMixin,
                                         control_probe=control,
                                         avoid_exit_of=avoid_exit_of,
                                         prefer_exit_of=prefer_exit_of)
+        if result.get("aborted") or self.aborted():
+            # «Стоп» из окна: дальше шли подтверждение приёма, запрос DNS о
+            # живости MX и проверка SPF/DMARC — по сети, секундами на поток, — и
+            # брошенный адрес переписывался в «risky» (рецензия 07.11.2026).
+            return dict(self.ABORTED, mx_record=primary_mx)
 
         # Гигант, принявший выдуманный адрес, — это не catch-all, а тарпитинг.
         # Называть вещи своими именами здесь важнее обычного: «домен catch-all»

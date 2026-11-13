@@ -100,13 +100,21 @@ def test_resume_state_is_wiped_after_a_finished_run():
     же файла проверил бы НОЛЬ адресов, без единого способа это исправить.
     """
     import re
-    source = read("core/pipeline.py")
+    # Решение «стереть или сохранить» с правкой «Стопа» (ноябрь 2026) переехало
+    # из core/pipeline.py в core/pipeline_control.py (_settle_resume_journal):
+    # pipeline.py стоит у потолка размера модуля. Тест искал условие по тексту
+    # прежнего файла и после переезда падал, хотя стирание никуда не делось.
+    # Теперь проверяется и то, что конвейер решение зовёт, и само условие.
+    assert "self._settle_resume_journal(state, resume, feeder_error)" in read("core/pipeline.py"), (
+        "конвейер не решает судьбу журнала продолжения в конце прогона")
+    source = read("core/pipeline_control.py")
     # «and not feeder_error» добавлено 17.10.2026: прогон, у которого
     # оборвалось чтение базы, до конца не дошёл, и его память стирать нельзя.
-    # Что законченный прогон память стирает, проверяется и вживую —
-    # test_activity_fixes.py::test_feeder_read_error_keeps_resume_memory…
-    assert re.search(r"if resume and not self\._stop_requested(?: and not feeder_error)?:",
-                     source), (
+    # «or self._aborting» — «Стоп» из окна: окно таблицу стёрло, и журнал
+    # обязан уйти следом. Что законченный прогон память стирает, проверяется
+    # и вживую — test_activity_fixes.py::test_feeder_read_error_keeps_resume_memory…
+    assert re.search(r"if \(?resume and not self\._stop_requested(?: and not feeder_error)?\)?"
+                     r"(?: or self\._aborting)?:", source), (
         "память о прогоне не стирается — повторный прогон даст ноль адресов")
     assert "state.clear()" in source, "стирание не вызывается"
 

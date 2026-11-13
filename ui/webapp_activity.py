@@ -19,6 +19,11 @@ class ActivityBridgeMixin:
     def _validator_activity(self):
         """Снимок движка проверки для полосы состояния. Не бросает."""
         pipeline = getattr(self, "pipeline", None)
+        if getattr(self, "_discarding", False):
+            # Окно сброшено «Стопом»: полоса — как при первом открытии, а не
+            # «Останавливаю» брошенного прогона. Монитор движка не трогаем:
+            # прогон ещё доживает и сам бы его оживил.
+            return self._fresh_activity("validator", getattr(self, "_starting", False))
         try:
             snap = pipeline.activity.snapshot(
                 paused=bool(getattr(pipeline, "is_paused", False)),
@@ -30,6 +35,17 @@ class ActivityBridgeMixin:
             return {"level": "idle", "title": "Состояние недоступно",
                     "detail": "Не удалось снять состояние движка: %s" % exc,
                     "trail": []}
+
+    @staticmethod
+    def _fresh_activity(kind, engine_busy=False):
+        """Снимок полосы, как у только что открытого окна."""
+        snap = payload(ActivityMonitor(kind=kind).snapshot())
+        if engine_busy:
+            # Честно, но тихо: окно чистое, а движок ещё отпускает прошлый
+            # прогон — «Начать» сейчас откажет, и надо сказать почему.
+            snap = dict(snap, detail="Движок завершает остановленную работу — через "
+                                     "несколько секунд можно запускать снова.")
+        return snap
 
     # ─────────────────────────── сбор адресов ───────────────────────────
     @property
@@ -55,6 +71,11 @@ class ActivityBridgeMixin:
         # сборе. Живость нового пока неизвестна, и это честно.
         if self.__dict__.get("_parser_launching"):
             pipeline = None
+        if self.__dict__.get("_parser_discarding"):
+            # Окно сбора сброшено «Стопом» — полоса как при первом открытии;
+            # пока поток сбора доживает, она честно говорит, что «Начать»
+            # сейчас откажет.
+            return self._fresh_activity("parser", self._parser_draining())
         if pipeline is not None:
             try:
                 alive = bool(pipeline.is_alive())

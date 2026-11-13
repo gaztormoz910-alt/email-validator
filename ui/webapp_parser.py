@@ -23,7 +23,13 @@ class ParserMixin:
     # под ним стартует поток сбора, а тот сразу пишет в журнал через self._lock.
     _PARSER_LAUNCH_LOCK = threading.Lock()
 
+    def _parser_quiet(self):
+        """Окно сбора сброшено «Стопом»: поздние события сбора — мимо окна."""
+        return bool(self.__dict__.get("_parser_discarding"))
+
     def _parser_log(self, message, tag="info"):
+        if self._parser_quiet():
+            return
         # «t» — время рождения строки: окно ставит его перед текстом.
         line = {"text": str(message), "tag": tag, "t": time.time()}
         with self._lock:
@@ -32,9 +38,13 @@ class ParserMixin:
             if len(self._parser_history) > self._history_cap:
                 del self._parser_history[:len(self._parser_history) - self._history_cap]
     def _parser_progress_cb(self, current, total, pct, label="Парсинг"):
+        if self._parser_quiet():
+            return
         self._parser_progress = (int(current or 0), int(total or 0),
                                  int(pct or 0), str(label))
     def _parser_stats_cb(self, dorks_tot, dorks_done, pages, snippets, emails):
+        if self._parser_quiet():
+            return
         self._parser_stats = {"dorksTotal": int(dorks_tot or 0),
                               "dorksDone": int(dorks_done or 0),
                               "pages": int(pages or 0),
@@ -45,7 +55,7 @@ class ParserMixin:
         # дорков, и без этого он занимал бы место в списке столько раз,
         # сколько раз попался.
         key = str(email).strip().lower()
-        if not key:
+        if not key or self._parser_quiet():
             return
         with self._lock:
             if key in self._parser_seen:
@@ -53,15 +63,31 @@ class ParserMixin:
             self._parser_seen.add(key)
             self._parser_rows.append((str(email), str(dork or "")))
     def _parser_complete_cb(self, aborted=False):
+        if self._parser_quiet():
+            # Итог брошенного сбора окну не нужен, но монитор и пульс сбора
+            # закрыть надо: иначе пульс жил бы до конца программы.
+            self._finish_parser_activity(aborted)
+            return
         self._parser_state = "done"
         failed = getattr(self.parser, "failed_reason", "") if self.parser is not None else ""
         self._parser_log("[Система] Сбор адресов прерван ошибкой." if failed
                          else "[Система] Сбор адресов завершён." if not aborted
                          else "[Система] Сбор адресов остановлен.", "info")
         self._finish_parser_activity(aborted)
+    _PARSER_FREEING = ("Сбор ещё завершает остановленную работу — это займёт "
+                       "несколько секунд. Нажмите «Начать сбор» чуть позже.")
+
+    def _parser_draining(self):
+        """«Стоп» сбросил окно сбора, а поток сбора ещё закрывает соединения."""
+        return bool(self._parser_quiet() and self.parser is not None
+                    and self.parser.is_alive())
+
     def parser_start(self, payload):
         if self.parser is not None and self.parser.is_alive():
-            return {"ok": False, "error": "Сбор уже идёт"}
+            # Окно после «Стопа» чистое и говорит «не запущено» — отказ «уже
+            # идёт» был бы неправдой (рецензия 08.11.2026).
+            return {"ok": False, "error": self._PARSER_FREEING if self._parser_quiet()
+                    else "Сбор уже идёт"}
         if not self._sources["dorks"]:
             return {"ok": False, "error": "Сначала загрузите дорки"}
 
@@ -79,6 +105,9 @@ class ParserMixin:
                 return {"ok": False, "error": "Сбор уже запускается"}
             self.__dict__["_parser_launching"] = True
             self.__dict__["_parser_cancel"] = False
+        # Новый сбор — события снова в окно (прошлый к этому моменту мёртв:
+        # проверка is_alive() выше не пустила бы второй поверх живого).
+        self.__dict__["_parser_discarding"] = False
 
         with self._lock:
             self._parser_rows = []
@@ -181,18 +210,30 @@ class ParserMixin:
             pipeline.stop()
             self.parser_activity.request_stop()
             self._parser_log("[Система] Остановка сбора.", "info")
-        self._parser_state = "done"
-        return {"state": self._parser_state}
+        # «Стоп» — окно как при первом открытии, так же, как у проверки
+        # (жалоба владельца 06.11.2026). Идущая проверка при этом не
+        # трогается: её экран сбрасывается, только если она не идёт.
+        self._reset_parser_view()
+        if not self._validator_running():
+            self._mute_engine()
+            self._reset_validator_view()
+        return {"ok": True, "state": self._parser_state}
+
     def parser_state(self, payload=None):
         with self._lock:
             lines, self._parser_pending = self._parser_pending, []
             found = len(self._parser_rows)
         current, total, pct, label = self._parser_progress
         alive = self.parser is not None and self.parser.is_alive()
+        # После «Стопа» окно чистое: «идёт» оно показывать не должно, хотя
+        # поток сбора ещё доживает, — иначе поля оставались запертыми под
+        # надписью «не запущено» (рецензия 08.11.2026).
+        draining = self._parser_draining()
         stats = dict(self._parser_stats)
         stats["found"] = found
         return {"state": self._parser_state,
-                "running": bool(alive),
+                "running": bool(alive) and not draining,
+                "engineBusy": draining,
                 "engines": list(self.PARSER_ENGINES),
                 "stats": stats,
                 "progress": {"current": current, "total": total,

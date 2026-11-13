@@ -66,8 +66,9 @@ PAGE_SIZE = 100
 from ui.webapp_sources import SourcesMixin, _тип_диалога  # noqa: E402
 from ui.webapp_parser import ParserMixin                  # noqa: E402
 from ui.webapp_activity import ActivityBridgeMixin        # noqa: E402
+from ui.webapp_reset import ResetMixin                    # noqa: E402
 
-class ValidatorApi(SourcesMixin, ParserMixin, ActivityBridgeMixin):
+class ValidatorApi(ResetMixin, SourcesMixin, ParserMixin, ActivityBridgeMixin):
     """То, что страница может попросить у питона.
 
     Каждый публичный метод — одна конечная точка. Возвращают обычные
@@ -137,6 +138,10 @@ class ValidatorApi(SourcesMixin, ParserMixin, ActivityBridgeMixin):
         # Промежуток между этими двумя событиями и был дырой для второго
         # прогона.
         self._starting = False
+        # «Стоп» сбросил окно, а прогон ещё доживает; и выгрузка, которую
+        # «Стоп» застал, — таблицу чистим после неё (ui/webapp_reset.py).
+        self._discarding = False
+        self._clear_store_after_export = False
         self._parser_state = "idle"
         self._parser_progress = (0, 0, 0, "Парсинг")
         self._parser_stats = {"dorksDone": 0, "dorksTotal": 0,
@@ -146,18 +151,19 @@ class ValidatorApi(SourcesMixin, ParserMixin, ActivityBridgeMixin):
         self._parser_rows = []          # (адрес, дорк) в порядке находки
         self._parser_seen = set()       # один адрес не показывается дважды
 
+        engine = self._quiet_after_stop      # ui/webapp_reset.py
         self.pipeline = ValidationPipeline(callbacks={
-            "on_log": self._on_log,
-            "on_progress": self._on_progress,
-            "on_phase": self._on_phase,
-            "on_revise": self._on_revise,
-            "on_proxy_progress": self._on_proxy_progress,
-            "on_result": self._on_result,
-            "on_complete": self._on_complete,
+            "on_log": engine(self._on_log),
+            "on_progress": engine(self._on_progress),
+            "on_phase": engine(self._on_phase),
+            "on_revise": engine(self._on_revise),
+            "on_proxy_progress": engine(self._on_proxy_progress),
+            "on_result": engine(self._on_result),
+            "on_complete": engine(self._on_complete),
             "on_unique_count": lambda count: None,
-            "on_proxies_tested": lambda live, total: self._on_log(
-                f"[INFO] Прокси: рабочих {live} из {total}.", "info"),
-            "on_proxy_profile": self._on_proxy_profile,
+            "on_proxies_tested": engine(lambda live, total: self._on_log(
+                f"[INFO] Прокси: рабочих {live} из {total}.", "info")),
+            "on_proxy_profile": engine(self._on_proxy_profile),
         })
 
     @property
@@ -205,7 +211,11 @@ class ValidatorApi(SourcesMixin, ParserMixin, ActivityBridgeMixin):
         что и в parser_start, где решается, можно ли запускать второй раз.
         """
         if self._starting or getattr(self.pipeline, "is_running", False):
-            return True
+            # «Стоп» уже нажат: движок доживает брошенный прогон, но источники
+            # он забрал копией при запуске (list(...) в _launch_pipeline) —
+            # менять их можно, как и у сбора адресов ниже.
+            if not self._discarding:
+                return True
         parser = getattr(self, "parser", None)
         if parser is None:
             return False
@@ -377,22 +387,16 @@ class ValidatorApi(SourcesMixin, ParserMixin, ActivityBridgeMixin):
         # проверку и запускал ВТОРОЙ конвейер: строки лога удваивались, а
         # счётчики показывали один прогон, потому что второй очищал хранилище.
         # Владелец принимал это за неудалённые дубликаты.
-        if self._busy() or self._starting:
-            return {"ok": False, "error": "Проверка уже идёт"}
-        # Проверка источников идёт ДО взведения флага. Раньше флаг ставился
-        # раньше, и выход «сначала выберите адреса и прокси» оставлял его
-        # взведённым навсегда: следующий щелчок получал «проверка уже идёт»,
-        # хотя не шло ничего, и кнопка не оживала до перезапуска программы.
-        if not self.email_sources:
-            return {"ok": False, "error": "Сначала выберите адреса"}
-        if not self.proxy_sources and not payload.get("allowDirect"):
-            # Молча ходить напрямую нельзя: это раскрывает домашний IP
-            # владельца почтовым серверам, и согласие на такое должно быть
-            # осознанным, а не побочным следствием пустого поля.
-            return {"ok": False, "direct": True,
-                    "error": "Прокси не заданы. Проверка пойдёт с твоего "
-                             "домашнего IP — подтверди, если это осознанно."}
-        self._starting = True
+        # Проверки и взведение флага «запускаюсь» — одним шагом под замком
+        # (ui/webapp_reset.py, _claim_start): иначе второй щелчок проходил
+        # проверку, пока первый чистил таблицу.
+        refusal = self._claim_start(payload)
+        if refusal is not None:
+            return refusal
+        # Новый прогон — события снова в окно. Прошлый к этому моменту умер
+        # (иначе _starting не дал бы дойти сюда).
+        self._discarding = False
+        self._proxy_progress = (0, 0)
 
         from core.parser.ml_predictor import set_country_mode
         set_country_mode(payload.get("country") or "coverage")
@@ -406,7 +410,6 @@ class ValidatorApi(SourcesMixin, ParserMixin, ActivityBridgeMixin):
                 "[DEAD] Прокси не заданы: проверка идёт с твоего домашнего IP. "
                 "Сначала проверю, открыт ли у тебя исходящий порт 25.", "dead")
 
-        self.store.clear()
         self._progress = (0, 0)
         self._phase = ("", 0)
         self._state = "running"
@@ -470,17 +473,13 @@ class ValidatorApi(SourcesMixin, ParserMixin, ActivityBridgeMixin):
         self._state = "paused" if self.pipeline.is_paused else "running"
         return {"state": self._state}
 
-    def stop(self, payload=None):
-        self.pipeline.stop()
-        self._state = "done"
-        return {"state": self._state}
-
     # ---------------------------------------------------------- показ --
     def state(self, payload=None):
         """Всё, что нужно странице для перерисовки. Один запрос на тик."""
         counts = self.store.counts()
         current, total = self._progress
         proxy_checked, proxy_seen = self._proxy_progress
+        running, proxies_running = self._run_flags()      # ui/webapp_reset.py
         with self._lock:
             since = payload.get("logSince") if isinstance(payload, dict) else None
             if since is None:
@@ -495,9 +494,15 @@ class ValidatorApi(SourcesMixin, ParserMixin, ActivityBridgeMixin):
                     since = 0
                 lines = [line for line in self._history if line.get("n", 0) > since]
                 self._pending = []
+            # Номер — под тем же замком, что и строки: прочитанный после
+            # замка, он покрывал строку, не попавшую в ответ, и она терялась.
+            seq = self._log_seq
         return {
             "state": self._state,
-            "running": bool(self.pipeline.is_running),
+            "running": running,
+            # Движок ещё бросает остановленный прогон: окно чистое, но
+            # «Начать» откажет — кнопку держим выключенной, а не обманываем.
+            "engineBusy": bool(self._starting) and not running,
             "counts": {
                 "valid": counts["valid"], "invalid": counts["invalid"],
                 "spam": counts["spam"], "unknown": counts["unknown"],
@@ -508,12 +513,12 @@ class ValidatorApi(SourcesMixin, ParserMixin, ActivityBridgeMixin):
             # Проверка прокси — отдельно и БЕЗ процента: пока источник
             # читается, целого не существует, и делить не на что.
             "proxyProgress": {"checked": proxy_checked, "seen": proxy_seen,
-                              "running": bool(proxy_seen) and not total},
+                              "running": proxies_running},
             "phase": {"name": self._phase[0], "count": self._phase[1]},
             # Жив ли движок и что делает — для полосы состояния (core/activity.py).
             "activity": self._validator_activity(),
             "log": lines,
-            "logSeq": self._log_seq,
+            "logSeq": seq,
             "dropped": self.log.dropped,
             "proxy": self._proxy_summary,
             "exportBusy": self._export_busy,
@@ -777,7 +782,7 @@ class ValidatorApi(SourcesMixin, ParserMixin, ActivityBridgeMixin):
         except Exception as exc:
             self._on_log(f"[DEAD] Выгрузка не удалась: {type(exc).__name__}: {exc}", "dead")
         finally:
-            self._export_busy = False
+            self._export_done()
 
     # ================================================== сбор адресов ==
     #
@@ -919,7 +924,7 @@ class ValidatorApi(SourcesMixin, ParserMixin, ActivityBridgeMixin):
             self._on_log("[DEAD] Раскладка не удалась: %s: %s"
                          % (type(exc).__name__, exc), "dead")
         finally:
-            self._export_busy = False
+            self._export_done()
 
     def copy_rows(self, payload):
         """Адреса выборки текстом — страница положит их в буфер обмена."""
@@ -1409,8 +1414,8 @@ def run(selftest_close=None):
         on_hint=lambda текст: api._on_log("[WARN] " + текст, "trap"))
     отметить("фильтр шума движка")
 
-    api._on_log("[INFO] Валидатор готов к работе.", "info")
-    api._on_log("[INFO] Выберите базу адресов и список прокси.", "info")
+    for текст, тег in api.START_LINES:
+        api._on_log(текст, тег)
 
     # Про вчерашнюю аварию владелец должен УЗНАТЬ, а не наткнуться на файл
     # случайно. Раньше сбой не оставлял следа вовсе, и разбирать его

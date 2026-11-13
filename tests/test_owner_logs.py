@@ -137,9 +137,16 @@ class TestNameModeSeparatesGuessFromFact(_РежимИмён):
     даже 'aaa' в ней чьи-то имена), поэтому она такое не ловит.
     """
 
-    МУСОР = ["kavaterasports", "anliewww", "whiteowlclothingco",
-             "premiuminstallations318", "elmvaleymcagymnastics",
-             "battlegroundfitnesslakeport", "podvorkus77", "gitprx222"]
+    # Догадка из двух слов: «Заполненность» её оставляет (компромисс
+    # режима), «Точность» — нет.
+    МУСОР = ["kavaterasports", "whiteowlclothingco", "elmvaleymcagymnastics"]
+
+    # Догадка ОДНИМ неподтверждённым словом («Anlie», «Battleground», «Git»).
+    # До 13.11.2026 «Заполненность» её ставила, и эти строки стояли в списке
+    # выше. Решение владельца 13.11.2026: одно слово — подтверждённое имя или
+    # пустота, в обоих режимах.
+    МУСОР_ОДНИМ_СЛОВОМ = ["anliewww", "premiuminstallations318",
+                          "battlegroundfitnesslakeport", "podvorkus77", "gitprx222"]
 
     # Границы поставил человек — его разметку не пересуживаем ни в каком режиме.
     ЧЕЛОВЕК = ["john.doe", "maria.ivanova", "moein.farsadzadeh",
@@ -154,6 +161,13 @@ class TestNameModeSeparatesGuessFromFact(_РежимИмён):
                             "%s: в обычном режиме имя должно ставиться" % л)
             self.assertEqual(self.имя(л, "accuracy"), "",
                              "%s: «Точность» оставила догадку сегментатора" % л)
+
+    def test_one_unconfirmed_word_is_not_a_name_in_any_mode(self):
+        for л in self.МУСОР_ОДНИМ_СЛОВОМ:
+            for режим in ("coverage", "accuracy"):
+                self.assertEqual(self.имя(л, режим), "",
+                                 "%s: одно неподтверждённое слово стало именем (%s)"
+                                 % (л, режим))
 
     def test_name_mode_keeps_boundaries_drawn_by_the_person(self):
         """ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ: строгость не косит всё подряд."""
@@ -170,14 +184,20 @@ class TestNameModeSeparatesGuessFromFact(_РежимИмён):
                             "%s: словарь имя подтверждает, а его убрали" % л)
 
     def test_name_mode_coverage_is_untouched(self):
-        """В обычном режиме не изменился НИ ОДИН из проверяемых адресов.
+        """В обычном режиме догадки остались прежними — кроме заведомого мусора.
 
         Режим по умолчанию — «Заполненность». Менять поведение тому, кто
-        ничего не переключал, нельзя.
+        ничего не переключал, нельзя. Одно исключение — то, что мусор в
+        любом режиме: веб-хвост «Www» (жалоба владельца 06.11.2026 на имена
+        «что попалось»). Неподтверждённые, но правдоподобные догадки
+        («Kava Terasports») режим сохраняет — это его компромисс.
+
+        Второе исключение — решение владельца 13.11.2026: догадка ОДНИМ
+        неподтверждённым словом. `anliewww` давал здесь «Anlie»; теперь пусто.
         """
         ожидалось = {
             "kavaterasports": "Kava Terasports",
-            "anliewww": "Anlie Www",
+            "anliewww": "",
             "whiteowlclothingco": "Green Owlclothingco",
             "john.doe": "John Doe",
             "aminaduku": "Amina Duku",

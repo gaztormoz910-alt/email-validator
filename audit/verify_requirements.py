@@ -47,7 +47,12 @@ LOCAL = {"core", "ui", "tools", "api", "main", "cli", "engine"}
 
 # Папки, которые описывают не продукт, а его проверку
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "tor_bin", ".unlazy",
-             "audit", "tests"}
+             "audit", "tests",
+             # Выход локальной сборки установщика (обе папки в .gitignore). В
+             # dist/ лежат ЧУЖИЕ библиотеки, собранные в программу: сито
+             # принимало их импорты (torch, cupy, tensorflow…) за импорты
+             # проекта и падало на любой машине, где программу собирали.
+             "build", "dist"}
 
 
 def project_imports():

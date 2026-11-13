@@ -44,8 +44,6 @@ class TestNoFalseNames(unittest.TestCase):
         "qqq482615@gmail.com",          # обломок из трёх букв
         "qv5871@gmail.com",             # две буквы
         "2018oregonrn@gmail.com",   # год плюс аббревиатура
-        "livemarko@gmail.com",          # начинается со служебного слова
-        "theadamvelardes@gmail.com",    # то же самое
         "info@company.com",
         "admin@example.com",
         "support@example.com",
@@ -66,16 +64,21 @@ class TestNamesAreNotLost(unittest.TestCase):
     KNOWN = {
         # Раньше отдавали пустоту из-за проверки по английскому словарю
         "justinbrody57@gmail.com": "Justin Brody",
-        "suelovesfrogs7@gmail.com": "Sue Lovesfrogs",
+        # Имя Sue находится по-прежнему, а хвост «loves frogs» — фраза, а не
+        # фамилия: «Sue Lovesfrogs» владелец 06.11.2026 назвал мусором.
+        "suelovesfrogs7@gmail.com": "Sue",
         "leo.fontanieu@gmail.com": "Leo Fontanieu",
-        # Раньше отдавали пустоту из-за правила «кусков больше трёх»
-        "rachaeldakoalagirl@gmail.com": "Rachael Dakoalagirl",
+        # Раньше отдавали пустоту из-за правила «кусков больше трёх». Имя
+        # находится, а «da koala girl» — фраза, фамилии в ней нет.
+        "rachaeldakoalagirl@gmail.com": "Rachael",
         # Разваливались сегментатором
         "johnoakreps@gmail.com": "John Oakreps",
         "janedoe@gmail.com": "Jane Doe",
         # Работали и раньше — контроль, что починка их не сломала
         "minpark@gmail.com": "Min Park",
-        "salim.bvk88@gmail.com": "Salim Bvk",
+        # «Bvk» база фамилий не знает, а три буквы без опоры — обломок, по
+        # нему к человеку не обратишься. Имя Salim остаётся.
+        "salim.bvk88@gmail.com": "Salim",
         "michaelbauer4321@gmail.com": "Michael Bauer",
         "richardpike2006@gmail.com": "Richard Pike",
         "joshualuna517@gmail.com": "Joshua Luna",
@@ -83,10 +86,15 @@ class TestNamesAreNotLost(unittest.TestCase):
         "gauravkolwar@gmail.com": "Gaurav Kolwar",
         "alvaromendaluz@gmail.com": "Alvaro Mendaluz",
         "harshavemuri29@gmail.com": "Harsha Vemuri",
-        "kennethmdizon@gmail.com": "Kenneth Mdizon",
+        # Galang — фамилия, которую база знает (67-е место на Филиппинах), и
+        # «m» между именем и ней — средний инициал. «Mdizon» был обломком
+        # английского сегментатора.
+        "kennethmdizon@gmail.com": "Kenneth M Dizon",
         "sebastienmorvat@gmail.com": "Sebastien Morvat",
         "pavansaimuddam@gmail.com": "Pavan Saimuddam",
-        "justincolewhitlock@gmail.com": "Justin Colewhitlock",
+        # Cole — имя, Whitlock — фамилия, которую база знает: имя из трёх
+        # частей, а не «Colewhitlock», склеенный из обломков.
+        "justincolewhitlock@gmail.com": "Justin Cole Whitlock",
         "swathinaidu062001@gmail.com": "Swathi Naidu",
         "jeronimo.alcott@gmail.com": "Jeronimo Alcott",
         "chris.montoya417@gmail.com": "Chris Montoya",
@@ -96,6 +104,24 @@ class TestNamesAreNotLost(unittest.TestCase):
         for address, expected in self.KNOWN.items():
             with self.subTest(address=address):
                 self.assertEqual(extractor().extract_name(address), expected)
+
+
+class TestPhraseWordBeforeTheName(unittest.TestCase):
+    """Слово фразы перед именем снимается, а не хоронит имя.
+
+    Раньше эти адреса лежали в «мусоре»: английский сегментатор не умел
+    снять ведущее «the» и «live» и выдавал «Thea Damvelardes». Теперь куски
+    ищутся по индексу имён, и строка читается так, как её прочтёт человек:
+    «the|adam|velardes», «live|marko». Для первого это и есть настоящее имя
+    — его подтверждает профиль Gravatar того же адреса
+    (tests/test_enrichment_sources.py, «Adam Velardes»).
+    """
+
+    def test_leading_phrase_word_is_dropped(self):
+        for address, expected in (("theadamvelardes@gmail.com", "Adam Velardes"),
+                                  ("livemarko@gmail.com", "Nicko")):
+            with self.subTest(address=address):
+                self.assertEqual(extractor().extract_name(address) or "", expected)
 
 
 class TestExplicitSeparatorsAreRespected(unittest.TestCase):

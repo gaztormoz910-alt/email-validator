@@ -32,6 +32,7 @@ from core.provider import (classify_domain, country_from_domain,
 # объектом и тем же состоянием из __init__: файл поделён, поведение нет.
 from core.pipeline_setup import PipelineSetupMixin
 from core.activity import PipelineActivityMixin
+from core.pipeline_control import RunControlMixin
 from core.enrichment import (EnrichmentMixin, AI_SUSPICION_PENALTY,
                              _enrich_signature, _utc_now, _as_utc, _fmt_stamp)
 from core.verdict_revision import VerdictRevisionMixin
@@ -162,7 +163,7 @@ class _DomainGate:
         return False
 
 
-class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
+class ValidationPipeline(RunControlMixin, PipelineSetupMixin, EnrichmentMixin,
                          VerdictRevisionMixin, SettleMixin, PipelineActivityMixin):
     def __init__(self, callbacks):
         self.callbacks = callbacks
@@ -180,6 +181,19 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         # спокойно взводил его обратно. Прогон продолжался вопреки команде, а
         # окно оставалось запертым до конца проверки.
         self._stop_requested = False
+        # «Стоп» из окна — БРОСИТЬ начатое, а не доделать (stop(abort=True)).
+        #
+        # Без этого «Стоп» действовал только между адресами: каждая из сотен
+        # начатых проверок доживала до конца со всеми попытками, вторым
+        # мнением и обогащением, и «Останавливаю» висело минутами, а кнопка
+        # «Начать» отказывала («в работе 227 → 130», жалоба владельца
+        # 06.11.2026). Событие общее с сетью: сеть, созданная при подготовке,
+        # берёт его себе (core/pipeline_setup.py) и обрывает по нему паузы и
+        # ожидание очереди к серверу. Брошенный адрес не выдаётся и не
+        # кладётся в кэш, а журнал продолжения брошенный прогон стирает
+        # целиком (см. конец run_pipeline): окно выданного уже не показывает.
+        self._abort_event = threading.Event()
+        self._aborting = False
         # Сколько результатов реально ушло наружу. Нужен для проверки
         # «подано = выдано»: в обработке адреса восемнадцать мест, где
         # исключение проглатывается, и без счёта потеря адреса выглядит как
@@ -272,9 +286,15 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         отправляется из семи разных веток, и счётчик, размазанный по ним,
         разойдётся с действительностью на первой же правке.
         """
+        if self._aborting:
+            # Прогон брошен «Стопом»: начатый адрес мог не пройти защит
+            # (второе мнение, канарейка), и показывать его нельзя. Журнал
+            # продолжения заморожен — адрес проверится при следующем запуске.
+            return False
         with self._emitted_lock:
             self._emitted += 1
         self.callbacks['on_result'](email, status, reason, mx, data)
+        return True
 
     def run_pipeline(self, email_sources, threads=50, fix_typos=True,
                      check_spam=True, deep_ping=True, enable_ai=True,
@@ -654,6 +674,10 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
             # Шаг 3: Глубокий SMTP Ping
             if deep_ping:
                 res = self.network.check_email(email)
+                if res.get("aborted") or self._aborting:
+                    # Брошено «Стопом»: ни второго мнения, ни обогащения по сети
+                    # (Gravatar, WHOIS, DNSBL) — секунды на поток зря.
+                    return False
                 raw_status = res["status"]
                 warn_if_proxies_dead()
 
@@ -766,6 +790,10 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         # Подробно — у RunState.reset_seen.
         state.reset_seen()
         self.state = state
+        if self._aborting:
+            # «Стоп» с броском пришёл, пока журнал открывался: stop() его ещё
+            # не видел и заморозить не мог.
+            state.freeze()
         if resume and state.resumed_count:
             self.callbacks['on_log'](
                 f"[INFO] Продолжаю прерванный прогон: {state.resumed_count} адресов "
@@ -1027,6 +1055,8 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
                     else:
                         res = self.network.check_email(
                             email, avoid_exit_of=first_proxy)
+                    if res.get("aborted") or self._aborting:
+                        return         # брошено «Стопом» — см. основной проход
                     raw_status = res["status"]
 
                     # Второй круг. Повтор мог не дойти по той же причине, по
@@ -1339,26 +1369,8 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
             self.cache.close()
             self.cache = None
 
-        # ЛОВУШКА, закрытая здесь.
-        #
-        # RunState стирает память о прогоне ТОЛЬКО когда продолжение
-        # выключено (`if not resume: self.clear()` в core/runstate.py). Раз
-        # продолжение теперь включено всегда и убрано из окна, память не
-        # стиралась бы никогда: второй запуск того же файла дал бы НОЛЬ
-        # адресов к проверке, а починить это было бы нечем — галочки в окне
-        # больше нет, остаётся удалять sqlite руками.
-        #
-        # Поэтому память стирается сама, но ТОЛЬКО после прогона, дошедшего
-        # до конца. Нажали «Стоп» — память цела, и продолжение работает
-        # ровно так, как обещает его название.
-        try:
-            # Не стирать и после обрыва чтения базы: прогон до конца не
-            # дошёл, и следующий запуск обязан продолжить, а не проверять
-            # по сети заново всё уже проверенное (рецензия 17.10.2026).
-            if resume and not self._stop_requested and not feeder_error:
-                state.clear()
-        except Exception:
-            pass
+        # Стирать ли память о прогоне — решает core/pipeline_control.py.
+        self._settle_resume_journal(state, resume, feeder_error)
 
         # Состояние дописывается на диск: недописанная пачка иначе потерялась бы,
         # и возобновление не увидело бы последние сотни адресов.
@@ -1419,6 +1431,8 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         self.confirm_valid = bool(confirm_valid)
         # Новый прогон отменяет прошлую команду остановки.
         self._stop_requested = False
+        self._aborting = False
+        self._abort_event.clear()
 
         # Признак взводится ЗДЕСЬ, синхронно, до создания потока.
         #
@@ -1470,23 +1484,3 @@ class ValidationPipeline(PipelineSetupMixin, EnrichmentMixin,
         self._start_pulse()
         return t
         
-    def stop(self):
-        self._stop_requested = True
-        self.is_running = False
-        # До конца потока окно скажет «останавливаю», а не «работает».
-        self.activity.request_stop()
-        # Остановка снимает и паузу: иначе остановленный на паузе прогон
-        # остаётся «на паузе» навсегда, и следующий запуск стартует замершим.
-        self.is_paused = False
-        self.activity.set_paused(False)
-        # Фоновое обновление профилей прокси — тоже работа прогона. Раньше
-        # после «Стопа» на подготовке оно жило до следующего пробуждения
-        # (до 10 минут) и ходило в сеть.
-        self._stop_profile_refresher()
-
-    def pause(self):
-        self.is_paused = not self.is_paused
-        # Пауза и возобновление — события для журнала активности: молчание
-        # на паузе не должно после «Продолжить» читаться как зависание.
-        self.activity.set_paused(self.is_paused)
-        return self.is_paused

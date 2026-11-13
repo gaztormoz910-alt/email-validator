@@ -64,6 +64,10 @@ class TestProfileBeatsGuess(unittest.TestCase):
                          "Adam Velardes")
         self.assertIn("theadamvelardes@gmail.com", fake.asked,
                       "профиль даже не спросили")
+        # Строгий разбор теперь сам читает адрес так же, и без проверки
+        # источника тест не отличал бы, взят ли ответ профиля (рецензия
+        # 07.11.2026).
+        self.assertEqual(extractor.last_name_source(), "профиль")
 
     def test_login_in_the_profile_is_not_a_name(self):
         """Gravatar отдаёт логин, когда имени человек не указывал."""
