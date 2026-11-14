@@ -377,9 +377,9 @@ def classify_smtp_response(code: object, message: object) -> Verdict:
         # и ящика не нашёл, а прежний порядок называл несуществующий ящик
         # переполненным. Явный x.2.2 остаётся переполнением при любом тексте:
         # расширенный код — более строгий сигнал, чем слова вокруг.
-        full_code = bool(enhanced) and enhanced[1:] == (2, 2)
-        no_mailbox = ((bool(enhanced) and enhanced[1:] in ((1, 1), (1, 10)))
-                      or (not enhanced and _contains(msg, _NO_MAILBOX_PROOF)))
+        full_code = enhanced is not None and enhanced[1:] == (2, 2)
+        no_mailbox = ((enhanced is not None and enhanced[1:] in ((1, 1), (1, 10)))
+                      or (enhanced is None and _contains(msg, _NO_MAILBOX_PROOF)))
         if full_code or (_contains(msg, _MAILBOX_FULL_MARKERS) and not no_mailbox):
             return result("full", f"{numeric} Ящик переполнен — письмо не будет "
                                   "доставлено; переполняется обычно ящик, "
