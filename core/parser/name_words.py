@@ -17,7 +17,7 @@ _VOWELS = frozenset("aeiouy")
 # Веб-хвосты и служебные роли ящика. Именем не бывают ни при каком источнике.
 WEB_WORDS = frozenset({
     "com", "net", "org", "ru", "info", "online", "www", "gov", "edu", "mail",
-    "email", "web", "site", "http", "https", "biz",
+    "email", "web", "site", "http", "https", "biz", "data",
 })
 ROLE_WORDS = frozenset({
     "admin", "support", "sales", "service", "services", "team", "office", "contact",
@@ -30,6 +30,33 @@ ROLE_WORDS = frozenset({
     "gamer", "gaming", "games", "coder", "artist", "designer", "photography",
     "photographer", "blogger", "vlogger", "youtuber", "streamer", "creator",
     "music", "musician", "traveller", "traveler", "player",
+    # Занятие или приписка в хвосте личного адреса — замер на настоящих
+    # базах 13.11.2026: без них слово либо липло к имени фамилией («Anna
+    # Lopez Fotografia»), либо хоронило имя целиком («annadeveloper» — пусто).
+    "developer", "development", "business", "illustrator", "illustration",
+    "illustrations", "fotografia", "fotografie", "foto", "fotos", "photo", "collab",
+    "collabs", "colab", "audio", "video", "videos", "mgmt", "recruiter", "recruiting",
+    "hiring", "inquiry", "writer", "author", "editor", "realtor", "coach", "trainer",
+    "fanpage", "work", "resume", "usa", "model", "modeling", "freelance", "freelancer",
+    "portfolio", "personal", "private", "contacto", "contato", "kontakt", "talent",
+    "seo", "ugc", "smm", "content", "contents", "exteriors", "interiors", "guitars",
+    "golf", "bakes",
+})
+
+# Занятие или приписка в ХВОСТЕ, которая бывает и именем или фамилией: Art,
+# Dev, Law, Pro. В перечень ролей их класть нельзя («art.garfunkel»,
+# «dev.patel» — люди), поэтому судит место: слово снимается, только когда
+# стоит последним после имени (name_split.py, drop_tail_role). Сюда же —
+# приписки к имени, которые именем не обращаются: Jr, Sr, MD, PhD, CPA.
+_TAIL_ROLE_WORDS = frozenset({
+    "art", "arts", "dev", "law", "pro", "jr", "sr", "md", "phd", "cpa", "esq", "dds",
+    "rn", "hr", "pr", "tv", "fm",
+    # Код страны или штата последним куском после точки: «anna.lopez.uk».
+    # Кодов, которые одновременно частые короткие фамилии и имена (Li, Le,
+    # Ma, Ho, Vo, Do, Su, Al, Ed, Jo, Bo), здесь нет намеренно.
+    "uk", "us", "ca", "au", "nz", "za", "ae", "qa", "ph", "sg", "bd", "pk", "lk", "ke",
+    "gh", "eg", "tr", "ir", "ru", "br", "mx", "fr", "nl", "dk", "pl", "cz", "pt", "gr",
+    "ie", "jp", "kr", "cn", "tw", "hk", "vn", "ga", "ny", "tx", "fl", "nc",
 })
 
 # Род деятельности: рядом с ним адрес чаще всего не человека, а фирмы.
@@ -56,6 +83,21 @@ BUSINESS_WORDS = frozenset({
     "installation", "rental", "rentals", "travel", "tours", "hotel", "hotels",
     "restaurant", "cafe", "salon", "beauty", "fashion", "photography", "films",
     "records", "events", "pharma", "handel",
+    # Замер на настоящих базах 13.11.2026: имя перед таким словом — человек
+    # со своим делом («annabrows» — Anna), а имя ПОСЛЕ него или посреди —
+    # название («GoldenWisdomAcademy» давало бы «Wisdom»).
+    "brows", "lashes", "nails", "makeup", "tattoo", "tattoos", "bankruptcy",
+    "engineering", "tarot", "distillery", "recruitment", "staffing", "landscapes",
+    "landscaping", "plumbing", "construction", "roofing", "cleaning", "catering",
+    "bakery", "cakery", "motel", "garage", "collectibles", "collective",
+    "entertainment", "publishing", "bookclub", "yoga", "pilates", "wellness",
+    "therapy", "veterinary", "pharmacy", "swimwear", "apparel", "jewelry", "jewellery",
+    "cosmetics", "skincare", "homes", "property", "estates", "mortgage", "loans",
+    "crypto", "holidays", "charters", "employment", "placement", "treasurer",
+    "sponsorship", "community", "programs", "equipment", "supply", "supplies",
+    "outfitters", "outdoor", "kitchen", "foods", "brewery", "winery", "vineyard",
+    "architect", "architects", "architecture", "excavating", "technology",
+    "hijab", "hijabs", "abaya", "abayas", "sarees", "kurtis",
 })
 
 # Части слов, которые выдают спам или рекламу в ПРОФИЛЕ. Ищутся подстрокой:
@@ -164,6 +206,15 @@ _KEYBOARD_JUNK = ("xyz", "qwe", "asd", "zxc", "qwerty", "asdf", "wasd", "abc", "
 _PHRASE_INSIDE = ("love", "says", "here", "there", "girl", "baby", "cute", "cool",
                   "sexy", "world", "life", "only", "just", "best", "star", "smile",
                   "happy", "crazy", "your", "ontour", "real")
+
+# Пары согласных, с которых начинаются слова и фамилии разных языков (bl, ch,
+# kr, sz, mc…). Пара вне перечня в начале куска значит «буква и слово»:
+# «gshukla», «jsmith», «kpatel» (name_split.py, odd_onset).
+_WORD_ONSETS = frozenset("""
+    bh bl br ch cl cr cz dh dj dr dw dz fl fr gh gl gn gr gw hr jh kh kl kn kr kw
+    ll lh mb mc mn mr nd ng nj nk ph pl pr ps rh sc sh sk sl sm sn sp sq sr st sv
+    sw sz th tr ts tw tz vl vr wh wr zb zd zh zl zn zs zv zw
+""".split())
 
 # Украшение, а не инициал: «paulx», «brownx», «ninaz». Буква «x» на конце
 # ника — это стиль, по ней к человеку не обратишься.

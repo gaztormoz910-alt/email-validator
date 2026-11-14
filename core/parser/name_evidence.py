@@ -242,8 +242,10 @@ class EvidenceMixin:
             return False
         rank = self.first_rank(t)
         share = self._gender_share(t)
+        _, last = self._ranks(t)
+        # Фамилией чаще, чем именем, — уже не «ясно имя»: «t|archer».
         return (rank is not None and rank <= 1000 and share is not None
-                and share >= GENDERED_SHARE)
+                and share >= GENDERED_SHARE and (last is None or rank <= last))
 
     def joined_known(self, letter, piece):
         """Буква и кусок вместе — слово, которое база знает: O'Brien, Amaral, Esteve.
@@ -505,7 +507,8 @@ class EvidenceMixin:
         # «fatima|m», «attila|m» — имя и буква фамилии (рецензия 08.11.2026).
         if not (index > 0 and items[index - 1][1] == "initial"):
             return items
-        if not (self.surname_ok(part) and self.reads_as_surname(part)):
+        if not (self.surname_ok(part) and (self.reads_as_surname(part)
+                                           or self.surname_after_initial(part))):
             return items
         out = list(items)
         out[index] = (part, "surname")

@@ -644,8 +644,17 @@ class NameExtractor:
 
     # ── строгий разбор адреса ───────────────────────────────────────────
 
-    def _split_fused_part(self, part):
+    def _split_fused_part(self, part, crowded=False, others=()):
         """Режет слитный кусок между разделителями, только если разрез бесспорный.
+
+        crowded — в адресе есть ещё хотя бы один кусок, похожий на имя: человек
+        уже сам разделил имя и фамилию, и резать его куски заново — значит
+        спорить с ним. На настоящих базах 13.11.2026 так резались фамилии
+        после точки: `ivan.dorlov` отдавало «Ivan D Orlov» (Orlov —
+        известная фамилия). В таком адресе кусок режется только в
+        двух случаях: фамилия повторена соседним куском («markjones.jones»)
+        или кусок начинается с пары согласных, с которой слова не начинаются
+        («gshukla», «jsmith» — буква и фамилия).
 
         `markjones.jones` — человек поставил точку, но первую половину
         написал слитно; `rameshkumar.l` — тоже. Режем, только когда куски —
@@ -676,6 +685,23 @@ class NameExtractor:
             return len(piece) >= 4 and quality.surname_ok(piece) and last is not None and last <= 500
 
         words = [p for p, _ in pieces]
+        if crowded:
+            if len(words) != 2:
+                return None
+            head, tail = words
+            twin = any(letters_only(other) == tail for other in others if other is not part)
+            # Без повтора — только частое имя и частая фамилия от пяти букв
+            # каждое: «carlos|garcia» режется, «elsa|nova» (Elsa — четыре буквы) — нет.
+            _, tail_rank = name_ranks(tail)
+            sure = (len(head) >= 5 and (quality.first_rank(head) or 9999) <= 300
+                    and (len(tail) >= 5 or (tail_rank or 9999) <= 50))
+            if strong(head) and top_surname(tail) and (twin or sure):
+                return [(head, "first"), (tail, "surname")]
+            if len(head) == 1 and top_surname(tail) and quality.odd_onset(token):
+                return [(head, "initial"), (tail, "surname")]
+            if strong(head) and len(tail) <= 2 and quality.hard_junk(tail):
+                return [(head, "first"), (tail, "")]
+            return None
         if all(strong(p) for p in words):
             return [(p, "first") for p in words]
         if len(words) == 2:
@@ -720,10 +746,11 @@ class NameExtractor:
         kept, source = [], ""
         if any(sep in username_clean for sep in ['.', '_', '-']):
             parts, kinds, guessed = [], [], False
-            for raw in re.split(r'[._-]+', username_clean):
-                if not raw.strip():
-                    continue
-                split = self._split_fused_part(raw)
+            raws = [raw for raw in re.split(r'[._-]+', username_clean) if raw.strip()]
+            named = sum(1 for raw in raws
+                        if quality.kind_of(raw, True) in ("first", "surname", "structural"))
+            for raw in raws:
+                split = self._split_fused_part(raw, crowded=named >= 2, others=raws)
                 if split:
                     for piece, kind in split:
                         parts.append(piece)
@@ -757,36 +784,61 @@ class NameExtractor:
                 # («damilola»): дробить её на «Dami Lola» нельзя.
                 elif quality.whole_first(letters):
                     kept = [letters]
-                # Строка целиком — английское слово или фраза из слов
-                # («theorist», «glanceobjects», «bethechange»): имени в ней
-                # нет, а найденное внутри — совпадение букв. Но фраза поверх
-                # уверенного имени — сама совпадение: «heat|her|smith» внутри
-                # Heather Smith, «fat|im|am» внутри Fatima (RN-4, RN-8).
-                elif not (quality.is_plain_word(letters) or (
-                        quality.phrase_only(letters)
-                        and not any(k == "first" and quality.confident_first(p)
-                                    for p, k in quality.segment(letters)))):
-                    pieces = quality.split_initial(letters, quality.segment(letters))
-                    pieces = quality.split_short_surname(letters, pieces)
-                    # Спорное начало («its|amy» или «it|samy») — гадание. В
-                    # «Точности» честнее пусто; «Заполненность» принимает
-                    # догадку, и лучшее прочтение там вернее прежнего
-                    # сегментатора («Itsamy Hussain»).
-                    ambiguous = strict and quality.ambiguous_lead(letters, pieces)
-                    # Разбор режет английское слово посередине («ilo|veyou»,
-                    # «ange|leyes»): имя там — совпадение букв, в обоих режимах.
-                    misread = (quality.misaligned(letters, pieces)
-                               or quality.asian_tail_ambiguous(letters, pieces))
-                    if pieces and not ambiguous and not misread:
-                        kept = quality.finalize([p for p, _ in pieces], False,
-                                                [k for _, k in pieces])
-                    if not kept and not ambiguous:
-                        kept = quality.anchor_fallback(letters)
+                else:
+                    kept = self._fused_name(letters, strict)
+                    # Слово-занятие в хвосте, которое бывает и именем («dev»,
+                    # «art», «law»): вторая попытка без него. Берётся, только
+                    # если первая не дала ничего или её последний кусок — само
+                    # это слово либо неизвестный базе кусок с ним на конце;
+                    # «robertstewart» кончается на «art», но Stewart — фамилия.
+                    cut = quality.tail_role_cut(letters)
+                    if cut and (not kept or quality.tail_is_role(kept[-1])):
+                        retry = self._fused_name(cut, strict)
+                        # Вторая попытка не должна менять само имя: «katie|
+                        # minioncpa» без хвоста резалось в «Kati Emin Ion».
+                        if retry and (not kept or retry[0].lower() == kept[0].lower()):
+                            kept = retry
                 source = "разбор"
         if not kept:
             return ""
+        # «Точность»: угаданное имя — только из кусков, которые база знает
+        # (решение владельца 14.11.2026, см. confirmed_name).
+        if strict and source == "разбор" and not quality.confirmed_name(kept):
+            return ""
         self._osint_local.name_source = source
         return " ".join(part.title() for part in kept)
+
+    def _fused_name(self, letters, strict):
+        """Имя из слитной строки букв: куски или []. Границы тут — догадка."""
+        quality = self.quality
+        # Строка целиком — английское слово или фраза из слов («theorist»,
+        # «glanceobjects», «bethechange»): имени в ней нет, а найденное
+        # внутри — совпадение букв. Но фраза поверх уверенного имени — сама
+        # совпадение: «heat|her|smith» внутри Heather Smith, «fat|im|am»
+        # внутри Fatima (RN-4, RN-8).
+        if quality.is_plain_word(letters) or (
+                quality.phrase_only(letters)
+                and not any(k == "first" and quality.confident_first(p)
+                            for p, k in quality.segment(letters))):
+            return []
+        pieces = quality.split_initial(letters, quality.segment(letters))
+        pieces = quality.split_short_surname(letters, pieces)
+        # Редкая фамилия, раздробленная на слабые осколки, — целиком.
+        pieces = quality.merge_oversplit(pieces)
+        # Спорное начало («its|amy» или «it|samy») — гадание. В «Точности»
+        # честнее пусто; «Заполненность» принимает догадку, и лучшее
+        # прочтение там вернее прежнего сегментатора («Itsamy Hussain»).
+        ambiguous = strict and quality.ambiguous_lead(letters, pieces)
+        # Разбор режет английское слово посередине («ilo|veyou»,
+        # «ange|leyes»): имя там — совпадение букв, в обоих режимах.
+        misread = (quality.misaligned(letters, pieces)
+                   or quality.asian_tail_ambiguous(letters, pieces))
+        kept = []
+        if pieces and not ambiguous and not misread:
+            kept = quality.finalize([p for p, _ in pieces], False, [k for _, k in pieces])
+        if not kept and not ambiguous:
+            kept = quality.anchor_fallback(letters)
+        return kept
 
     def _guess_name(self, email):
         """Прежний разбор адреса — запасной путь режима «Заполненность».

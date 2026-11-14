@@ -152,8 +152,16 @@ class TestNameModeSeparatesGuessFromFact(_РежимИмён):
     ЧЕЛОВЕК = ["john.doe", "maria.ivanova", "moein.farsadzadeh",
                "berwin.tolmach", "kolbusch.hensley"]
 
-    # Склеено, но словарь популярных имён подтверждает — остаётся.
-    ЖИВЫЕ = ["aminaduku", "simonevarelli", "jenniferkline", "satishverma"]
+    # Склеено, но база подтверждает каждый кусок — остаётся. Адреса
+    # выдуманы (14.11.2026): прежние четыре строки этого списка были взяты
+    # из базы владельца.
+    ЖИВЫЕ = ["aminabello", "jenniferkline", "satishverma"]
+
+    # Склеено, имя подтверждено, а фамилию база не знает. До 14.11.2026
+    # «Точность» отдавала такое имя целиком. Решение владельца 14.11.2026: в
+    # «Точности» угаданное имя — только из кусков, которые база знает;
+    # «Заполненность» его оставляет.
+    НЕИЗВЕСТНАЯ_ФАМИЛИЯ = ["simonevarelli"]
 
     def test_name_mode_accuracy_drops_invented_splits(self):
         for л in self.МУСОР:
@@ -182,6 +190,13 @@ class TestNameModeSeparatesGuessFromFact(_РежимИмён):
         for л in self.ЖИВЫЕ:
             self.assertTrue(self.имя(л, "accuracy"),
                             "%s: словарь имя подтверждает, а его убрали" % л)
+
+    def test_accuracy_drops_a_guess_with_an_unknown_surname(self):
+        for л in self.НЕИЗВЕСТНАЯ_ФАМИЛИЯ:
+            self.assertEqual(self.имя(л, "accuracy"), "",
+                             "%s: «Точность» оставила неподтверждённую фамилию" % л)
+            self.assertTrue(self.имя(л, "coverage"),
+                            "%s: «Заполненность» потеряла имя" % л)
 
     def test_name_mode_coverage_is_untouched(self):
         """В обычном режиме догадки остались прежними — кроме заведомого мусора.

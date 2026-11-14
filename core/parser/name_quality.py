@@ -32,6 +32,7 @@ from .name_words import (  # noqa: F401 — часть имён нужна те�
     fold, scripts_of, is_latin, has_vowel, letters_only, max_consonant_run,
     trailing_consonants, consistent_with_address, display_case)
 from .name_words import MAX_TOKEN_LEN, MAX_SEGMENT_INPUT, PLAIN_WORD_COUNT  # noqa: F401
+from .name_split import SplitMixin
 from .name_evidence import (EvidenceMixin, PHRASE_WORD_COUNT, CONCAT_SURNAME_RANK,
                             CONCAT_FIRST_RANK, GENDERED_SHARE)
 
@@ -54,8 +55,10 @@ MAX_CONSONANT_RUN = 5
 # Словарное английское слово годится в фамилию, только если оно очень частая
 # фамилия (Smith, White, Wright) или известно базе и как имя, и как фамилия
 # (Warner, Doe, Sang): «junk» и «sloth» база тоже знает фамилиями где-то в
-# мире (467 и 162 место), но именем — нет.
-ENGLISH_SURNAME_TOP = 100
+# мире (467 и 162 место), но именем — нет. Порог стоял на 100 и отсекал
+# Black (145-я): `laurablack` терялось целиком (замер 13.11.2026). Выше 150
+# поднимать нельзя — следом идёт «sloth».
+ENGLISH_SURNAME_TOP = 150
 ENGLISH_SURNAME_NAMELIKE = 1000
 SHORT_SURNAME_TOP = 1000           # трёхбуквенные: Doe, Cho, Lee, Das
 NON_LATIN_TOP = 5000               # кириллица и прочие алфавиты: фамилии
@@ -200,7 +203,7 @@ LEADING_SURNAME_LEN = 6
 _MEMO_LIMIT = 200000
 
 
-class NameQuality(EvidenceMixin):
+class NameQuality(SplitMixin, EvidenceMixin):
     """Проверка кусков имени. Знание о мире приходит снаружи, правила — здесь.
 
     is_first(word)       — слово есть в индексе популярных имён;
@@ -436,7 +439,9 @@ class NameQuality(EvidenceMixin):
         t = fold(token)
         if not (4 <= len(t) <= MAX_TOKEN_LEN) or self.hard_junk(t):
             return False
-        if t in _PHRASE_WORDS:
+        if t in _PHRASE_WORDS or not self.name_shaped(t) or self.web_glued(t):
+            return False
+        if not fused and not self.cluster_shaped(t):
             return False
         if not is_latin(t):
             return all(ch.isalpha() for ch in token) and len(scripts_of(token)) == 1
@@ -480,7 +485,9 @@ class NameQuality(EvidenceMixin):
         count = self._word_counts.get(s)
         if count is None or count < PLAIN_WORD_COUNT:
             return False
-        _, last = self._ranks(s)
+        first, last = self._ranks(s)
+        if first is not None and first <= 5000 and (self._gender_share(s) or 0) >= 0.9:
+            return False          # слово сети, но база знает его частым именем с ясным полом
         return last is None or last > 3000
 
     def kind_of(self, token, from_separators):
@@ -782,7 +789,8 @@ class NameQuality(EvidenceMixin):
                     continue
             if nkind == "first" and len(fold(nxt)) > 3:
                 continue
-            if kind == "first" and self._longer_name(part, nxt):
+            if (kind == "first" and self._longer_name(part, nxt)
+                    and not self.keeps_boundary(part, nxt, nkind)):
                 return index
             if (kind == "first" and nkind == "initial" and fold(nxt) in _VOWELS
                     and not any(k in ("first", "surname", "structural")
@@ -898,6 +906,8 @@ class NameQuality(EvidenceMixin):
                     continue          # «rechtsanwalt-meier» — титул не имя
                 kind = "word"         # в слитной строке титул — как слово фразы
             items.append((part, "" if kind == "junk" else kind))
+        items, titled_tail = self.drop_tail_role(items)
+        titled = titled or titled_tail
         if not items:
             return []
         # Заглушка программиста — пример или тест, а не человек: «foo.bar»
@@ -962,6 +972,8 @@ class NameQuality(EvidenceMixin):
                          or self._nicknamey(named[0][0]))):
                 return []
             items = self._initial_context(items)
+            if business and not self.business_name_ok(items):
+                return []
         else:
             relabeled = []
             for index, (part, kind) in enumerate(items):
@@ -1007,8 +1019,8 @@ class NameQuality(EvidenceMixin):
                     if kind == "first" and self.wordlike_first(part):
                         kind = "word"
                 relabeled.append((part, kind))
-            items = self._initial_context(relabeled)
-            if not self._fused_lead_ok(items):
+            items = self.promote_rare_first(self._initial_context(relabeled))
+            if not self._fused_lead_ok(items) or not self.lead_extra_ok(items):
                 return []
             # Мнимый инициал: буква вместе со следующим куском — частое
             # слово, то есть она его начало, а не инициал: «g|randma|joan»
@@ -1029,14 +1041,17 @@ class NameQuality(EvidenceMixin):
                         and items[index - 1][1] == "first"):
                     _, last = self._ranks(fold(part))
                     if last is None or last > INITIAL_SURNAME_TOP:
-                        return []
+                        if not self.confident_first(items[index - 1][0]):
+                            return []
+                        items = items[:index]     # «helena|kops» — Helena
+                        break
             # Фамилия впереди имени («tanaka|hiroshi», «kowalski|jan») —
             # только частая: с редкими «haku|nama|tata» складывалось в
             # «Haku Nama Tata» (рецензия 07.11.2026). Слабая (дальше
             # LEADING_WEAK_SURNAME) — только перед частым именем.
             first_at = next((i for i, (_, k) in enumerate(items) if k == "first"), None)
             for part, kind in items[:first_at or 0]:
-                if kind == "surname":
+                if kind == "surname" and not self.rare_first(part):
                     _, last = self._ranks(fold(part))
                     long_enough = (len(fold(part)) >= LEADING_SURNAME_LEN and last is not None
                                    and last <= INITIAL_SURNAME_TOP)
@@ -1077,7 +1092,7 @@ class NameQuality(EvidenceMixin):
                 head = next(((p, k) for p, k in items
                              if not (k == "word" and (self.is_phrase(p)
                                                       or fold(p) in _TITLES))), None)
-                if head is None or head[1] != "first":
+                if head is None or head[1] != "first" or not self.business_name_ok(items):
                     return []
             # Мусор посреди имени: «paul|xq|smith», «maria|bk|lopez». Всё,
             # что после него, — догадка поверх обломка; верным остаётся
@@ -1087,6 +1102,8 @@ class NameQuality(EvidenceMixin):
                 if kind in name_kinds:
                     seen_name = True
                 elif kind in ("", "weak") and seen_name:
+                    if len(fold(part)) >= 6 and not self.hard_junk(part):
+                        return []     # «nora|qentrumbald»: длинный необъяснённый хвост — не имя
                     later = any(k in name_kinds for _, k in items[index + 1:])
                     if later:
                         items = items[:index]
@@ -1099,7 +1116,8 @@ class NameQuality(EvidenceMixin):
                 part = items[-1][0]
                 prev = items[-2] if len(items) >= 2 else ("", "")
                 clear = len(fold(part)) >= 3 and self.hard_junk(part)
-                if not clear and not (prev[1] == "first" and self.strong_first(prev[0])):
+                if not clear and not (prev[1] == "first" and (
+                        self.strong_first(prev[0]) or self.confident_first(prev[0]))):
                     return []
                 items = items[:-1]
             if not items:
@@ -1111,7 +1129,7 @@ class NameQuality(EvidenceMixin):
         # перед ним тоже («rachael|dak|oala|girl»). Если после фразы снова
         # идёт другое имя — это двое людей или подпись («johnlovesmary»).
         kept = []
-        in_phrase = False
+        in_phrase = plain_gap = False
         for part, kind in items:
             if kind in ("", "weak"):
                 continue                      # обломок, веб-хвост — вон
@@ -1128,6 +1146,7 @@ class NameQuality(EvidenceMixin):
                     return []
                 if kept and not in_phrase:
                     in_phrase = True
+                    plain_gap = not self.is_phrase(part)
                     if not from_separators:
                         while kept and kept[-1][1] != "first":
                             kept.pop()
@@ -1138,8 +1157,8 @@ class NameQuality(EvidenceMixin):
             if in_phrase:
                 if kind == "first" and fold(part) in {fold(p) for p, _ in kept}:
                     continue                  # «nina|iam|nina» — Nina
-                if kind == "first" and not from_separators:
-                    return []
+                if kind == "first" and (not from_separators or plain_gap):
+                    return []         # «ola.northwind.li»: слово посреди — не имя
                 if kind != "first":
                     continue
                 in_phrase = False
@@ -1170,39 +1189,9 @@ class NameQuality(EvidenceMixin):
                     kept.pop(0)
 
         if not from_separators:
-            # Неподтверждённый кусок в слитной строке держится только рядом
-            # с подтверждённым именем от четырёх букв, сам не короче пяти и
-            # не длиннее десяти: «rogbin|anatol», «kenneth|mdizon». «rogb|ina»
-            # — нет: короткий обломок рядом с трёхбуквенным именем ничего не
-            # доказывает.
-            def strong_neighbour(entry):
-                return entry[1] == "first" and len(fold(entry[0])) >= 4
-            pruned = []
-            for index, (part, kind) in enumerate(kept):
-                if kind == "structural":
-                    left = kept[index - 1] if index > 0 else ("", "")
-                    right = kept[index + 1] if index + 1 < len(kept) else ("", "")
-                    size = len(fold(part))
-                    joined = fold(left[0])[-2:] + fold(part) + fold(right[0])[:2]
-                    if (size < 5 or size > MAX_STRUCTURAL_FUSED
-                            or not (strong_neighbour(left) or strong_neighbour(right))
-                            # «anna|h|ereget»: с хвостом соседа кусок даёт
-                            # «hereget», то есть слово фразы, — это обломок
-                            # фразы, а не фамилия.
-                            or any(word in joined for word in _PHRASE_INSIDE)):
-                        if not any(k == "first" for _, k in pruned):
-                            # Отброшен кусок ПЕРЕД именем: имя начиналось бы
-                            # с середины строки — «trav|anita» -> «Anita»,
-                            # «bzlo|mason» -> «Mason». Это не имя.
-                            return []
-                        continue
-                pruned.append((part, kind))
-            kept = pruned
+            # Неподтверждённые куски и раздробленная строка — name_split.py.
+            kept = self.prune_structural(kept)
             if not kept:
-                return []
-            # Четыре и больше кусков в слитной строке — строку раздробило на
-            # короткие имена («pavan|sai|mudd|am»). Это не имя, а гадание.
-            if len([entry for entry in kept if entry[1] != "initial"]) > MAX_TOKENS:
                 return []
 
         has_first = any(k == "first" for _, k in kept)

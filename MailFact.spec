@@ -51,6 +51,12 @@ datas = [
     # Данные, лежащие внутри пакетов рядом с кодом.
     ("core/english_words.txt", "core"),
     ("core/parser/names_by_country.txt", "core/parser"),
+    # Признаки «похоже на имя» (tools/build_name_trigrams.py). Без них разбор
+    # имени не падает, а молча перестаёт отсеивать обломки вроде «Hallbgi»:
+    # core/parser/name_split.py при отсутствии файла считает любой кусок
+    # похожим на имя.
+    ("core/parser/name_trigrams.txt", "core/parser"),
+    ("core/parser/name_clusters.txt", "core/parser"),
     # Список публичных суффиксов Mozilla. Читается core/public_suffix.py и
     # решает, где кончается чужая зона и начинается чей-то домен. Без него
     # очистка перестанет узнавать настоящие зоны и снова начнёт резать
