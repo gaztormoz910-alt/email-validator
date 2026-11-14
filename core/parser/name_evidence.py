@@ -43,6 +43,17 @@ GENDERED_SHARE = 0.85
 # слабее фамилии, и обращение по такому слову читается именем.
 SURNAME_DOMINANT_RATIO = 5
 
+# «Буква + слово, которое бывает и именем, и фамилией» между разделителями
+# (m.martin, m.david) — запись «И. Фамилия»: «M Martin», а не «Martin»
+# (решение владельца 14.11.2026; прежнее правило выше снимало букву). Слово
+# считается такой фамилией, если фамилией оно не дальше этого места. Порог
+# лежит в разрыве замеренных рангов (лучшее место по странам, 14.11.2026):
+# Martin 1, Muhammad 2, Thomas 4, John 7, David 11, James 15, Paul 34 — и
+# слова, которые читаются только именем: Mohan 93, Lajos 100, Anna 116,
+# Priya 162, Zoltan 291, Deepika 2435, Diksha 3438. У них буква остаётся
+# снятой («k.zoltan» — Zoltan, «m.deepika» — южноиндийское «инициал + имя»).
+INITIAL_DUAL_SURNAME_RANK = 50
+
 # Одно слово адреса — фамилия, а не имя, только если именем оно дальше этого
 # места (lone_surname): Yilmaz (353-е) — фамилия, а Vera (65-е имя и 2-я
 # фамилия), Santos (45-е), Kumar (12-е) в одиночку — имена.
@@ -125,6 +136,15 @@ _SURNAMES_NOT_NAMES = frozenset({
 
 class EvidenceMixin:
     """Улики к разбору имени. Полагается на поля и методы NameQuality."""
+
+    def dual_surname(self, token):
+        """Слово, которое бывает и именем, и частой фамилией: Martin, David.
+
+        Только для записи «буква + слово» между разделителями (см.
+        _initial_context и INITIAL_DUAL_SURNAME_RANK).
+        """
+        _first, last = self._ranks(fold(token))
+        return last is not None and last <= INITIAL_DUAL_SURNAME_RANK
 
     def reads_as_surname(self, token):
         """Слово рядом с инициалом — фамилия, а не имя: Garcia, Yilmaz, Santos.
@@ -283,7 +303,7 @@ class EvidenceMixin:
         удалось: это ник, и его произносимое начало — не имя («belo|dx» давал
         «Belo»; жалоба владельца 13.11.2026). Подтверждённое имя перед
         обломком («priya|xx») остаётся: его границу держит индекс имён, а
-        не разрез. Не обломок: веб-слово, роль и слово фразы («anlie|www» —
+        не разрез. Не обломок: веб-слово, роль и слово фразы («mirae|www» —
         приписка человека, граница настоящая) и слишком длинный кусок —
         склеенный хвост названия, догадку рядом с ним режим оставляет.
         """
@@ -484,8 +504,13 @@ class EvidenceMixin:
                 out[index] = (part, "surname")
         return out
 
-    def _initial_context(self, items):
+    def _initial_context(self, items, separators=False):
         """Единственное имя рядом с инициалом, которое читается фамилией, — фамилия.
+
+        separators=True — границы поставил человек (`m.martin`). Только тогда
+        действует правило «буква + имя-и-фамилия» (dual_surname): в слитной
+        строке («jallen», «dallen») буква — чаще обломок, и Allen остаётся
+        именем, как раньше.
 
         «m|garcia», «j.lee»: без этого инициал снимался как лишний рядом с
         «именем», и в колонку уходила фамилия. С фамилией запись остаётся
@@ -508,7 +533,11 @@ class EvidenceMixin:
         if not (index > 0 and items[index - 1][1] == "initial"):
             return items
         if not (self.surname_ok(part) and (self.reads_as_surname(part)
-                                           or self.surname_after_initial(part))):
+                                           or self.surname_after_initial(part)
+                                           # Только «буква + одно слово»: в
+                                           # «m.martin.jones» Martin — имя.
+                                           or (separators and len(names) == 1
+                                               and self.dual_surname(part)))):
             return items
         out = list(items)
         out[index] = (part, "surname")

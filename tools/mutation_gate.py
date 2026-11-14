@@ -457,6 +457,43 @@ MUTATIONS = [
         "guards": ["tests/test_stage1_false_verdicts.py"],
         "why": "домен с живым MX уходил бы в Invalid по подменённому ответу о хосте",
     },
+    # --- имена, этап 2 плана 14.11.2026 (решения владельца 14.11) ---
+    {
+        "id": "M40",
+        "title": "имена: буква снова уходит в first_name («J Smith» -> J)",
+        "path": "core/parser/name_extractor.py",
+        "old": "    if lead and len(words) == 1:\n        return \"\", words[0]",
+        "new": "    if False:\n        return \"\", words[0]",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "рассылка обращалась бы «Здравствуйте, J»",
+    },
+    {
+        "id": "M41",
+        "title": "имена: «m.martin» снова теряет букву (решение 14.11)",
+        "path": "core/parser/name_evidence.py",
+        "old": "        return last is not None and last <= INITIAL_DUAL_SURNAME_RANK",
+        "new": "        return False",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "запись «И. Фамилия» снова читалась бы как имя Martin",
+    },
+    {
+        "id": "M42",
+        "title": "имена: правило «буква + фамилия» снова действует на три куска",
+        "path": "core/parser/name_evidence.py",
+        "old": "or (separators and len(names) == 1\n",
+        "new": "or (separators\n",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "у «m.martin.jones» пропало бы имя Martin",
+    },
+    {
+        "id": "M43",
+        "title": "имена: слово перед буквой в конце снова уходит в фамилию",
+        "path": "core/parser/name_extractor.py",
+        "old": "    if initial(parts[-1]):\n        return parts[lead], \"\"",
+        "new": "    if False:\n        return parts[lead], \"\"",
+        "guards": ["tests/test_stage2_names.py"],
+        "why": "второе имя («Anna Maria K») стояло бы в колонке фамилии",
+    },
 ]
 
 

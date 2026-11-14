@@ -41,7 +41,7 @@ from .name_evidence import (EvidenceMixin, PHRASE_WORD_COUNT, CONCAT_SURNAME_RAN
 # которую не знает база, а хвост из нескольких слов («youwujiujiaosh»).
 MAX_STRUCTURAL_FUSED = 10
 
-# Сколько кусков разрешено в имени: «Minh Anh Tran» бывает, дальше —
+# Сколько кусков разрешено в имени: «Lan Thi Tran» бывает, дальше —
 # почти наверняка разваленная строка.
 MAX_TOKENS = 3
 
@@ -426,7 +426,7 @@ class NameQuality(SplitMixin, EvidenceMixin):
         return rank is None or rank > WORDLIKE_FIRST_RANK
 
     def structural_ok(self, token, fused=True):
-        """Кусок похож на фамилию, хотя база его не знает: «rogbin», «moein».
+        """Кусок похож на фамилию, хотя база его не знает: «rogbin», «quorvel».
 
         Сам по себе такой кусок ничего не доказывает, поэтому он идёт в имя
         только рядом с подтверждённым именем или там, где границы поставил
@@ -803,7 +803,7 @@ class NameQuality(SplitMixin, EvidenceMixin):
                 # там имя и буква фамилии, и прежде имя терялось (перемер
                 # инструментом рецензии, 12.11.2026). Если за гласной фамилия
                 # («mark|e|jones»), это средний инициал — правило ниже.
-                # Буква с хвостом после неё («anli|e|www») — по-прежнему
+                # Буква с хвостом после неё («mira|e|www») — по-прежнему
                 # конец имени: там за ней не фамилия, а обломок.
                 longer, longer_last = self._ranks(fold(part) + fold(nxt))
                 own = self.first_rank(part)
@@ -971,7 +971,7 @@ class NameQuality(SplitMixin, EvidenceMixin):
                     and (not self.strong_first(named[0][0])
                          or self._nicknamey(named[0][0]))):
                 return []
-            items = self._initial_context(items)
+            items = self._initial_context(items, separators=True)
             if business and not self.business_name_ok(items):
                 return []
         else:
@@ -1086,8 +1086,8 @@ class NameQuality(SplitMixin, EvidenceMixin):
                     and not self.weak_but_real(named)):
                 return []
             # Род деятельности в слитной строке: имя человека обязано стоять
-            # первым («lauraribeirotech»), иначе это название фирмы
-            # («kavaterasports», «whiteowlclothingco»).
+            # первым («ninacarvalhotech»), иначе это название фирмы
+            # («zeloterasports», «bluefoxclothingco»).
             if business:
                 head = next(((p, k) for p, k in items
                              if not (k == "word" and (self.is_phrase(p)
@@ -1136,7 +1136,7 @@ class NameQuality(SplitMixin, EvidenceMixin):
             if kind == "word":
                 if self._is_role(part):
                     # Род деятельности или служебное слово снимается, а имя
-                    # рядом остаётся: «laura.ribeiro.tech», «mike.sales».
+                    # рядом остаётся: «nina.carvalho.tech», «mike.sales».
                     continue
                 if (not from_separators and kept and not in_phrase
                         and not self.is_phrase(part) and fold(part) not in _TITLES):
@@ -1258,7 +1258,7 @@ class NameQuality(SplitMixin, EvidenceMixin):
             if from_separators:
                 # Границы поставил человек. Годится «инициал + фамилия»
                 # («j.smith», «p.walker», «rogbin.a») и два-три куска, похожих
-                # на имя и фамилию («moein.farsadzadeh», «weiming.cho»).
+                # на имя и фамилию («reza.bahramian», «wei.lin»).
                 # Рядом с родом деятельности («city.center.spa») — нет.
                 # «x-man»: буква и прозвище — не запись имени (рецензия
                 # 08.11.2026). Прозвище, которое и частая фамилия, — фамилия:
@@ -1275,7 +1275,7 @@ class NameQuality(SplitMixin, EvidenceMixin):
                 # инициал впереди («jsmith» -> J Smith). Фамилия с буквой
                 # после неё — обломок: ник из обрывка и фамилии давал
                 # «Фамилия Буква» (прогон владельца, 07.11.2026). «Rogbin A» и
-                # «Qixvar I» неотличимы, и подтвердить их нечем.
+                # «Quorvel I» неотличимы, и подтвердить их нечем.
                 # Две фамилии — только частые: «j|garcia|lopez».
                 surnames = kept[1:]
                 if not (kept[0][1] == "initial" and 1 <= len(surnames) <= 2
@@ -1342,10 +1342,10 @@ class NameQuality(SplitMixin, EvidenceMixin):
         """Чистка догадки режима «Заполненность»: убрать ЗАВЕДОМЫЙ мусор.
 
         Режим «Заполненность» по решению владельца оставляет неподтверждённые,
-        но правдоподобные догадки («Kava Terasports»): это его компромисс
+        но правдоподобные догадки («Zelo Terasports»): это его компромисс
         «больше имён ценой точности». Но веб-слово, обломок без гласных,
         буква-украшение и инициал рядом с именем мусор в любом режиме:
-        «Anlie Www», «Ravi Bcdf», «Paul X», «K Zoltan».
+        «Mirae Www», «Ravi Bcdf», «Paul X», «K Zoltan».
 
         fused=True — куски нарезал сегментатор, человек границ не ставил:
         у такой догадки есть две заведомо ложные формы — см. joined_word_guess
