@@ -533,7 +533,7 @@ class ResultStore:
                     pass
 
     def revise_domain(self, domain, new_status, note):
-        """Переводит уже показанные Valid по домену в другой статус.
+        """Переводит уже показанные Valid и Role-based по домену в другой статус.
 
         Зачем. Домен объявляет себя catch-all не сразу: тройная проба могла
         сорваться, а тарпитинг у гиганта начинается ПОСЛЕ того, как мы успели
@@ -559,29 +559,31 @@ class ResultStore:
         moved = 0
         with self._lock:
             self._flush_locked()
-            if self._conn is None:
-                return 0
-            try:
-                rows = self._conn.execute(
-                    "SELECT pos, grp, reason FROM rows "
-                    "WHERE status = 'Valid' AND email_lc LIKE ?",
-                    ("%" + suffix,)).fetchall()
-            except Exception:
-                return 0
-            for position, old_group, reason in rows:
+            targets = self._revisable_rows_locked(suffix)
+            for position, old_group, reason, row in targets:
                 fresh = ("%s | %s" % (reason or "", note)).strip(" |")
-                try:
+                if row is not None:
+                    # Строка живёт только в ОЗУ (база не открылась или запись
+                    # сломалась посреди прогона) — правим её там же.
+                    row["reason"] = fresh
                     if new_group is None:
-                        self._conn.execute(
-                            "UPDATE rows SET reason = ? WHERE pos = ?",
-                            (fresh, position))
                         moved += 1
                         continue
-                    self._conn.execute(
-                        "UPDATE rows SET status = ?, grp = ?, reason = ? WHERE pos = ?",
-                        (new_status, new_group, fresh, position))
-                except Exception:
-                    continue
+                    row["status"] = new_status
+                    self._memory_keys[str(row.get("email") or "").strip().lower()] = new_group
+                else:
+                    try:
+                        if new_group is None:
+                            self._conn.execute(
+                                "UPDATE rows SET reason = ? WHERE pos = ?",
+                                (fresh, position))
+                            moved += 1
+                            continue
+                        self._conn.execute(
+                            "UPDATE rows SET status = ?, grp = ?, reason = ? WHERE pos = ?",
+                            (new_status, new_group, fresh, position))
+                    except Exception:
+                        continue
                 # Индекс в памяти держит позиции по группам: без переноса
                 # строка осталась бы в фильтре «Годен», сколько её ни правь.
                 try:
@@ -595,12 +597,48 @@ class ResultStore:
                 self._index[new_group].append(position)
                 self._counts[new_group] += 1
                 moved += 1
-            if moved:
+            if moved and self._conn is not None:
                 try:
                     self._conn.commit()
                 except Exception:
                     pass
         return moved
+
+    # Какие строки пересматриваются. Ролевой ящик (info@) показывается как
+    # Role-based, но доказан он тем же 250, что и Valid (core/settle.py), и
+    # разоблачение домена отменяет это доказательство точно так же. Раньше
+    # пересмотр брал только 'Valid', и info@ на домене-тарпите оставался
+    # «живым ролевым» (аудит 03.11.2026, E10).
+    _REVISABLE = ("Valid", "Role-based")
+
+    def _revisable_rows_locked(self, suffix):
+        """[(позиция, группа, причина, строка ОЗУ или None)] по домену.
+
+        Строки из базы и строки, живущие только в ОЗУ. Раньше при base=None
+        пересмотр возвращал 0 и не трогал ничего: на машине, где файл под
+        строки не создался, разоблачённый домен оставался «Годен» (E10).
+        """
+        targets = []
+        seen = set()
+        if self._conn is not None:
+            try:
+                rows = self._conn.execute(
+                    "SELECT pos, grp, reason FROM rows "
+                    "WHERE status IN (%s) AND email_lc LIKE ?"
+                    % ",".join("?" * len(self._REVISABLE)),
+                    tuple(self._REVISABLE) + ("%" + suffix,)).fetchall()
+            except Exception:
+                rows = []
+            for position, group, reason in rows:
+                seen.add(position)
+                targets.append((position, group, reason, None))
+        for position, row in self._memory_rows.items():
+            if position in seen or row.get("status") not in self._REVISABLE:
+                continue
+            if str(row.get("email") or "").strip().lower().endswith(suffix):
+                targets.append((position, group_of(row.get("status")),
+                                row.get("reason"), row))
+        return targets
 
     # --- чтение ---------------------------------------------------------
 

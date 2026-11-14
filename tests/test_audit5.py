@@ -156,12 +156,17 @@ def test_dns_answer_wildcard_domain_gets_no_a_fallback():
 
     Там резолвится ЛЮБОЕ выдуманное имя, и «A-запись есть» не доказывает,
     что домен принимает почту: проба ушла бы на веб-сервер или на парковку.
+
+    Но и «домен мёртв» это не доказывает (аудит 03.11.2026, E12): по RFC 5321
+    почта без MX идёт на A-запись самого домена. Поэтому ответ — «не
+    выяснили» (None) с названной причиной, а не [] — «Dead Domain».
     """
     import dns.resolver
 
     v = _validator()
     v.resolver = _Resolver(dns.resolver.NoAnswer(), wildcard=True)
-    assert v.get_mx_records("corp.test") == []
+    assert v.get_mx_records("corp.test") is None
+    assert "wildcard" in (v.mx_doubt_reason("corp.test") or "")
 
 
 # ══════════════════════════ A3-A5: Tor

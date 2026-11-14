@@ -1252,9 +1252,12 @@ class NetworkValidator(AbortableMixin, ProxyPoolMixin, DnsChecksMixin,
         mx_records = ([str(литерал)] if литерал is not None
                       else self.get_mx_records(domain))
         if mx_records is None:
-            # DNS не ответил через прокси. Домен НЕ мёртв — мы просто не спросили.
+            # DNS не ответил через прокси — или ответил так, что верить нельзя
+            # (wildcard без MX, «нет» без DoH; core/dns_checks.py). Домен НЕ
+            # мёртв — мы просто не выяснили.
+            doubt = self.mx_doubt_reason(domain) if литерал is None else None
             return {"status": "unknown",
-                    "reason": "DNS не удалось спросить через прокси (домен не проверен)",
+                    "reason": doubt or "DNS не удалось спросить через прокси (домен не проверен)",
                     "mx_record": "N/A"}
         if not mx_records:
             return {"status": "invalid", "reason": "No MX/A records (Dead Domain)", "mx_record": "N/A"}

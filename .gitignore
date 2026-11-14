@@ -69,3 +69,8 @@ tor_bin/torrc
 tor_bin/torrc_*
 tor_bin/data/Tor*/
 tor_bin/Data/Tor*/
+
+# Записи бесед владельца с другими ассистентами: в них куски адресов его
+# баз. Решение владельца 14.11.2026 — в репозиторий не попадают.
+FULL_CHAT_TRANSCRIPT.md
+IMPROVEMENTS_REVIEW_FOR_CLAUDE.md

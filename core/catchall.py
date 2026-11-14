@@ -31,6 +31,8 @@ class CatchAllMixin:
         with self.catchall_lock:
             if domain in self.catchall_cache:
                 return self.catchall_cache[domain]
+            if domain in self._remembered_not_catchall():
+                return False
 
         # Ответ, выясненный в прошлый раз. Тройная проба стоит трёх RCPT в
         # отдельной сессии НА КАЖДЫЙ домен базы: спрашивать об одном и том же
@@ -39,11 +41,23 @@ class CatchAllMixin:
         #
         # У записи есть срок (см. core/longterm.py): домен мог перестать быть
         # catch-all, и вечная память была бы хуже её отсутствия.
+        #
+        # Память «НЕ catch-all» в catchall_cache не кладётся (аудит
+        # 03.11.2026, E9). Там False читается как «в ЭТОМ прогоне сервер
+        # отверг выдуманный адрес»: по нему _confirm_acceptance оставляет
+        # «Годен» без свежего контроля, а пересмотр вердиктов считает
+        # catch-all опровергнутым. Месячной давности ответ этого не
+        # доказывает — домен мог включить приём любых адресов вчера. Память
+        # экономит тройную пробу, но не заменяет контроль на каждом «Годен».
+        # Память «catch-all» кладётся как раньше: она только понижает вердикт.
         if self.memory is not None:
             remembered = self.memory.catchall_get(domain)
             if remembered is not None:
                 with self.catchall_lock:
-                    self.catchall_cache[domain] = remembered
+                    if remembered:
+                        self.catchall_cache[domain] = remembered
+                    else:
+                        self._remembered_not_catchall()[domain] = True
                 return remembered
 
         # Импорт ЛОКАЛЬНЫЙ: core/network.py импортирует эту примесь, и
@@ -119,6 +133,19 @@ class CatchAllMixin:
         self._remember_catchall(domain, True)
         self._note_mx_catchall(mx_record, domain)
         return True
+    def _remembered_not_catchall(self):
+        """Домены, про которые «не catch-all» известно только из долгой памяти.
+
+        Отдельно от catchall_cache — см. is_catch_all_domain. Вызывать под
+        catchall_lock. Создаётся лениво: часть тестов собирает объект без
+        __init__ сетевого валидатора.
+        """
+        store = getattr(self, "_catchall_remembered_false", None)
+        if store is None:
+            from core.bounded import BoundedCache
+            store = self._catchall_remembered_false = BoundedCache()
+        return store
+
     def _note_mx_catchall(self, mx_record, domain):
         """Запоминает, что этот почтовый сервер уже принимал что угодно."""
         host = (mx_record or "").strip().lower().rstrip(".")

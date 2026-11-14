@@ -105,6 +105,29 @@ _EXPLICIT_SENDER_MARKERS = (
     "return path", "return-path", "spf", "dmarc", "dkim",
 )
 
+# Фразы, где ОТПРАВИТЕЛЬ назван предметом отказа. В отличие от слова «sender»
+# в _EXPLICIT_SENDER_MARKERS, они перевешивают даже «доказательство
+# отсутствия»: Postfix со сверкой отправителя пишет `550 5.1.0 <bounce@...>:
+# Sender address rejected: User unknown in local recipient table` — «user
+# unknown» здесь про НАШ адрес в MAIL FROM, а про получателя не сказано ничего
+# (аудит 03.11.2026, E6). Голого «sender» в списке нет намеренно: так пишут и
+# подсказки в отказах получателю («ask the sender to…»).
+_SENDER_SUBJECT_MARKERS = (
+    "sender address rejected", "sender rejected", "sender verify failed",
+    "sender verification failed", "unverified sender", "sender unknown",
+    "unknown sender", "sender address is not", "sender domain",
+    "mail from rejected", "rejected mail from", "bad sender",
+    "invalid sender", "sender not allowed",
+)
+
+# Фразы, где предмет отказа — ПОЛУЧАТЕЛЬ. Если они есть рядом с признаком
+# отправителя, верим получателю: сервер назвал его прямо.
+_RECIPIENT_SUBJECT_MARKERS = (
+    "recipient address rejected", "recipient rejected", "recipient unknown",
+    "unknown recipient", "no such recipient", "recipient not found",
+    "recipient does not exist", "invalid recipient",
+)
+
 # Отказ ВРЕМЕННЫЙ, даже если код постоянный. Сервер, который в ответе 550
 # пишет "try again later", противоречит сам себе, и верить в этом споре надо
 # тексту: цена ошибки — похороненный живой адрес.
@@ -349,7 +372,15 @@ def classify_smtp_response(code: object, message: object) -> Verdict:
             return result("unknown", f"{numeric} На сервере кончилось место (о ящике не сказано)")
         if _contains(msg, _MESSAGE_SIZE_MARKERS):
             return result("unknown", f"{numeric} Ограничение на размер письма (о ящике не сказано)")
-        if _contains(msg, _MAILBOX_FULL_MARKERS) or (enhanced and enhanced[1:] == (2, 2)):
+        # «Ящика нет» главнее слова о переполнении (аудит 03.11.2026, E8):
+        # `550 5.1.1 User unknown (over quota check)` — сервер проверял квоту
+        # и ящика не нашёл, а прежний порядок называл несуществующий ящик
+        # переполненным. Явный x.2.2 остаётся переполнением при любом тексте:
+        # расширенный код — более строгий сигнал, чем слова вокруг.
+        full_code = bool(enhanced) and enhanced[1:] == (2, 2)
+        no_mailbox = ((bool(enhanced) and enhanced[1:] in ((1, 1), (1, 10)))
+                      or (not enhanced and _contains(msg, _NO_MAILBOX_PROOF)))
+        if full_code or (_contains(msg, _MAILBOX_FULL_MARKERS) and not no_mailbox):
             return result("full", f"{numeric} Ящик переполнен — письмо не будет "
                                   "доставлено; переполняется обычно ящик, "
                                   "которым не пользуются")
@@ -509,7 +540,11 @@ def _classify_permanent(code: int, msg: object, enhanced: Enhanced,
     # Однозначные признаки ОТПРАВИТЕЛЯ разбираются раньше политики. Статус в
     # обоих случаях unknown, но владельцу базы важно видеть, кому именно
     # отказали: «почини отправителя» и «смени прокси» — разные действия.
-    if not proof and _contains(msg, _EXPLICIT_SENDER_MARKERS):
+    # 5.1.7 и 5.1.8 по RFC 3463 — плохой адрес и плохой домен ОТПРАВИТЕЛЯ.
+    sender_named = (subject == 1 and detail in (7, 8)) or (
+        _contains(msg, _SENDER_SUBJECT_MARKERS)
+        and not _contains(msg, _RECIPIENT_SUBJECT_MARKERS))
+    if sender_named or (not proof and _contains(msg, _EXPLICIT_SENDER_MARKERS)):
         return result("unknown", f"{code} Отказ отправителю/релею (ящик может существовать)")
 
     policy = (subject == 7) or _contains(msg, _POLICY_MARKERS)
@@ -564,9 +599,28 @@ def _classify_permanent(code: int, msg: object, enhanced: Enhanced,
         if _contains(msg, _DISABLED_MARKERS):
             return result("disabled", f"{code} Ящик отключён — письма не принимаются")
 
+    # Расширенный код прямо говорит, что отказ НЕ про ящик: 5.3.x — почтовая
+    # система получателя, 5.4.x — маршрут и сеть, 5.6.x — содержимое письма
+    # (RFC 3463 §3.4, 3.5, 3.7). Фразы ниже («mailbox unavailable»,
+    # «unrouteable») без доказательства тогда приговором не служат (аудит
+    # 03.11.2026, E7). Без расширенного кода и при 5.5.x (Outlook.com пишет
+    # `550 5.5.0 Requested action not taken: mailbox unavailable` на мёртвый
+    # ящик) остаётся прежнее чтение — это известный остаток риска: та же
+    # фраза бывает отказом по политике одному получателю, и по тексту их
+    # не различить.
+    #
+    # Проверка стоит только перед ветками, которые выносят приговор: прочие
+    # ответы с такими кодами (521 5.3.2 «хост не принимает почту») разбираются
+    # ниже, как раньше.
+    not_about_mailbox = subject in (3, 4, 6)
+    not_about_reason = (f"{code} Отказ про почтовую систему, маршрут или "
+                        "содержимое письма, а не про ящик (не доказано)")
+
     # Формулировка про получателя, которая используется и для политики.
     # Политика уже исключена выше, поэтому здесь она означает ящик.
     if _contains(msg, _AMBIGUOUS_NO_MAILBOX):
+        if not_about_mailbox:
+            return result("risky", not_about_reason)
         return result("invalid", f"{code} Получатель отвергнут")
 
     # 551 «User not local» — это НЕ «получателя нет». Сервер говорит «он не у
@@ -585,6 +639,8 @@ def _classify_permanent(code: int, msg: object, enhanced: Enhanced,
     # не доказывает ничего — доказывает ОТРИЦАНИЕ рядом с ним.
     if _contains(msg, ("recipient", "mailbox", "user", "address")):
         if _contains(msg, RECIPIENT_NEGATIONS):
+            if not_about_mailbox:
+                return result("risky", not_about_reason)
             return result("invalid", f"{code} Получатель отвергнут")
         return result("risky", f"{code} Упомянут получатель без явного отрицания (не доказано)")
 

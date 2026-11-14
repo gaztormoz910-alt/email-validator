@@ -29,7 +29,9 @@ import dns.exception
 import dns.resolver
 import dns.reversename
 
-from core.dns_resolver import DNSUnavailable, ProxiedResolver
+from core.bounded import BoundedCache
+from core.dns_resolver import (DNSUnavailable, ProxiedResolver, UnverifiedNoAnswer,
+                               UnverifiedNXDOMAIN)
 from core.email_syntax import to_ascii_domain
 from core.mxguard import is_ip_literal
 from core.mail_constants import (DNSBL_ZONES, SPAMHAUS_ZONE,
@@ -59,6 +61,14 @@ def system_resolvers():
     except Exception:
         return []
     return [str(ns).strip() for ns in found if str(ns).strip()]
+
+
+# Причины «не проверено» у get_mx_records, когда DNS ответил, но вывода нет.
+MX_DOUBT_WILDCARD = ("У домена нет MX, а A-запись есть у любого выдуманного имени "
+                     "(wildcard) — принимает ли он почту, по DNS не понять")
+MX_DOUBT_UNVERIFIED = ("DNS через прокси ответил «записей нет», но без "
+                       "подтверждения зашифрованным DNS (DoH) — прокси мог "
+                       "подменить ответ, домен не проверен")
 
 
 class DnsChecksMixin:
@@ -467,6 +477,11 @@ class DnsChecksMixin:
                 ответ = self.resolver.resolve(имя, тип)
                 if ответ:
                     return "есть"
+            except UnverifiedNXDOMAIN:
+                # «Имени нет» по обычному DNS через чужой прокси: прокси мог
+                # подменить ответ, и приговор домену на этом не строится
+                # (решение владельца 14.11.2026, E13).
+                return "?"
             except dns.resolver.NXDOMAIN:
                 return "нет"
             except dns.resolver.NoAnswer:
@@ -479,13 +494,33 @@ class DnsChecksMixin:
         # не существует», и это разные вещи.
         return "?"
 
+    def _mx_doubts(self):
+        """Почему get_mx_records ответил None — домен -> текст причины.
+
+        Контракт get_mx_records (список / [] / None) не меняется: на него
+        опираются и вердикт, и подмена домена в очистке. Причина хранится
+        рядом, чтобы вердикт «не проверено» называл её честно, а не писал
+        «DNS не ответил» там, где DNS ответил, но верить ответу нельзя.
+        Создаётся лениво: часть тестов собирает объект через __new__.
+        """
+        doubts = getattr(self, "_mx_doubt_store", None)
+        if doubts is None:
+            doubts = self._mx_doubt_store = BoundedCache()
+        return doubts
+
+    def mx_doubt_reason(self, domain):
+        """Причина последнего None от get_mx_records или None, если это сбой DNS."""
+        return self._mx_doubts().get(to_ascii_domain(domain) or domain)
+
     def get_mx_records(self, domain: str):
         """Ищет MX-записи домена, с фоллбэком на A и AAAA (RFC 5321, п.1.4).
 
         Возвращает:
           [хосты] — куда слать
           []      — записей нет, домен действительно мёртвый
-          None    — СПРОСИТЬ НЕ УДАЛОСЬ (DNS через прокси не ответил)
+          None    — СПРОСИТЬ НЕ УДАЛОСЬ (DNS через прокси не ответил) или
+                    ответу нельзя верить: wildcard без MX (E12), «нет» без
+                    DoH (E13); причина — mx_doubt_reason(domain)
 
         Различие между [] и None критично: без него сбой DNS выглядел бы как
         «домена не существует», и живой домен уехал бы в Invalid целиком.
@@ -497,8 +532,12 @@ class DnsChecksMixin:
         with self.mx_lock:
             if domain in self.mx_cache:
                 return self.mx_cache[domain]
+        # Причина прежнего «не выяснили» к новому вопросу не относится.
+        self._mx_doubts().pop(domain, None)
 
         dns_failed = False
+        # «Нет» пришло по обычному DNS через прокси, без DoH (E13).
+        unverified = False
 
         try:
             answers = self.resolver.resolve(domain, 'MX')
@@ -517,6 +556,14 @@ class DnsChecksMixin:
                 return result
         except DNSUnavailable:
             dns_failed = True
+        except UnverifiedNXDOMAIN:
+            # «Домена нет», но не заверено DoH: бесплатный прокси мог подменить
+            # ответ. Приговор «Dead Domain» отсюда был бы ложным Invalid для
+            # всех адресов домена; A и AAAA спрашивать незачем — их ответ
+            # пришёл бы тем же непроверенным путём. Не кэшируем: следующий
+            # вопрос может дойти через DoH.
+            self._mx_doubts()[domain] = MX_DOUBT_UNVERIFIED
+            return None
         except dns.resolver.NXDOMAIN:
             # Домена НЕ СУЩЕСТВУЕТ вовсе. Спрашивать у него A и AAAA незачем:
             # ответ будет тот же, а через прокси это два лишних запроса на
@@ -524,6 +571,8 @@ class DnsChecksMixin:
             with self.mx_lock:
                 self.mx_cache[domain] = []
             return []
+        except UnverifiedNoAnswer:
+            unverified = True         # «MX нет» — по обычному DNS через прокси
         except dns.resolver.NoAnswer:
             pass                      # домен есть, MX-записей у него нет
         except Exception:
@@ -547,10 +596,18 @@ class DnsChecksMixin:
         # «у домена есть A-запись» не значит ровным счётом ничего: почтового
         # сервера там нет, а проба уйдёт на веб-сервер или на парковку.
         # Найдено сверкой с чужим каталогом критериев (4.22).
+        #
+        # Но и МЁРТВЫМ такой домен не назван (аудит 03.11.2026, E12). Раньше
+        # здесь стоял [] — «Dead Domain», Invalid всем адресам домена. Между
+        # тем у wildcard-домена A-запись самого домена есть, и по RFC 5321
+        # §5.1 почта без MX идёт именно на неё: письмо может и дойти.
+        # Доказательства нет ни в одну сторону — значит «не проверено».
+        # Кэшируем: ответ про подстановочную запись от повтора не изменится.
         if self._is_wildcard_domain(domain):
+            self._mx_doubts()[domain] = MX_DOUBT_WILDCARD
             with self.mx_lock:
-                self.mx_cache[domain] = []
-            return []
+                self.mx_cache[domain] = None
+            return None
 
         try:
             self.resolver.resolve(domain, 'A')
@@ -561,6 +618,8 @@ class DnsChecksMixin:
             return result
         except DNSUnavailable:
             dns_failed = True
+        except (UnverifiedNXDOMAIN, UnverifiedNoAnswer):
+            unverified = True
         except self._ANSWERED_NOTHING:
             pass
         except Exception:
@@ -575,6 +634,8 @@ class DnsChecksMixin:
             return result
         except DNSUnavailable:
             dns_failed = True
+        except (UnverifiedNXDOMAIN, UnverifiedNoAnswer):
+            unverified = True
         except self._ANSWERED_NOTHING:
             pass
         except Exception:
@@ -583,6 +644,11 @@ class DnsChecksMixin:
         # DNS не ответил — вывода о домене сделать нельзя. Не кэшируем:
         # иначе один сбой похоронил бы домен на весь прогон.
         if dns_failed:
+            return None
+
+        # Хоть одно из трёх «нет» пришло без DoH — приговора нет (E13).
+        if unverified:
+            self._mx_doubts()[domain] = MX_DOUBT_UNVERIFIED
             return None
 
         # Ни MX, ни A, ни AAAA — домен мёртвый

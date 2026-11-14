@@ -277,17 +277,20 @@ class _Race:
         self.cond = threading.Condition()
         self.response = None      # принятый ответ второй дорожки
         self.proxy = None
+        self.verified = True
         self.closed = False       # вопрос кончен — второй дорожке пора выйти
 
     @property
     def answered(self):
         return self.response is not None
 
-    def offer(self, response, proxy):
+    def offer(self, response, proxy, verified=True):
         with self.cond:
             if self.response is None and not self.closed:
                 self.response = response
                 self.proxy = proxy
+                # Заверен ли отрицательный ответ (см. UnverifiedNXDOMAIN).
+                self.verified = verified
             self.cond.notify_all()
 
     def close(self):
@@ -348,6 +351,28 @@ class DNSUnavailable(dns.exception.DNSException):
 
     Отличать от NXDOMAIN обязательно. «Не смогли проверить» — это не
     «домена не существует»: иначе живой домен уедет в Invalid как мёртвый.
+    """
+
+
+class UnverifiedNXDOMAIN(dns.resolver.NXDOMAIN):
+    """«Домена нет», пришедшее по обычному DNS через чужой прокси, а не по DoH.
+
+    Подкласс, а не отдельное исключение, намеренно. Для DKIM, DNSBL и PTR
+    такое «нет» по-прежнему ответ, и все прежние `except NXDOMAIN` ведут
+    себя как раньше. Отличает его только тот, кто строит на «нет» ПРИГОВОР
+    домену: бесплатный прокси может подменить DNS-ответ, а TLS у DoH
+    заверяет, что ответил именно Cloudflare или Google. Два одинаковых «нет»
+    через два прокси тоже не заверены: оба могут сидеть за одним
+    подменяющим резолвером. Решение владельца 14.11.2026 (аудит 03.11, E13):
+    «домена нет» — только с подтверждением DoH, иначе «не проверено».
+    """
+
+
+class UnverifiedNoAnswer(dns.resolver.NoAnswer):
+    """«Записи такого вида нет» — с той же оговоркой, что UnverifiedNXDOMAIN.
+
+    Нужен для того же приговора: «ни MX, ни A, ни AAAA» по обычному DNS
+    через прокси тоже превращалось в «Dead Domain».
     """
 
 
@@ -430,7 +455,7 @@ class ProxiedResolver:
                 response, silent = self._attempt(ask, target, query, proxy)
                 if response is not None:
                     self._forget_silence(proxy)
-                    return self._extract(response, rd)
+                    return self._extract(response, rd, verified=(kind == "doh"))
                 if silent:
                     self._remember_silence(proxy)
                 else:
@@ -448,9 +473,9 @@ class ProxiedResolver:
                     race.cond.wait_for(lambda: race.answered or second.done(),
                                        timeout=max(0.0, limit - time.monotonic()))
             with race.cond:
-                found = race.response
+                found, verified = race.response, race.verified
             if found is not None:
-                return self._extract(found, rd)
+                return self._extract(found, rd, verified=verified)
             raise DNSUnavailable("ни DoH, ни DNS-over-TCP через прокси не ответили")
         finally:
             race.close()
@@ -498,13 +523,15 @@ class ProxiedResolver:
                 response, silent = self._attempt(ask, target, query, proxy)
                 if response is not None and _second_lane_accepts(response, rd, kind):
                     self._forget_silence(proxy)
-                    race.offer(response, proxy)
+                    race.offer(response, proxy, verified=(kind == "doh"))
                     return
                 no = _negative_kind(response, rd) if response is not None else None
                 if no is not None:
                     if heard_no is not None and heard_no[0] == no and heard_no[1] != proxy:
                         self._forget_silence(proxy)
-                        race.offer(response, proxy)
+                        # Ответ принимается (DKIM-селектора и правда нет), но
+                        # приговором домену служить не может: см. UnverifiedNXDOMAIN.
+                        race.offer(response, proxy, verified=False)
                         return
                     if heard_no is None:
                         heard_no = (no, proxy)
@@ -642,11 +669,15 @@ class ProxiedResolver:
                 pass
 
     @staticmethod
-    def _extract(response, rdtype):
-        """Превращает ответ в список rdata — то же, что отдаёт обычный резолвер."""
+    def _extract(response, rdtype, verified=True):
+        """Превращает ответ в список rdata — то же, что отдаёт обычный резолвер.
+
+        verified=False — ответ пришёл не по DoH: отрицательный ответ выходит
+        подклассом UnverifiedNXDOMAIN / UnverifiedNoAnswer.
+        """
         rcode = response.rcode()
         if rcode == dns.rcode.NXDOMAIN:
-            raise dns.resolver.NXDOMAIN
+            raise dns.resolver.NXDOMAIN if verified else UnverifiedNXDOMAIN
         if rcode != dns.rcode.NOERROR:
             raise DNSUnavailable(f"DNS rcode {dns.rcode.to_text(rcode)}")
         items = []
@@ -654,7 +685,7 @@ class ProxiedResolver:
             if rrset.rdtype == rdtype:
                 items.extend(rrset)
         if not items:
-            raise dns.resolver.NoAnswer
+            raise dns.resolver.NoAnswer if verified else UnverifiedNoAnswer
         return items
 
 
