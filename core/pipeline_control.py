@@ -26,6 +26,11 @@ class RunControlMixin:
             event = getattr(network, "abort_event", None)
             if event is not None and event is not self._abort_event:
                 event.set()
+            # Открытые SMTP-сессии закрываются: поток, ждущий ответа сервера,
+            # иначе досиживал таймаут сессии (core/network_abort.py).
+            close = getattr(network, "abort_connections", None)
+            if callable(close):
+                close()
             state = getattr(self, "state", None)
             freeze = getattr(state, "freeze", None)
             if callable(freeze):

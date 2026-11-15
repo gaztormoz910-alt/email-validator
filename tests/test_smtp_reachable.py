@@ -314,6 +314,8 @@ RELAYS = [
     "anonaddy.com", "anonaddy.me", "addy.io",
     "passmail.net", "passmail.com", "passinbox.com", "passfwd.com",
     "33mail.com", "burnermail.io", "erine.email",
+    # Решение владельца 14.11.2026: тоже пересылки, как SimpleLogin.
+    "sneakemail.com", "getburner.email",
     # Forward Email: домены для платных клиентов (MX — forwardemail.net).
     "mailsire.com", "hideaddress.net", "secret.fyi", "hash.fyi",
     # Маски Abine Blur (IronVest); хоронил даже курируемый список (06.11.2026).

@@ -605,6 +605,11 @@ class ProxyPoolMixin:
         """
         if not proxy:
             return
+        # Сессию оборвал «Стоп», а не прокси: сбой засчитывать нельзя, иначе
+        # каждый «Стоп» отправлял бы в бан живые выходы.
+        aborted = getattr(self, "aborted", None)
+        if not success and callable(aborted) and aborted():
+            return
         with self._proxy_score_lock:
             if proxy not in self._proxy_scores:
                 self._proxy_scores[proxy] = 0

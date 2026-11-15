@@ -54,6 +54,9 @@ EXPORT_FIELDS = [
     # одноразовых (user@gamil.com) подсказка лежала только в карточке окна и
     # в выгрузку не попадала — прогон test.txt 27.09.2026.
     "suggested_email",
+    # Домен — опечатка почтового гиганта при живом MX (решение владельца
+    # 14.11.2026): какого. Отметка, а не вердикт.
+    "typo_of",
 ]
 
 
@@ -89,6 +92,7 @@ def _row(entry):
         "validated_at": data.get("validated_at", ""),
         "role_address": "да" if data.get("role_address") else "",
         "suggested_email": data.get("suggested_email", ""),
+        "typo_of": data.get("typo_of", ""),
     }
 
 

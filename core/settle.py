@@ -126,6 +126,19 @@ class SettleMixin:
 
     # ── подсказка опечатки при живом MX ─────────────────────────────────
 
+    def _mark_typo_domain(self, email, data, mx):
+        """Отметка `typo_of` — домен-опечатка гиганта при живом MX (см. ниже)."""
+        mx = mx or ""
+        cleaner = getattr(self, "cleaner", None)
+        if cleaner is None or not mx or mx == "N/A" or data.get("typo_of"):
+            return
+        try:
+            похоже = cleaner.suggest_domain_fix(email)
+        except Exception:
+            return
+        if похоже and "@" in похоже:
+            data["typo_of"] = похоже.rsplit("@", 1)[1]
+
     def _typo_hint_on_live_mx(self, email, data, res, fix_typos):
         """Домен похож на опечатку популярного почтовика, а MX у него есть.
 
@@ -136,7 +149,18 @@ class SettleMixin:
         владелец должен видеть, что человек, скорее всего, метил в другой
         домен. Подтверждённый «Годен» не трогается: честный сервер, который
         отверг выдуманный адрес и принял этот, — не ловушка.
+
+        Отдельная отметка `typo_of` — у ЛЮБОГО статуса, включая «Годен»
+        (решение владельца 14.11.2026): «статус по SMTP не меняется, но адрес
+        получает пометку „домен-опечатка гиганта“ и попадает в фильтр „Не
+        слать“ по выбору; подменять домен программа не будет». Отметка
+        ставится только при живом MX: мёртвый домен-опечатку разбирает
+        другой путь (core/pipeline.py, подсказка при «нет MX»). Сеть для неё
+        не нужна — это словарь опечаток. В словаре есть и настоящие домены
+        организаций (`mai.ru` — МАИ), поэтому это отметка и выбор владельца,
+        а не вердикт.
         """
+        self._mark_typo_domain(email, data, res.get("mx_record"))
         if res.get("status") not in ("catchall", "unknown", "risky", "unconfirmed"):
             return
         if data.get("suggested_email"):

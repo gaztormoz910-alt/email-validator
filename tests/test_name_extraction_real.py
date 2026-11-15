@@ -198,9 +198,12 @@ class TestFusedSlavicAddressesSurvive(unittest.TestCase):
     """Слитные адреса со славянской фамилией — самая заметная проверка из всех."""
 
     def test_fused_names(self):
+        # Решение владельца 14.11.2026 (догадка из двух слов — только с
+        # подтверждённым именем впереди): обе записи теперь пусты; цена
+        # решения и замер — в tests/test_reported_bugs.py, TestNames.
         cases = {
-            "zogbinanatol1@gmail.com": "Zogbin Anatol",
-            "zogbina@gmail.com": "Zogbin A",
+            "zogbinanatol1@gmail.com": "",
+            "zogbina@gmail.com": "",
             # `kvanatol` — сокращённая фамилия плюс имя. Разобрать это верно
             # нельзя: «kv» не имя и не инициал, а обрубок, и выдать «Kv
             # Anatol» значило бы поставить в колонку то, чего в адресе нет.

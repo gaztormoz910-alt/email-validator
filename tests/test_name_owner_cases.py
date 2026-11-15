@@ -201,10 +201,11 @@ class TestCoverageModeDropsCertainJunk(_Mode):
     def test_kept_coverage_guesses_next_to_the_rules_above(self):
         # Контроль: правила не косят всё подряд. Подтверждённое имя перед
         # обломком остаётся; строку «opeter» база слитно не знает, и догадка
-        # «Peter» остаётся; догадка из двух слов — компромисс режима.
+        # «Peter» остаётся; догадка из двух слов с именем впереди — компромисс
+        # режима (решение владельца 14.11.2026: без имени впереди — пусто).
         for email, expected in (("priyaxx99@example.com", "Priya"),
                                 ("opeter@example.com", "Peter"),
-                                ("kavaterasports@example.com", "Kava Terasports")):
+                                ("johnbirchly@example.com", "John Birchly")):
             with self.subTest(email=email):
                 self.assertEqual(self.plain(email), expected)
 

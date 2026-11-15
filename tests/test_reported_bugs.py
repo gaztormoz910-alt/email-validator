@@ -97,12 +97,19 @@ class TestNames(unittest.TestCase):
         cls.ex = NameExtractor(enable_osint=False)
 
     def test_names_slavic_surname_is_kept_whole(self):
-        self.assertEqual(self.ex.extract_name("zogbinanatol1@gmail.com"),
-                         "Zogbin Anatol",
-                         "фамилия снова разваливается на обломки")
+        # Решение владельца 14.11.2026: догадка из двух слов в «Заполненности»
+        # — только если ПЕРВОЕ слово подтверждённое имя. У слитной записи
+        # «фамилия + имя» с фамилией, которой база не знает, имени впереди нет
+        # — теперь пусто, а не «Zogbin Anatol». Это названная цена решения:
+        # расширение «фамилия + подтверждённое имя» замерено 15.11.2026 и не
+        # принято — вернуло бы 518 догадок, почти все мусор: ники и фразы перед
+        # именем (.unlazy/names-stage2b/surname_first.py). Что фамилия не разваливается
+        # на обломки, сторожит test_names_repair_helper_is_index_aware ниже.
+        self.assertEqual(self.ex.extract_name("zogbinanatol1@gmail.com") or "", "")
 
     def test_names_surname_with_initial(self):
-        self.assertEqual(self.ex.extract_name("zogbina@gmail.com"), "Zogbin A")
+        # То же решение 14.11.2026: «Zogbin A» — ни одного подтверждённого имени.
+        self.assertEqual(self.ex.extract_name("zogbina@gmail.com") or "", "")
 
     def test_names_short_syllables_survive(self):
         """Вьетнамские слоги короткие ПО ПРИРОДЕ — склеивать их нельзя."""

@@ -270,6 +270,17 @@ def _base_line_with_quotes(value):
         поля = _csv_fields(value, separator)
         if поля and any(_is_plain_address(поле.strip()) for поле in поля):
             return True
+    # Поля в кавычках через «:» — `"Иван Петров":"ivan@gmail.com"` (этап 3
+    # плана 14.11.2026; нашла рецензия правки E5). Двоеточие в разделители
+    # полей не входит: у прокси оно — граница host:port. Здесь оно берётся,
+    # только если КАЖДОЕ поле в кавычках: так пишет выгрузка, а не прокси и
+    # не запрос.
+    if ":" in value and value.lstrip().startswith('"'):
+        поля = _csv_fields(value, ":")
+        if (поля and len(поля) >= 2
+                and re.fullmatch(r'\s*"[^"]*"(?:\s*:\s*"[^"]*")+\s*', value)
+                and any(_is_plain_address(поле.strip()) for поле in поля)):
+            return True
     return False
 
 
@@ -287,7 +298,7 @@ def _csv_fields(value, separator):
     # Мусор на входе — «не CSV», а не падение (test_robustness). Разделитель —
     # только из своих: с Python 3.13 csv сам отвергает кавычку и перевод
     # строки в роли разделителя исключением ValueError, а на 3.11 молчит.
-    if not isinstance(value, str) or separator not in tuple(FIELD_SEPARATORS):
+    if not isinstance(value, str) or separator not in tuple(FIELD_SEPARATORS + ":"):
         return None
     value = re.sub(r'"[ ]+(?=%s)' % re.escape(separator), '"', value)
     try:
@@ -338,6 +349,16 @@ def detect_kind(line):
     line = str(line or "").strip()
     if not line or line.startswith("#"):
         return KIND_UNKNOWN
+
+    # Строка базы, где слово-оператор стоит в СОСЕДНЕМ поле, а не в адресе:
+    # `ivan@gmail.com,"Link: acme.com"` — колонка-заметка (этап 3 плана
+    # 14.11.2026; нашла рецензия правки E5). Оператор ищется раньше всего, и
+    # такая строка уезжала в запросы. Запрос с оператором и шаблоном
+    # (`site:x.com "@gmail.com"`, `"@gmail.com",site:x.com`) отдельного поля
+    # с настоящим адресом не имеет и остаётся запросом. Поле запросов судит
+    # по прежним правилам (classify, query_field).
+    if _DORK_OPERATOR_RE.search(line.lower()) and _base_line_with_quotes(line):
+        return KIND_EMAIL
 
     if looks_like_dork(line):
         return KIND_DORK
@@ -412,6 +433,30 @@ def _dork_by_old_rules(line):
     return any(op in lowered for op in DORK_OPERATORS) or ('"' in line and " " in line)
 
 
+# Слова, по которым строка без собаки читается заголовком колонок.
+_HEADER_WORDS = re.compile(
+    r"(?:e-?mail|mail|address|name|first|last|surname|phone|country|gender|"
+    r"city|company|почта|адрес|имя|фамилия|телефон|страна|пол|город)",
+    re.IGNORECASE)
+
+
+def _looks_like_header(line):
+    """Заголовок колонок: без собаки, поля по 1–4 слова, есть слово заголовка."""
+    # Мусор на входе — «не заголовок», а не падение (test_robustness).
+    if not isinstance(line, str) or not line.strip():
+        return False
+    if "@" in line or _DORK_OPERATOR_RE.search(line.lower()):
+        return False
+    separator = next((s for s in FIELD_SEPARATORS if s in line), None)
+    поля = _csv_fields(line, separator) if separator else [line.strip().strip('"')]
+    if not поля:
+        return False
+    поля = [поле.strip() for поле in поля]
+    if any(not поле or len(поле.split()) > 4 for поле in поля):
+        return False
+    return any(_HEADER_WORDS.search(поле) for поле in поля)
+
+
 def classify(lines, limit=SAMPLE_LINES, query_field=False):
     """Сводка по выборке строк: чего сколько и что это в целом.
 
@@ -441,10 +486,20 @@ def classify(lines, limit=SAMPLE_LINES, query_field=False):
     elif lines is None or not hasattr(lines, "__iter__"):
         lines = []
 
+    first = True
     for raw in lines:
         line = str(raw or "").strip()
         if not line or line.startswith("#"):
             continue
+        # Заголовок CSV — не строка данных: `First Name,Email Address` с
+        # одним контактом под ним давал долю адресов 1 из 2, и окно
+        # отвергало файл (этап 3 плана 14.11.2026; нашла рецензия правки
+        # E5). Только первая значимая строка и только в поле адресов: в поле
+        # запросов строка из слов — запрос, как на b68b9a8.
+        if first and not query_field and _looks_like_header(line):
+            first = False
+            continue
+        first = False
         seen += 1
         if seen > limit:
             break

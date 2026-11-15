@@ -277,6 +277,8 @@ const ui = {
   // этого зависеть не должен.
   facets: { country: new Set(), gender: new Set(), provider: new Set() },
   search: "",
+  // «Без доменов-опечаток»: выбор владельца (решение 14.11.2026), а не вердикт.
+  hideTypo: false,
   facetSig: "",
 };
 
@@ -294,6 +296,7 @@ function selection(extra = {}) {
     gender: [...ui.facets.gender],
     provider: [...ui.facets.provider],
     search: ui.search,
+    hideTypo: ui.hideTypo,
   }, extra);
 }
 
@@ -745,6 +748,16 @@ function detailRow(row, columns) {
         + "ничего (" + (more.suggested_status || "без ответа") + ").";
     grid.appendChild(note);
   }
+  if (more.typo_of) {
+    // Отметка, а не вердикт: статус в строке — ответ сервера про загруженный
+    // домен, и он не меняется (решение владельца 14.11.2026).
+    const note = document.createElement("p");
+    note.className = "detail__note";
+    note.textContent = `Домен похож на опечатку ${more.typo_of}, а почтовый `
+      + "сервер у него есть — такие домены часто ловят чужие письма. Статус "
+      + "не меняли; скрыть такие адреса можно галочкой «Без доменов-опечаток».";
+    grid.appendChild(note);
+  }
   if (!grid.childElementCount) {
     const note = document.createElement("p");
     note.className = "detail__note";
@@ -955,7 +968,7 @@ async function refreshFacets() {
     setText(box.querySelector(".facet__count"), chosen.size ? `· ${chosen.size}` : "");
   }
 
-  const any = ui.search || ui.minScore ||
+  const any = ui.search || ui.minScore || ui.hideTypo ||
     Object.values(ui.facets).some((set) => set.size > 0);
   show($("#resetFilters"), !!any);
 }
@@ -964,8 +977,10 @@ function resetFacets() {
   for (const set of Object.values(ui.facets)) set.clear();
   ui.search = "";
   ui.minScore = 0;
+  ui.hideTypo = false;
   $("#search").value = "";
   $("#minScore").value = 0;
+  $("#hideTypo").checked = false;
   show($("#searchClear"), false);
   ui.page = 1;
   refreshRows(true);
@@ -1568,6 +1583,12 @@ document.addEventListener("click", (event) => {
   for (const box of $$(".facet[open]")) {
     if (!box.contains(event.target)) box.open = false;
   }
+});
+
+$("#hideTypo").addEventListener("change", () => {
+  ui.hideTypo = $("#hideTypo").checked;
+  ui.page = 1;
+  refreshRows(true);
 });
 
 $("#minScore").addEventListener("change", () => {

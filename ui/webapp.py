@@ -625,6 +625,9 @@ class ValidatorApi(ResetMixin, SourcesMixin, ParserMixin, ActivityBridgeMixin):
                     # знал, что рядом есть работающий похожий ящик.
                     "suggested_email": data.get("suggested_email", ""),
                     "suggested_status": data.get("suggested_status", ""),
+                    # Домен — опечатка почтового гиганта при живом MX (решение
+                    # владельца 14.11.2026): отметка, а не вердикт.
+                    "typo_of": data.get("typo_of", ""),
                     "mx": row.get("mx", ""),
                 },
                 # Насколько вердикту можно верить сегодня. Ящик могли удалить
@@ -645,6 +648,7 @@ class ValidatorApi(ResetMixin, SourcesMixin, ParserMixin, ActivityBridgeMixin):
             "gender": payload.get("gender"),
             "provider": payload.get("provider"),
             "search": payload.get("search"),
+            "hideTypo": payload.get("hideTypo"),
         })
 
     def facets(self, payload=None):
@@ -727,7 +731,10 @@ class ValidatorApi(ResetMixin, SourcesMixin, ParserMixin, ActivityBridgeMixin):
                                  "RoleAddress",
                                  # Похоже на опечатку: какой адрес, вероятно,
                                  # имелся в виду. Раньше жил только в карточке.
-                                 "SuggestedEmail"])
+                                 "SuggestedEmail",
+                                 # Домен — опечатка почтового гиганта при живом
+                                 # MX: какого (решение владельца 14.11.2026).
+                                 "TypoOf"])
                 for row in rows:
                     data = row.get("data") or {}
                     # csv_row, а не голый список: база собрана со страниц в
@@ -761,6 +768,7 @@ class ValidatorApi(ResetMixin, SourcesMixin, ParserMixin, ActivityBridgeMixin):
                         "да" if data.get("from_cache") else "",
                         "да" if data.get("role_address") else "",
                         data.get("suggested_email", ""),
+                        data.get("typo_of", ""),
                     ]))
 
             skipped = {"n": 0}

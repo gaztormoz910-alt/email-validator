@@ -248,7 +248,7 @@ DISPOSABLE_DOMAINS = {
     "smashmail.de",
     "smellfear.com",
     "snakemail.com",
-    "sneakemail.com",
+    # sneakemail.com убран 15.11.2026: это пересылка (см. NEVER_DISPOSABLE).
     "snkmail.com",
     "sofimail.com",
     "sofort-mail.de",
@@ -458,6 +458,14 @@ NEVER_DISPOSABLE = frozenset({
     "pass2mail.com",                # Proton Pass: сайт ведёт на proton.me/pass, MX — simplelogin.co
     "33mail.com",                   # 33mail
     "burnermail.io",                # Burner Mail
+    # Решение владельца 14.11.2026 (аудит 03.11, вопрос о sneakemail.com и
+    # getburner.email): обе — пересылки, как SimpleLogin. Sneakemail выдаёт
+    # адреса, которые пересылают письма в настоящий ящик хозяина, пока он их
+    # не отключит; getburner.email — домен адресов Burner Mail (MX —
+    # mail.burnermail.io). Оба стояли в скачиваемом data/disposable_more.txt,
+    # sneakemail.com — ещё и во встроенном списке.
+    "sneakemail.com",               # Sneakemail
+    "getburner.email",              # Burner Mail
     "erine.email",                  # Erine Email
     # Forward Email: домены для платных клиентов (пост команды сервиса на
     # discuss.privacyguides.net, 02.01.2024); MX — mx1/mx2.forwardemail.net.

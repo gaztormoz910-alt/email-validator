@@ -655,6 +655,8 @@ class ValidationPipeline(RunControlMixin, PipelineSetupMixin, EnrichmentMixin,
                         data["verdict_basis"] = basis
 
                     data["validated_at"] = cached_stamp
+                    # Отметка домена-опечатки — и у вердикта из кэша (core/settle.py).
+                    self._mark_typo_domain(email, data, cached["mx"])
 
                     with self._cache_lock:
                         self._cache_hits += 1

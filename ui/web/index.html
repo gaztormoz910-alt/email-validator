@@ -279,6 +279,12 @@
             <input type="number" id="minScore" min="0" max="100" value="0">
           </label>
 
+          <!-- Домены-опечатки гигантов с живым MX (gmai.com и т.п.): скрыть
+               по выбору; статус у них не меняется (решение 14.11.2026). -->
+          <label class="minscore" title="Скрыть адреса на доменах, похожих на опечатку крупного почтовика (gmai.com, hotmial.com), у которых есть почтовый сервер">
+            <input type="checkbox" id="hideTypo"> Без доменов-опечаток
+          </label>
+
           <button class="btn btn--ghost btn--sm is-gone" id="resetFilters">Сбросить</button>
         </div>
 

@@ -450,10 +450,10 @@ class NetworkValidator(AbortableMixin, ProxyPoolMixin, DnsChecksMixin,
                 raise ValueError("Неверный формат прокси")
             ip, port, user, password = parsed
             # Подключаемся тем же протоколом, которым прокси был проверен
-            return SocksSMTP(ip, port, proxy_user=user, proxy_pass=password, timeout=self.timeout,
-                             proxy_type=_PROXY_TYPES.get(_proxy_scheme(proxy), socks.SOCKS5))
+            return self._track(SocksSMTP(ip, port, proxy_user=user, proxy_pass=password, timeout=self.timeout,
+                                         proxy_type=_PROXY_TYPES.get(_proxy_scheme(proxy), socks.SOCKS5)))
         else:
-            return smtplib.SMTP(timeout=self.timeout)
+            return self._track(smtplib.SMTP(timeout=self.timeout))
 
     def _ask_vrfy(self, server, email, domain):
         """Спрашивает VRFY. Вердикт или None, если ответа по существу нет.
@@ -726,10 +726,7 @@ class NetworkValidator(AbortableMixin, ProxyPoolMixin, DnsChecksMixin,
             if slot is not None:
                 slot.release()
             if server:
-                try:
-                    server.quit()
-                except Exception:
-                    pass
+                self._finish(server)    # после «Стопа» — без QUIT (core/network_abort.py)
 
     def _probe_recipients(self, addresses, mx_record, proxy=None, from_email=None):
         """Проверяет НЕСКОЛЬКО адресов в ОДНОЙ SMTP-сессии.
@@ -790,10 +787,7 @@ class NetworkValidator(AbortableMixin, ProxyPoolMixin, DnsChecksMixin,
         finally:
             sem.release()
             if server:
-                try:
-                    server.quit()
-                except Exception:
-                    pass
+                self._finish(server)    # после «Стопа» — без QUIT (core/network_abort.py)
 
         while len(results) < len(addresses):
             results.append({"status": "unknown", "reason": "Сессия оборвалась"})

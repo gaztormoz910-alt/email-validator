@@ -137,9 +137,15 @@ class TestNameModeSeparatesGuessFromFact(_РежимИмён):
     даже 'aaa' в ней чьи-то имена), поэтому она такое не ловит.
     """
 
-    # Догадка из двух слов: «Заполненность» её оставляет (компромисс
-    # режима), «Точность» — нет.
+    # Догадка из двух слов без имени впереди — фирма или фраза. До 15.11.2026
+    # «Заполненность» её оставляла (компромисс режима). Решение владельца
+    # 14.11.2026: догадка из двух слов — только если первое слово имя; замер
+    # 15.11.2026 — .unlazy/names-stage2b/LABELS.md. Теперь пусто в обоих режимах.
     МУСОР = ["kavaterasports", "greenowlclothingco", "elmvaleymcagymnastics"]
+
+    # Догадка из двух слов с именем впереди: «Заполненность» её оставляет,
+    # «Точность» — нет (фамилию база не знает).
+    ДОГАДКА_С_ИМЕНЕМ = ["johnbirchly"]
 
     # Догадка ОДНИМ неподтверждённым словом («Anlie», «Battleground», «Git»).
     # До 13.11.2026 «Заполненность» её ставила, и эти строки стояли в списке
@@ -165,8 +171,13 @@ class TestNameModeSeparatesGuessFromFact(_РежимИмён):
 
     def test_name_mode_accuracy_drops_invented_splits(self):
         for л in self.МУСОР:
+            self.assertEqual(self.имя(л, "coverage"), "",
+                             "%s: догадка без имени впереди осталась в обычном режиме" % л)
+            self.assertEqual(self.имя(л, "accuracy"), "",
+                             "%s: «Точность» оставила догадку сегментатора" % л)
+        for л in self.ДОГАДКА_С_ИМЕНЕМ:
             self.assertTrue(self.имя(л, "coverage"),
-                            "%s: в обычном режиме имя должно ставиться" % л)
+                            "%s: в обычном режиме догадка с именем впереди должна ставиться" % л)
             self.assertEqual(self.имя(л, "accuracy"), "",
                              "%s: «Точность» оставила догадку сегментатора" % л)
 
@@ -204,19 +215,23 @@ class TestNameModeSeparatesGuessFromFact(_РежимИмён):
         Режим по умолчанию — «Заполненность». Менять поведение тому, кто
         ничего не переключал, нельзя. Одно исключение — то, что мусор в
         любом режиме: веб-хвост «Www» (жалоба владельца 06.11.2026 на имена
-        «что попалось»). Неподтверждённые, но правдоподобные догадки
-        («Kava Terasports») режим сохраняет — это его компромисс.
+        «что попалось»).
 
         Второе исключение — решение владельца 13.11.2026: догадка ОДНИМ
         неподтверждённым словом. `anliewww` давал здесь «Anlie»; теперь пусто.
+
+        Третье — решение владельца 14.11.2026: догадка из двух слов — только
+        с именем впереди. «Kava Terasports», «Green Owlclothingco»,
+        «Elmvale Ymcagymnastics» теперь пусто; «John Birchly» остаётся.
         """
         ожидалось = {
-            "kavaterasports": "Kava Terasports",
+            "kavaterasports": "",
             "anliewww": "",
-            "greenowlclothingco": "Green Owlclothingco",
+            "greenowlclothingco": "",
             "john.doe": "John Doe",
             "aminaduku": "Amina Duku",
-            "elmvaleymcagymnastics": "Elmvale Ymcagymnastics",
+            "elmvaleymcagymnastics": "",
+            "johnbirchly": "John Birchly",
         }
         for л, ждём in ожидалось.items():
             self.assertEqual(self.имя(л, "coverage"), ждём,
@@ -231,7 +246,7 @@ class TestNameSourceIsHonest(_РежимИмён):
     """
 
     def test_name_source_marks_the_segmenter_as_a_guess(self):
-        self.имя("kavaterasports", "coverage")
+        self.имя("johnbirchly", "coverage")
         self.assertEqual(self.ne.last_name_source(), "разбор",
                          "догадка сегментатора помечена не как догадка")
 

@@ -283,8 +283,9 @@ def test_export_header_and_row_have_the_same_width():
     # RoleAddress добавлен аудитом 27.09.2026 (D8): роль — признак рядом со
     # статусом, а не сам статус. SuggestedEmail — прогоном файлов владельца
     # того же дня: подсказка об опечатке жила только в карточке окна.
-    assert полная[0][-5:] == ["DomainValidRatio", "DomainChecked", "FromCache",
-                              "RoleAddress", "SuggestedEmail"]
+    # TypoOf — отметка домена-опечатки гиганта (решение владельца 14.11.2026).
+    assert полная[0][-6:] == ["DomainValidRatio", "DomainChecked", "FromCache",
+                              "RoleAddress", "SuggestedEmail", "TypoOf"]
 
 
 def test_export_ratio_is_computed_in_the_pipeline():

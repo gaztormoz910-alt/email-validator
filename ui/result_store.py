@@ -202,12 +202,16 @@ def normalize_filters(raw, groups=None, min_score=0):
         "gender": values["gender"],
         "provider": [v.lower() for v in values["provider"]],
         "search": str(raw.get("search") or "").strip().lower(),
+        # «Без доменов-опечаток» — выбор владельца, а не вердикт (решение
+        # 14.11.2026): строка с отметкой typo_of из выборки уходит.
+        "hide_typo": bool(raw.get("hideTypo") or raw.get("hide_typo")),
     }
 
 
 def _filters_are_plain(filters):
     """Ничего, кроме групп, не выбрано — можно идти самым дешёвым путём."""
     return (not filters["min_score"] and not filters["search"]
+            and not filters.get("hide_typo")
             and not any(filters[facet] for facet in FACETS))
 
 
@@ -295,7 +299,8 @@ class ResultStore:
                        country  TEXT,
                        gender   TEXT,
                        provider TEXT,
-                       email_lc TEXT
+                       email_lc TEXT,
+                       typo     TEXT
                    )"""
             )
             # Группа и скор вынесены из JSON в свои колонки не для красоты.
@@ -311,7 +316,7 @@ class ResultStore:
             # Файл мог остаться от прежней версии — тогда колонок фасетов в
             # нём нет. Добавляем молча: упасть здесь значит потерять показ
             # результатов целиком ради колонки фильтра.
-            for column in ("country", "gender", "provider", "email_lc"):
+            for column in ("country", "gender", "provider", "email_lc", "typo"):
                 try:
                     self._conn.execute("ALTER TABLE rows ADD COLUMN %s TEXT" % column)
                 except sqlite3.OperationalError:
@@ -476,7 +481,7 @@ class ResultStore:
                 position, email, status, reason, mx, blob,
                 group, _score_of(payload),
                 _facet_of(payload, "country"), _facet_of(payload, "gender"),
-                _provider_of(email), key))
+                _provider_of(email), key, _facet_of(payload, "typo_of")))
             self._pending_keys[key] = group
             if len(self._pending) >= FLUSH_EVERY:
                 self._flush_locked()
@@ -490,8 +495,8 @@ class ResultStore:
             self._conn.executemany(
                 "INSERT OR REPLACE INTO rows "
                 "(pos, email, status, reason, mx, data, grp, score, "
-                " country, gender, provider, email_lc) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", self._pending)
+                " country, gender, provider, email_lc, typo) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", self._pending)
             self._conn.commit()
             self._pending.clear()
             # Записанное теперь найдётся в базе по индексу — держать ключи в
@@ -750,6 +755,11 @@ class ResultStore:
             clauses.append("email_lc LIKE ? ESCAPE '\\'")
             params.append("%" + needle + "%")
 
+        if filters.get("hide_typo"):
+            # COALESCE: у строк из файла прежней версии колонки не было, и
+            # ALTER TABLE оставил в ней NULL — это «без отметки», а не отметка.
+            clauses.append("COALESCE(typo, '') = ''")
+
         return " AND ".join(clauses), params
 
     def _matches(self, row, filters):
@@ -776,6 +786,9 @@ class ResultStore:
         if filters["search"]:
             if filters["search"] not in str(row.get("email") or "").lower():
                 return False
+
+        if filters.get("hide_typo") and _facet_of(payload, "typo_of"):
+            return False
 
         return True
 

@@ -6,7 +6,8 @@ import threading
 from .osint import OSINTOperator
 from .names_index import is_known_name, countries_for
 from .name_quality import (NameQuality, letters_only, is_latin, LEANING_FIRST_RANK,
-                           LEANING_SURNAME_TOP, LEANING_STRONG_FIRST, SPLIT_FIRST_RANK)
+                           LEANING_SURNAME_TOP, LEANING_STRONG_FIRST, SPLIT_FIRST_RANK,
+                           STRONG_FIRST_RANK)
 from .name_words import scripts_of, consistent_with_address, _KEYBOARD_JUNK, _NOT_NAME_WORDS
 from .translit import variants as translit_variants
 
@@ -771,6 +772,7 @@ class NameExtractor:
                     or quality.phrase_only(leet_letters)):
                 return ""
         kept, source = [], ""
+        fused = False                 # границ нет вовсе: ни разделителей, ни CamelCase
         if any(sep in username_clean for sep in ['.', '_', '-']):
             parts, kinds, guessed = [], [], False
             raws = [raw for raw in re.split(r'[._-]+', username_clean) if raw.strip()]
@@ -826,11 +828,26 @@ class NameExtractor:
                         if retry and (not kept or retry[0].lower() == kept[0].lower()):
                             kept = retry
                 source = "разбор"
+                fused = True
         if not kept:
             return ""
         # «Точность»: угаданное имя — только из кусков, которые база знает
         # (решение владельца 14.11.2026, см. confirmed_name).
         if strict and source == "разбор" and not quality.confirmed_name(kept):
+            return ""
+        if strict and fused and not self._three_pieces_ok(kept):
+            return ""
+        # «Заполненность»: та же неподтверждённая догадка из двух и более
+        # слов — только если первое слово имя (то же правило, что в
+        # _guess_name; замер — там же). Имя, где каждый кусок знает база,
+        # не трогается: его берёт и «Точность» («Kelly Barros»), а
+        # «Заполненность» не может давать меньше имён, чем она.
+        if (not strict and source == "разбор" and not quality.confirmed_name(kept)
+                and not self._guess_head_ok(kept)):
+            # Прежняя догадка после этого не спрашивается: она подставляла
+            # другое прочтение тех же букв, и почти всегда хуже (сверка
+            # 15.11.2026): выдуманное «malhar|singh» стало бы «Mal Har Singh».
+            self._osint_local.guess_refused = True
             return ""
         self._osint_local.name_source = source
         return " ".join(part.title() for part in kept)
@@ -866,6 +883,72 @@ class NameExtractor:
         if not kept and not ambiguous:
             kept = quality.anchor_fallback(letters)
         return kept
+
+    # Перечни, по которым три коротких куска читаются восточноазиатским
+    # именем из слогов (выдуманное «linxuanzhou» — «Lin Xuan Zhou»).
+    _SYLLABLE_COUNTRIES = frozenset({"CN", "TW", "HK", "VN", "SG", "MY", "KR"})
+
+    def _three_pieces_ok(self, kept):
+        """Годится ли в «Точности» имя из трёх кусков, нарезанных из слитной строки.
+
+        Разбор режет слитную строку на три известных базе куска там, где
+        человек писал два слова: выдуманное «saraferolli» давало «Sara Fer
+        Olli». Три куска остаются, если это «имя + настоящее второе имя +
+        фамилия» (второе — именем не дальше STRONG_FIRST_RANK, от трёх букв;
+        последнее — от четырёх букв, фамилией не дальше 1000-го места и
+        фамилией выше, чем именем: «Daniel Cole Barrow»), восточноазиатское
+        имя из слогов (каждый кусок до пяти букв и есть в перечнях
+        _SYLLABLE_COUNTRIES) или буква в середине.
+
+        Замер 15.11.2026 (.unlazy/names-stage2c/LABELS.md): на проверочной
+        половине новой выборки, по которой правило не подбиралось, убирает
+        32 неверных из 42 ценой 13 верных из 37. Цена видна и на выдуманном:
+        «Emma Rose Holbrook» уходит (Holbrook — 2545-я фамилия).
+        «Заполненность» правило не трогает.
+        """
+        if len(kept) != 3 or len(kept[1]) <= 1:
+            return True
+        quality = self.quality
+        words = [part.lower() for part in kept]
+        if all(len(word) <= 5 and quality._countries(word) & self._SYLLABLE_COUNTRIES
+               for word in words):
+            return True
+        middle_first, _ = quality._ranks(words[1])
+        last_first, last_surname = quality._ranks(words[2])
+        middle_given = (len(words[1]) >= 3 and middle_first is not None
+                        and middle_first <= STRONG_FIRST_RANK)
+        surname_end = (len(words[2]) >= 4 and last_surname is not None
+                       and last_surname <= 1000
+                       and (last_first is None or last_surname < last_first))
+        return middle_given and surname_end
+
+    def _guess_head_ok(self, parts):
+        """Годится ли догадка «Заполненности» из двух и более слов. Одно слово — да.
+
+        Только если первое слово — имя (решение владельца 14.11.2026): им
+        обращаются в рассылке. Имя — кусок, который разбор читает именем, или
+        частое имя базы (не дальше STRONG_FIRST_RANK) в догадке, где каждый
+        кусок база знает и букв-обломков нет: Henry, Kelly — частые фамилии,
+        и разбор читает их фамилией, но «Henry Castellano» — человек.
+
+        Замер 15.11.2026 на отложенной выборке из баз владельца
+        (.unlazy/names-stage2b/LABELS.md): из отвергнутых догадок верны
+        целиком около 3 из 100 — фирмы, фразы и обломки (выдуманный пример —
+        «Zelo Terasports»); из оставшихся первое слово верно примерно в 55 из
+        100. Вторая часть правила вернула 29 догадок, верных из них около 22.
+        Порядок «фамилия + имя» не берётся: замерено, мусора там почти всё
+        (.unlazy/names-stage2b/surname_first.py).
+        """
+        if len(parts) < 2:
+            return True
+        quality = self.quality
+        words = [part.lower() for part in parts]
+        if quality.kind_of(words[0], True) == "first":
+            return True
+        rank = quality.first_rank(words[0])
+        return (rank is not None and rank <= STRONG_FIRST_RANK
+                and all(len(word) >= 2 for word in words)
+                and quality.confirmed_name(words))
 
     def _guess_name(self, email):
         """Прежний разбор адреса — запасной путь режима «Заполненность».
@@ -908,6 +991,8 @@ class NameExtractor:
         parts = self.quality.clean_guess(parts, fused=not from_separators)
         if not parts:
             return ""
+        if not self._guess_head_ok(parts):
+            return ""
         self._osint_local.name_source = "адрес" if from_separators else "разбор"
         return " ".join(part.title() for part in parts)
 
@@ -941,13 +1026,14 @@ class NameExtractor:
             return self._address_over_profile(email, confirmed) or confirmed
 
         # Затем адрес, где каждый кусок подтверждён, — в обоих режимах.
+        self._osint_local.guess_refused = False
         name = self._address_name(email)
         if name:
             return name
 
         # «Заполненность»: прежняя догадка, очищенная от заведомого мусора.
         # «Точность» догадку не берёт: там пусто честнее.
-        if not строгий_режим_имён():
+        if not строгий_режим_имён() and not getattr(self._osint_local, "guess_refused", False):
             name = self._guess_name(email)
             if name:
                 return name
