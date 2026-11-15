@@ -39,6 +39,14 @@ EXPECTED = {
     "test.txt": {"lines": 10, "unique": 9},
 }
 
+# Файлы владельца с 15.11.2026 не в git (это чужие люди, а репозиторий
+# публичный) и лежат только на его машине. Там проверки идут целиком; в CI
+# и в чужой копии файлов нет — проверки на них пропускаются, а не падают.
+# Пропуск, а не зелёный результат: pytest честно покажет «skipped».
+HAVE_OWNER_FILES = all(os.path.exists(os.path.join(TESTDATA, n)) for n in EXPECTED)
+needs_owner_files = unittest.skipUnless(
+    HAVE_OWNER_FILES, "файлов владельца data/testdata нет — они не в git, только на его машине")
+
 # Что конкурент пометил Bad format в test_1 — по виду строк: короткое имя
 # Gmail и две строки с лишней точкой в конце. Две последние здесь —
 # выдуманные двойники: сами строки лежат в файле и проверяются вместе с ним.
@@ -60,6 +68,7 @@ def unique_of(name, cleaner=None):
     return keys
 
 
+@needs_owner_files
 class TestCounts(unittest.TestCase):
     """Дедуп даёт ровно те же количества, что независимо посчитал конкурент."""
 
@@ -155,6 +164,7 @@ class TestVerdicts(unittest.TestCase):
                         "живой адрес из файла владельца уходит в invalid из-за "
                         "мусорного символа")
 
+    @needs_owner_files
     def test_verdicts_no_owner_address_is_declared_impossible(self):
         """Ни один реальный адрес из трёх файлов не объявлен несуществующим."""
         cleaner = EmailCleaner()
@@ -189,6 +199,7 @@ class TestVerdicts(unittest.TestCase):
                          "предложение об исправлении потерялось")
 
 
+@needs_owner_files
 class TestPipeline(unittest.TestCase):
     """Весь досетевой конвейер отрабатывает все три файла без исключений."""
 

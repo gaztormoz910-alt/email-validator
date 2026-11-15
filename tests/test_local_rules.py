@@ -27,6 +27,15 @@ TESTDATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
                         "data", "testdata")
 
 
+# Файлы владельца с 15.11.2026 не в git (это чужие люди, а репозиторий
+# публичный) — они только на его машине. Где их нет (CI, чужая копия),
+# проверки на них честно пропускаются, а не падают и не «зеленеют».
+_OWNER_FILES = ("test_base.txt", "test_1.txt", "test.txt")
+needs_owner_files = unittest.skipUnless(
+    all(os.path.exists(os.path.join(TESTDATA, n)) for n in _OWNER_FILES),
+    "файлов владельца data/testdata нет — они не в git, только на его машине")
+
+
 def owner_lines(name):
     path = os.path.join(TESTDATA, name)
     with io.open(path, encoding="utf-8", errors="ignore") as handle:
@@ -169,6 +178,7 @@ class TestJunk(unittest.TestCase):
                 self.assertEqual(strip_wrapping_junk(junk), "")
 
 
+@needs_owner_files
 class TestNoFalseInvalid(unittest.TestCase):
     """На реальных файлах владельца ни один адрес не хоронится по синтаксису."""
 
