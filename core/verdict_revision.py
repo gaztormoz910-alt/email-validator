@@ -79,6 +79,30 @@ class VerdictRevisionMixin:
             "этого выхода НЕДОКАЗУЕМЫ — виноват прокси, не база."
             % (domain, exit_ip or "прямого соединения"), "dead")
         return True
+    def _split_catchall_from_tarpit(self, proven, trapped):
+        """Делит «принял выдуманный адрес» на настоящий catch-all и тарпитинг.
+
+        Гигант в списке proven — не catch-all: контрольная проба у него
+        помечает домен на весь прогон, но catch-all у gmail.com не бывает по
+        устройству — это наш выход под подозрением. Живой прогон 15.11.2026 так
+        и написал владельцу про 82 адреса gmail «домен принимает любой адрес»
+        и отправил бы его чистить базу вместо смены прокси. Пересмотр в
+        «Неизвестно» остаётся (честные и нечестные ответы по времени не
+        разделить), меняется названная причина: такие домены уходят в
+        тарпитинг. Возвращает (catch-all, тарпитинг).
+        """
+        net = getattr(self, "network", None)
+        гиганты = []
+        for d in proven or []:
+            try:
+                if net is not None and net._is_never_catchall(d):
+                    гиганты.append(d)
+            except Exception:
+                pass
+        if not гиганты:
+            return list(proven or []), list(trapped or [])
+        return ([d for d in proven if d not in гиганты],
+                sorted(set(trapped or []) | set(гиганты)))
     def _catchall_disproven(self, domain):
         """Опровергнут ли у домена приём любых адресов — фактом, а не догадкой.
 

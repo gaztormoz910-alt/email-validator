@@ -1277,6 +1277,7 @@ class ValidationPipeline(RunControlMixin, PipelineSetupMixin, EnrichmentMixin,
             proven = self.network.proven_catchall_domains() if self.network else []
         except Exception:
             proven = []
+        proven, trapped = self._split_catchall_from_tarpit(proven, trapped)
         if proven:
             revised = self._revise(
                 proven, "Unknown",
