@@ -69,7 +69,7 @@ class TestNameIsSplitIntoParts(unittest.TestCase):
 
     def test_two_words_split(self):
         from core.parser.name_extractor import split_name
-        self.assertEqual(split_name("Rogbin Anatol"), ("Rogbin", "Anatol"))
+        self.assertEqual(split_name("Zogbin Anatol"), ("Zogbin", "Anatol"))
 
     def test_three_words_keep_first_and_last(self):
         from core.parser.name_extractor import split_name

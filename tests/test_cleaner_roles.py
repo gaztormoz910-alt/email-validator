@@ -86,7 +86,7 @@ class TestRoleBased(unittest.TestCase):
     ]
 
     PEOPLE = [
-        "ivan.petrov@x.com", "john.doe@x.com", "rogbina@gmail.com",
+        "ivan.petrov@x.com", "john.doe@x.com", "zogbina@gmail.com",
         "a.smith@x.com", "maria@x.com", "infomir@x.com",
         "salesman.ivan@x.com", "teamlead.bob@x.com",
     ]

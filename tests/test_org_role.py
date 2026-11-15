@@ -27,6 +27,8 @@ class TestCompanyFromDomain(unittest.TestCase):
     def test_corporate_domain_gives_the_company(self):
         cases = {
             ("veltrano.com", "Corporate"): "Veltrano",
+            # Домен из имени и фамилии (выдуманный двойник личного домена из
+            # файла владельца): компания — это его владелец, по имени.
             ("mira-velko.com", "Corporate"): "Mira Velko",
             ("astirit.com", "Corporate"): "Astirit",
             ("acme-corp.io", "Corporate"): "Acme Corp",
@@ -77,7 +79,7 @@ class TestRoleFromLocalPart(unittest.TestCase):
 
     def test_a_person_has_no_role(self):
         """Имя человека — не должность. Это отрицательная половина проверки."""
-        for local in ("john.smith", "anna", "rogbinanatol1", "leo.fontanieu",
+        for local in ("john.smith", "anna", "zogbinanatol1", "leo.fontanieu",
                       "rachaeldakoalagirl", "j.smith", "michael.bauer"):
             with self.subTest(local=local):
                 self.assertEqual(role_from_local_part(local), "")

@@ -81,7 +81,7 @@ class TestEngagementScore(unittest.TestCase):
 
     def test_bare_alive_gmail_is_at_least_warm(self):
         # Голый живой Gmail без имени и без Gravatar — всё равно не "Neutral"
-        r = self.score(email='testowner482@gmail.com', smtp_status='Valid',
+        r = self.score(email='qzx48213@gmail.com', smtp_status='Valid',
                        smtp_reason='250 OK', dns_health_score=3)
         self.assertGreaterEqual(r['score'], 50)
 

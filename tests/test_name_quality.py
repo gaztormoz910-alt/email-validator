@@ -109,14 +109,14 @@ class TestPieces(unittest.TestCase):
         self.assertFalse(self.q.hard_junk("anna"))
 
     def test_unknown_surname_shape(self):
-        self.assertTrue(self.q.structural_ok("rogbin"))
+        self.assertTrue(self.q.structural_ok("zogbin"))
         for token in ("kumarbcdf", "ujkr", "freeform", "jenlovesea", "amyxk"):
             with self.subTest(token=token):
                 self.assertFalse(self.q.structural_ok(token))
 
     def test_surname_needs_the_base(self):
         self.assertTrue(self.q.surname_ok("smith"))
-        self.assertFalse(self.q.surname_ok("rogbin"))    # база не знает
+        self.assertFalse(self.q.surname_ok("zogbin"))    # база не знает
         self.assertFalse(self.q.surname_ok("junk"))      # слово, не фамилия
 
     def test_weak_first_that_is_a_surname_at_home(self):
@@ -181,7 +181,7 @@ class TestSeparators(unittest.TestCase):
     def test_unknown_surname_next_to_unknown_name_is_kept(self):
         # «moein.farsadzadeh»: точку поставил человек, оба куска похожи на
         # имя и фамилию — разметку не пересуживаем.
-        self.assertEqual(self.name("rogbin", "farsadzadeh"), ["rogbin", "farsadzadeh"])
+        self.assertEqual(self.name("zogbin", "farsadzadeh"), ["zogbin", "farsadzadeh"])
 
 
 class TestFused(unittest.TestCase):
@@ -225,8 +225,8 @@ class TestFused(unittest.TestCase):
         self.assertEqual(self.name(("ivor", "first"), ("x", "initial")), ["ivor"])
 
     def test_unknown_surname_next_to_a_strong_name(self):
-        self.assertEqual(self.name(("rogbin", "structural"), ("anatol", "first")),
-                         ["rogbin", "anatol"])
+        self.assertEqual(self.name(("zogbin", "structural"), ("anatol", "first")),
+                         ["zogbin", "anatol"])
 
     def test_english_word_right_after_the_name(self):
         self.assertEqual(self.name(("mike", "first"), ("bike", "word")), [])
@@ -251,7 +251,7 @@ class TestEvidence(unittest.TestCase):
         # «iloveyou» как строка в корпусе есть, но редка: прочтение — i|love|you.
         self.assertEqual(self.q.english_reading("iloveyou"), frozenset({1, 5}))
         self.assertEqual(self.q.english_reading("johnsmith"), frozenset({4}))
-        self.assertIsNone(self.q.english_reading("rogbinzarg"))
+        self.assertIsNone(self.q.english_reading("zogbinzarg"))
 
     def test_parse_that_cuts_an_english_word_is_misaligned(self):
         self.assertTrue(self.q.misaligned("iloveyou", [("ilo", "first"), ("veyou", "structural")]))
@@ -339,7 +339,8 @@ class TestCoverageGuess(unittest.TestCase):
         self.assertEqual(self.q.clean_guess(["Bleach"]), [])
 
     def test_one_word_is_a_confirmed_name_or_nothing(self):
-        # Решение владельца 13.11.2026. Прежде здесь стояло обратное:
+        # Решение владельца 13.11.2026. Прежде здесь стояло обратное (слово
+        # было из базы владельца, «Anlie» — его выдуманный двойник):
         # clean_guess(["Anlie", "Www"]) == ["Anlie"] — одно неподтверждённое
         # слово шло в колонку догадкой. Фамилия и прозвище — так же пусто.
         self.assertEqual(self.q.clean_guess(["Anlie", "Www"]), [])

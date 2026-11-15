@@ -16,8 +16,8 @@ class TestMachineGenerated(unittest.TestCase):
     HUMAN = [
         "ivan.petrov@mail.com", "john.doe@gmail.com", "anna_maria@corp.com",
         "jsmith@acme.com", "alexander@gmail.com", "m.rodriguez@corp.es",
-        "rogbina@gmail.com", "olga1985@mail.ru", "support@company.com",
-        "konstantin@mail.ru", "anatolrogbin@gmail.com", "grzegorzb@wp.pl",
+        "zogbina@gmail.com", "olga1985@mail.ru", "support@company.com",
+        "konstantin@mail.ru", "anatolzogbin@gmail.com", "grzegorzb@wp.pl",
         "christopher@gmail.com", "vladimirsky@yandex.ru", "mariacarmen@corp.es",
         "nguyenvanminh@gmail.com", "dmitrybrykin@mail.ru", "ekaterina1990@bk.ru",
         "info@company.com", "webmaster@site.org", "hanspeter@gmx.de",

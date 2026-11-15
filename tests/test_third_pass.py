@@ -437,7 +437,8 @@ def test_clean_preference_is_soft_not_a_refusal():
 def test_cache_forgets_verdicts_the_rule_no_longer_makes(tmp_path):
     """Кэш держит Invalid девяносто дней — и отдавал бы отменённый приговор.
 
-    Замерено на базе владельца: `entertainmentmoonmoonentertainment@gmail.com`
+    Замерено на базе владельца: адрес из 34 букв (того же вида, что
+    выдуманный `entertainmentmoonmoonentertainment@gmail.com`)
     лежал там как Invalid/Bounce с причиной «имя длиннее 30 символов» и mx
     «N/A» — то есть похоронен без единого запроса к серверу. Без чистки
     исправление до него бы просто не дошло.

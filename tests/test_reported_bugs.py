@@ -97,12 +97,12 @@ class TestNames(unittest.TestCase):
         cls.ex = NameExtractor(enable_osint=False)
 
     def test_names_slavic_surname_is_kept_whole(self):
-        self.assertEqual(self.ex.extract_name("rogbinanatol1@gmail.com"),
-                         "Rogbin Anatol",
+        self.assertEqual(self.ex.extract_name("zogbinanatol1@gmail.com"),
+                         "Zogbin Anatol",
                          "фамилия снова разваливается на обломки")
 
     def test_names_surname_with_initial(self):
-        self.assertEqual(self.ex.extract_name("rogbina@gmail.com"), "Rogbin A")
+        self.assertEqual(self.ex.extract_name("zogbina@gmail.com"), "Zogbin A")
 
     def test_names_short_syllables_survive(self):
         """Вьетнамские слоги короткие ПО ПРИРОДЕ — склеивать их нельзя."""
@@ -131,8 +131,8 @@ class TestNames(unittest.TestCase):
 
     def test_names_repair_helper_is_index_aware(self):
         """Ремонт спрашивает чистый индекс, а не шумную базу на 138 млн."""
-        repaired = self.ex._repair_oversegmentation(["rog", "bin", "anatol"])
-        self.assertEqual(repaired, ["rogbin", "anatol"])
+        repaired = self.ex._repair_oversegmentation(["zog", "bin", "anatol"])
+        self.assertEqual(repaired, ["zogbin", "anatol"])
         kept = self.ex._repair_oversegmentation(["minh", "anh", "tran"])
         self.assertEqual(kept, ["minh", "anh", "tran"])
 

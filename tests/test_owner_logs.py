@@ -132,14 +132,14 @@ class TestNameModeSeparatesGuessFromFact(_РежимИмён):
     """Сегментатор придумывал границы и выдавал результат за имя.
 
     `kavaterasports` -> «Kava Terasports», `anliewww` -> «Anlie Www»,
-    `whiteowlclothingco` -> «Green Owlclothingco». База имён на 138 млн
+    `greenowlclothingco` -> «Green Owlclothingco». База имён на 138 млн
     записей подтверждает почти любой обломок ('kava', 'white', 'upscale' и
     даже 'aaa' в ней чьи-то имена), поэтому она такое не ловит.
     """
 
     # Догадка из двух слов: «Заполненность» её оставляет (компромисс
     # режима), «Точность» — нет.
-    МУСОР = ["kavaterasports", "whiteowlclothingco", "elmvaleymcagymnastics"]
+    МУСОР = ["kavaterasports", "greenowlclothingco", "elmvaleymcagymnastics"]
 
     # Догадка ОДНИМ неподтверждённым словом («Anlie», «Battleground», «Git»).
     # До 13.11.2026 «Заполненность» её ставила, и эти строки стояли в списке
@@ -213,7 +213,7 @@ class TestNameModeSeparatesGuessFromFact(_РежимИмён):
         ожидалось = {
             "kavaterasports": "Kava Terasports",
             "anliewww": "",
-            "whiteowlclothingco": "Green Owlclothingco",
+            "greenowlclothingco": "Green Owlclothingco",
             "john.doe": "John Doe",
             "aminaduku": "Amina Duku",
             "elmvaleymcagymnastics": "Elmvale Ymcagymnastics",
@@ -277,7 +277,8 @@ class TestEscapeResidueDoesNotBuryPeople(unittest.TestCase):
     `u003cmarlowk@gmail.com` выглядит обычным ящиком, честно проверяется и
     получает 550. В окне это «мёртв», и владелец удаляет ЖИВОГО человека.
     В его логе пара видна прямо: `u200fdelvinor@gmail.com -> 550` и
-    `delvinor@gmail.com -> 250 OK`.
+    `delvinor@gmail.com -> 250 OK` (адреса здесь — выдуманные двойники
+    настоящих, вид строк тот же).
     """
 
     ЧИНИТСЯ = {

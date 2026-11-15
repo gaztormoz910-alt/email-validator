@@ -1,22 +1,28 @@
-"""Разбор имени на РЕАЛЬНЫХ адресах из баз владельца.
+"""Разбор имени на двойниках РЕАЛЬНЫХ адресов из баз владельца.
 
-Все адреса здесь взяты из трёх txt-файлов владельца и из его же скриншотов
-чужого сервиса. Это не выдуманные примеры: каждый случай кто-то реально
-получил в колонке «Имя».
+Каждый случай здесь кто-то реально получил в колонке «Имя» — в трёх
+txt-файлах владельца и на его скриншотах чужого сервиса. Сами адреса
+заменены выдуманными двойниками (14.11.2026): файл уезжает на публичный
+GitHub, а настоящий адрес — это чужой человек. Двойник подобран запуском
+того же кода, а не на глаз: разбор в обоих режимах, источник имени и разрез
+сегментатора у него такие же, как у исходного адреса.
 
 Три класса ошибок, которые здесь закрыты и не должны вернуться:
 
-1. **Ложное имя.** `qqq482615@gmail.com` превращался в «Fff», потому что база
-   на 138 млн записей подтверждает почти любое трёхбуквенное сочетание.
-   Мусор в колонке хуже пустоты: по нему потом обращаются в письме.
+1. **Ложное имя.** Адрес из трёх одинаковых букв и цифр (двойник —
+   `qqq482615@gmail.com`) превращался в «Fff», потому что база на 138 млн
+   записей подтверждает почти любое трёхбуквенное сочетание. Мусор в
+   колонке хуже пустоты: по нему потом обращаются в письме.
 
-2. **Потерянное имя.** `justinbrody57`, `suelovesfrogs7`, `leo.fontanieu`
-   отдавали ПУСТОТУ, хотя имя написано открытым текстом. Виноваты были два
-   правила: «слово есть в английском словаре — значит не имя» (под него
-   попадали justin, leo, sue) и «кусков больше трёх — сдаёмся».
+2. **Потерянное имя.** Адреса вида `justinbrody57`, `suelovesfrogs7`,
+   `leo.fontanieu` отдавали ПУСТОТУ, хотя имя написано открытым текстом.
+   Виноваты были два правила: «слово есть в английском словаре — значит не
+   имя» (под него попадали justin, leo, sue) и «кусков больше трёх —
+   сдаёмся».
 
-3. **Разваленное имя.** `johnoakreps` -> «John Oak Reps», `savithrek` ->
-   «Sa Vithrek»: английский сегментатор режет чужие фамилии на слова.
+3. **Разваленное имя.** Английский сегментатор режет чужие фамилии на
+   слова: `johnoakreps` — на john|oak|reps, `alvaromendaluz` — на
+   alvaro|mend|a|luz, и имя собиралось из обломков.
 """
 import os
 import sys
@@ -43,7 +49,7 @@ class TestNoFalseNames(unittest.TestCase):
     JUNK = [
         "qqq482615@gmail.com",          # обломок из трёх букв
         "qv5871@gmail.com",             # две буквы
-        "2018oregonrn@gmail.com",   # год плюс аббревиатура
+        "2018oregonrn@gmail.com",       # год плюс аббревиатура
         "info@company.com",
         "admin@example.com",
         "support@example.com",
@@ -65,7 +71,8 @@ class TestNamesAreNotLost(unittest.TestCase):
         # Раньше отдавали пустоту из-за проверки по английскому словарю
         "justinbrody57@gmail.com": "Justin Brody",
         # Имя Sue находится по-прежнему, а хвост «loves frogs» — фраза, а не
-        # фамилия: «Sue Lovesfrogs» владелец 06.11.2026 назвал мусором.
+        # фамилия: такую склейку («Sue Loves…») владелец 06.11.2026 назвал
+        # мусором.
         "suelovesfrogs7@gmail.com": "Sue",
         "leo.fontanieu@gmail.com": "Leo Fontanieu",
         # Раньше отдавали пустоту из-за правила «кусков больше трёх». Имя
@@ -86,8 +93,8 @@ class TestNamesAreNotLost(unittest.TestCase):
         "gauravkolwar@gmail.com": "Gaurav Kolwar",
         "alvaromendaluz@gmail.com": "Alvaro Mendaluz",
         "harshavemuri29@gmail.com": "Harsha Vemuri",
-        # Galang — фамилия, которую база знает (67-е место на Филиппинах), и
-        # «m» между именем и ней — средний инициал. «Mdizon» был обломком
+        # Dizon — фамилия, которую база знает (21-е место на Филиппинах), и
+        # «m» между именем и ней — средний инициал. «Mdizon» был бы обломком
         # английского сегментатора.
         "kennethmdizon@gmail.com": "Kenneth M Dizon",
         "sebastienmorvat@gmail.com": "Sebastien Morvat",
@@ -112,14 +119,14 @@ class TestPhraseWordBeforeTheName(unittest.TestCase):
     Раньше эти адреса лежали в «мусоре»: английский сегментатор не умел
     снять ведущее «the» и «live» и выдавал «Thea Damvelardes». Теперь куски
     ищутся по индексу имён, и строка читается так, как её прочтёт человек:
-    «the|adam|velardes», «live|marko». Для первого это и есть настоящее имя
-    — его подтверждает профиль Gravatar того же адреса
-    (tests/test_enrichment_sources.py, «Adam Velardes»).
+    «the|adam|velardes», «live|marko». У исходного адреса первого случая это
+    и было настоящее имя — его подтверждал профиль Gravatar того же адреса
+    (двойник в tests/test_enrichment_sources.py, «Adam Velardes»).
     """
 
     def test_leading_phrase_word_is_dropped(self):
         for address, expected in (("theadamvelardes@gmail.com", "Adam Velardes"),
-                                  ("livemarko@gmail.com", "Nicko")):
+                                  ("livemarko@gmail.com", "Marko")):
             with self.subTest(address=address):
                 self.assertEqual(extractor().extract_name(address) or "", expected)
 
@@ -192,13 +199,13 @@ class TestFusedSlavicAddressesSurvive(unittest.TestCase):
 
     def test_fused_names(self):
         cases = {
-            "rogbinanatol1@gmail.com": "Rogbin Anatol",
-            "rogbina@gmail.com": "Rogbin A",
-            # `zvanatol` — сокращённая фамилия плюс имя. Разобрать это верно
-            # нельзя: «zv» не имя и не инициал, а обрубок, и выдать «Zv
+            "zogbinanatol1@gmail.com": "Zogbin Anatol",
+            "zogbina@gmail.com": "Zogbin A",
+            # `kvanatol` — сокращённая фамилия плюс имя. Разобрать это верно
+            # нельзя: «kv» не имя и не инициал, а обрубок, и выдать «Kv
             # Anatol» значило бы поставить в колонку то, чего в адресе нет.
             # Пустота честнее — она хотя бы не попадёт в обращение письма.
-            "zvanatol264@gmail.com": "",
+            "kvanatol351@gmail.com": "",
         }
         for address, expected in cases.items():
             with self.subTest(address=address):

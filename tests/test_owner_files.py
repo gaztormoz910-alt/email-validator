@@ -39,7 +39,9 @@ EXPECTED = {
     "test.txt": {"lines": 10, "unique": 9},
 }
 
-# Что конкурент пометил Bad format в test_1
+# Что конкурент пометил Bad format в test_1 — по виду строк: короткое имя
+# Gmail и две строки с лишней точкой в конце. Две последние здесь —
+# выдуманные двойники: сами строки лежат в файле и проверяются вместе с ним.
 COMPETITOR_BAD = ("ca@gmail.com", "marcusvey1994@gmail.com.", "wenlifang.dev@gmail.com.")
 
 
@@ -91,12 +93,24 @@ class TestCounts(unittest.TestCase):
                            "выше было бы случайным")
 
     def test_counts_case_and_dots_are_collapsed(self):
-        """В файле есть EZDevBench и ezdevbench — это один ящик."""
-        keys = unique_of("test_1.txt")
-        self.assertEqual(
-            normalize_for_dedup("EZDevBench@gmail.com"),
-            normalize_for_dedup("ezdevbench@gmail.com"))
-        self.assertIn(normalize_for_dedup("ezdevbench@gmail.com"), keys)
+        """В файле есть один и тот же ящик в двух регистрах — это один ящик.
+
+        Пара ищется в самом файле, а не вписана сюда строкой: адрес из файла
+        владельца — чужой человек, и в коде теста ему не место. Проверка та
+        же: оба написания дают один ключ, и этот ключ есть в итоге дедупа.
+        """
+        cleaner = EmailCleaner()
+        keys = unique_of("test_1.txt", cleaner)
+        by_lower = {}
+        for raw in lines_of("test_1.txt"):
+            by_lower.setdefault(raw.lower(), set()).add(raw)
+        pairs = [sorted(group) for group in by_lower.values() if len(group) > 1]
+        self.assertTrue(pairs, "в test_1 нет ящика в двух регистрах — проверять нечего")
+        for group in pairs:
+            with self.subTest(group=len(group)):
+                variants = {normalize_for_dedup(cleaner.clean_email(raw)) for raw in group}
+                self.assertEqual(len(variants), 1, "написания одного ящика дали разные ключи")
+                self.assertIn(variants.pop(), keys)
 
 
 class TestVerdicts(unittest.TestCase):
@@ -130,7 +144,11 @@ class TestVerdicts(unittest.TestCase):
         self.assertTrue(reason, "нарушение без объяснения бесполезно пользователю")
 
     def test_verdicts_backtick_address_is_rescued(self):
-        """`kpierson@gmail.com конкурент считает живым (score 61), и он прав."""
+        """Адрес с обратной кавычкой конкурент считает живым (score 61), и он прав.
+
+        Здесь — выдуманный двойник `kpierson@gmail.com; сама строка лежит в
+        test_1.txt и проходит через конвейер в TestPipeline вместе с файлом.
+        """
         cleaned = EmailCleaner().clean_email("`kpierson@gmail.com")
         self.assertEqual(cleaned, "kpierson@gmail.com")
         self.assertTrue(validate_email_syntax(cleaned),
