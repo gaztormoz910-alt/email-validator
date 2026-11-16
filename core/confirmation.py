@@ -126,16 +126,17 @@ class AcceptanceMixin:
                 self._control_addrs[key] = address
         return address
 
-    def _mark_catchall(self, domain, reason):
+    def _mark_catchall(self, domain, reason, proxy=None):
         with self.catchall_lock:
             self.catchall_cache[domain] = True
         # У гигантов приём выдуманного — тарпитинг, а не свойство домена, и в
-        # долгую память он не пишется (см. core/catchall.py).
+        # долгую память он не пишется (см. core/catchall.py). Прочие пишутся
+        # туда только с надёжного выхода — решает _remember_catchall по proxy.
         if not self._is_never_catchall(domain):
-            self._remember_catchall(domain, True)
+            self._remember_catchall(domain, True, proxy=proxy)
         return {"status": "catchall", "reason": reason}
 
-    def _control_in_session(self, server, domain, result, via_vrfy=False):
+    def _control_in_session(self, server, domain, result, via_vrfy=False, proxy=None):
         """Контрольный вопрос про выдуманный адрес в ТОЙ ЖЕ сессии.
 
         Спрашивается той же командой, которой получен ответ про настоящий
@@ -153,7 +154,8 @@ class AcceptanceMixin:
             code = None                   # «не берусь проверить» — не ответ
         if code is not None and 200 <= code < 300:
             caught = self._mark_catchall(
-                domain, "Catch-All: сервер принял и выдуманный адрес в той же сессии")
+                domain, "Catch-All: сервер принял и выдуманный адрес в той же сессии",
+                proxy=proxy)
             result.update(caught)
             return
         verdict = (classify_smtp_response(code, message) if code is not None
@@ -239,7 +241,8 @@ class AcceptanceMixin:
         status = answer.get("status")
         if status == "valid":
             result.update(self._mark_catchall(
-                domain, "Catch-All: сервер принял выдуманный адрес отдельной сессией"))
+                domain, "Catch-All: сервер принял выдуманный адрес отдельной сессией",
+                proxy=proxy))
             return False
         if rejects_fake(answer):
             with self.catchall_lock:

@@ -69,8 +69,9 @@ class CatchAllMixin:
             f"{_generate_random_local('short')}@{domain}",
             f"{_generate_random_local('uuid')}@{domain}",
         ]
-        results = self._probe_recipients(fakes, mx_record,
-                                         proxy=self._probe_proxy_for(domain))
+        # Выход пробы запоминаем: от него зависит, переживёт ли вывод прогон.
+        probe_proxy = self._probe_proxy_for(domain)
+        results = self._probe_recipients(fakes, mx_record, proxy=probe_proxy)
 
         # Хоть ОДИН принятый выдуманный адрес — уже catch-all. Раньше нужны
         # были все три, и сервер, принимающий любой адрес, но отвечающий на
@@ -81,7 +82,7 @@ class CatchAllMixin:
         if any((r or {}).get("status") == "valid" for r in results):
             with self.catchall_lock:
                 self.catchall_cache[domain] = True
-            self._remember_catchall(domain, True)
+            self._remember_catchall(domain, True, proxy=probe_proxy)
             self._note_mx_catchall(mx_record, domain)
             return True
 
@@ -130,7 +131,7 @@ class CatchAllMixin:
 
         with self.catchall_lock:
             self.catchall_cache[domain] = True
-        self._remember_catchall(domain, True)
+        self._remember_catchall(domain, True, proxy=probe_proxy)
         self._note_mx_catchall(mx_record, domain)
         return True
     def _remembered_not_catchall(self):
@@ -176,21 +177,20 @@ class CatchAllMixin:
     # нём не знала — и записывала в себя ровно то, что эта ветка через
     # несколько строк переименовывала в тарпитинг.
     #
-    # Яндекс — не только yandex.ru. yandex.com, yandex.by, yandex.kz и
-    # yandex.com.tr ходят на тот же сервер mx.yandex.ru (проверено 15.11.2026),
-    # то есть это тот же почтовик с теми же правилами. Пока их здесь не было,
-    # живой прогон с грязного выхода (11 из 14 прокси в чёрных списках)
-    # записал yandex.com в долгую память как «принимает любой адрес» — на
-    # месяц, хотя в ответах серверов из базы владельца yandex.com шесть раз
-    # честно отвечал «нет такого ящика». Дальше КАЖДЫЙ его адрес уходил бы в
-    # «не проверяется», не доходя до сервера. yandex.ua и narod.ru сюда не
-    # внесены: у первого MX нет, у второго свои серверы — доказательства нет.
-    # protonmail.com тоже нет: в базе он отвечал «нет такого», а в живом
-    # прогоне принял выдуманный адрес — противоречие, и без чистого выхода его
-    # не разрешить; ошибка в эту сторону дала бы ложные «Годен».
+    # ПОПАСТЬ СЮДА ДОРОГО. У домена из списка «Годен» берётся без контрольной
+    # пробы на каждом адресе — она идёт лишь на каждом двадцать пятом. 15.11.2026
+    # сюда были внесены yandex.com, yandex.by, yandex.kz, yandex.com.tr (тот
+    # же сервер mx.yandex.ru, что у yandex.ru), и второй живой прогон с
+    # грязных выходов тут же дал ЛОЖНЫЙ «Годен»: адрес yandex.com, на который
+    # сервер прежде отвечал «нет такого ящика», получил 250 и прошёл. Яндекс с
+    # подозрительного IP, как и gmail, отвечает «да» на всё, а у gmail обман
+    # ловит канарейка на сотнях адресов — у редкого в базе домена канарейке
+    # ловить не на чем. Внесение откачено. Беда, ради которой его делали
+    # (грязный выход записал yandex.com в долгую память как catch-all на
+    # месяц), закрыта иначе — см. _remember_catchall: долгую память пишет
+    # только надёжный выход.
     NEVER_CATCHALL = frozenset({
         "gmail.com", "googlemail.com", "yandex.ru", "ya.ru",
-        "yandex.com", "yandex.by", "yandex.kz", "yandex.com.tr",
         "icloud.com", "me.com", "mac.com",
     })
     def _is_never_catchall(self, domain):
@@ -199,10 +199,39 @@ class CatchAllMixin:
         low = str(domain or "").lower()
         return (low in self.NEVER_CATCHALL or low in YAHOO_DOMAINS
                 or low in MICROSOFT_DOMAINS or low in AOL_DOMAINS)
-    def _remember_catchall(self, domain, is_catchall):
+    def _exit_trustworthy(self, proxy):
+        """Можно ли верить выходу настолько, чтобы записать вывод на месяц.
+
+        Прямое соединение (proxy пуст) — свой IP владельца, ему верим. Прокси —
+        только с подтверждённым обратным DNS и вне «грязных» (чёрные списки,
+        отказ Microsoft, имя PTR выдаёт прокси). Не профилирован — не знаем,
+        значит не верим. Грязному выходу почтовики отвечают «да» на что
+        угодно, и это его свойство, а не домена.
+        """
+        if not proxy:
+            return True
+        try:
+            with self._proxy_score_lock:
+                if not getattr(self, "_profiled", False):
+                    return False
+                return (proxy in self._ptr_proxies
+                        and proxy not in self._dirty_proxies)
+        except Exception:
+            return False
+    def _remember_catchall(self, domain, is_catchall, proxy=None):
         """Кладёт выясненный ответ в память между запусками.
 
         Тихо: сбой памяти не имеет права влиять на проверку почты.
+
+        «catch-all» пишется на месяц ТОЛЬКО с надёжного выхода
+        (_exit_trustworthy). Живой прогон 15.11.2026 с бесплатных прокси (11
+        из 14 в чёрных списках, обратный DNS у двух) записал так yandex.com и
+        protonmail.com, хотя оба прежде честно отвечали «нет такого ящика»: с
+        грязного IP они принимали всё. Дальше КАЖДЫЙ их адрес месяц уходил бы
+        в «не проверяется», не доходя до сервера, — даже с чистым прокси. Вывод
+        грязного выхода по-прежнему действует в ЭТОМ прогоне (catchall_cache у
+        вызывающего), так что «Годен» с него не появится; не переживает он
+        только сам прогон. proxy=None — прямое соединение.
 
         У гигантов catch-all не бывает: приняв выдуманный адрес, gmail.com не
         стал принимать всё подряд — он перестал отвечать честно, потому что с
@@ -218,6 +247,8 @@ class CatchAllMixin:
         if self.memory is None:
             return
         if is_catchall and self._is_never_catchall(domain):
+            return
+        if is_catchall and not self._exit_trustworthy(proxy):
             return
         try:
             self.memory.catchall_put(domain, is_catchall)
