@@ -91,9 +91,8 @@ def test_note_key_value_is_not_a_name(tmp_path):
 
 @pytest.mark.parametrize("text, email, expected", [
     (_rows('Gregorio "Greg" Ruiz,u{i}@corp.test', 3), "u0@corp.test", 'Gregorio "Greg" Ruiz'),
-    # Формы «"Фамилия, Имя" <адрес>» здесь нет намеренно: загрузчик режет
-    # строку по запятой внутри кавычек и отдаёт одну фамилию — так было и до правки
-    # (.unlazy/stage3/loader_parity.py); это отдельный долг, а не контроль.
+    # Форма «"Фамилия, Имя" <адрес>» проверяется в tests/test_stage5.py:
+    # до 16.11.2026 загрузчик резал её по запятой внутри кавычек.
     (_rows("O'Brien,Sean,u{i}@corp.test", 3), "u0@corp.test", "O'Brien Sean"),
 ])
 def test_control_names_inside_quotes_are_untouched(tmp_path, text, email, expected):

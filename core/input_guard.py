@@ -314,6 +314,19 @@ def _is_plain_address(value):
     return "*" not in value and "%" not in value and looks_like_email(value)
 
 
+def _address_not_pattern(value):
+    """Адрес, у которого в имени ящика нет звёздочки поиска.
+
+    `"*@gmail.com":"CEO"` — шаблон запроса, записанный через двоеточие. Запасной
+    разбор ниже дробил его по «:» и спрашивал looks_like_email, которой
+    звёздочка законна (atext по RFC 5322), — и строка уезжала в адреса (этап 3
+    плана 14.11.2026). Знак «%» тут не трогается: `user%host@relay` — старая
+    законная маршрутизация, а не подстановка поисковика.
+    """
+    value = str(value or "").strip().strip("<>\"'")
+    return "*" not in value.partition("@")[0] and looks_like_email(value)
+
+
 def looks_like_dork(value):
     """Похожа ли строка на поисковый запрос."""
     value = str(value or "").strip()
@@ -370,7 +383,7 @@ def detect_kind(line):
         return KIND_EMAIL
     if looks_like_proxy(line):
         return KIND_PROXY
-    if looks_like_email(line):
+    if _address_not_pattern(line):
         return KIND_EMAIL
 
     # `Ivan Petrov <ivan@gmail.com>` — стандартная форма выгрузок почтовых
@@ -381,7 +394,7 @@ def detect_kind(line):
     # принимает окно, и тем, что умеет движок, — это отказ владельцу в
     # данных, которые софт на самом деле разбирает.
     в_скобках = re.search(r"<([^<>]+)>", line)
-    if в_скобках and looks_like_email(в_скобках.group(1).strip()):
+    if в_скобках and _address_not_pattern(в_скобках.group(1).strip()):
         return KIND_EMAIL
 
     # База с дополнительными полями: ivan@gmail.com;Иван;Петров;США
@@ -393,14 +406,14 @@ def detect_kind(line):
                 # бывает, и поле дробится по нему так же, как вся строка ниже
                 # (рецензия 5-го круга правки E5, 06.11.2026: без этого окно
                 # отвергало такие списки, которые принимало на b68b9a8).
-                if any(looks_like_email(кусок.strip()) for кусок in part.split(":")):
+                if any(_address_not_pattern(кусок.strip()) for кусок in part.split(":")):
                     return KIND_EMAIL
     # Разделитель-двоеточие разбирается отдельно: у прокси он же служит
     # разделителем host:port, и до сюда доходят только строки, прокси не
     # являющиеся.
     if ":" in line:
         for part in line.split(":"):
-            if looks_like_email(part.strip()):
+            if _address_not_pattern(part.strip()):
                 return KIND_EMAIL
 
     return KIND_UNKNOWN

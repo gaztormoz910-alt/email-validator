@@ -1021,6 +1021,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        # Значок WebView2 запрашивает сам, без токена, — и получал 403 (этап 3
+        # плана 14.11). Он статичный и лежит не в ui/web: отдаётся отдельно.
+        if path == "/favicon.ico":
+            with open(resource_path("assets", "MailFact.ico"), "rb") as handle:
+                return self._send(200, handle.read(), "image/x-icon")
         if path not in self.PUBLIC and not self._authorised():
             self._send(403, json.dumps({"error": "forbidden"}))
             return

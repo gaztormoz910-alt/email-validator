@@ -465,6 +465,21 @@ class EnrichmentMixin:
         # Провайдера уточняем теперь, когда известна MX-запись: по ней видно,
         # сидит ли свой домен на Google Workspace или Microsoft 365.
         prov_name, dom_type = classify_domain(email, mx_host)
+        # MX под именем самой компании — спросить его сертификат (решение 12
+        # владельца, core/mx_certificate.py). Только когда сессия уже видела
+        # STARTTLS через тот же выход: значит, порт 25 этого MX отсюда достижим,
+        # и лишнее соединение не уйдёт в тайм-аут. Вердикт отсюда не меняется.
+        if (prov_name == "Corporate" and res.get("has_starttls") is True
+                and mx_host and mx_host != "N/A"):
+            try:
+                from core.mx_certificate import provider_by_certificate
+                by_cert = provider_by_certificate(self.network, mx_host,
+                                                  proxy=res.get("proxy"))
+            except Exception:
+                by_cert = None
+            if by_cert:
+                prov_name = by_cert
+                data["provider_basis"] = "сертификат MX"
         data["provider_name"] = prov_name
         data["domain_type"] = dom_type
 
