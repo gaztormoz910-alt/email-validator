@@ -35,6 +35,9 @@ def _rows(fmt, n=3):
     ('Brenner, Olav <ob{i}@corp.test>', "Olav Brenner"),
     # Хвост через запятую — часть подписи, а не перестановка.
     ('"Lund Haugen, Jr" <ob{i}@corp.test>', "Lund Haugen, Jr"),
+    # Без кавычек и без согласия базы — обе части и порядок как в файле
+    # (до 16.11.2026 вторая часть терялась и здесь).
+    ('Olav, Brenner <ob{i}@corp.test>', "Olav Brenner"),
 ])
 def test_comma_display_name_keeps_both_parts(tmp_path, fmt, expected):
     assert _load(tmp_path, _rows(fmt))["ob0@corp.test"] == expected
@@ -44,15 +47,14 @@ def test_comma_display_name_keeps_both_parts(tmp_path, fmt, expected):
     # Прежнее поведение, которое верно и должно остаться.
     ('"Olav Brenner" <ob{i}@corp.test>', "Olav Brenner"),
     ('Olav Brenner <ob{i}@corp.test>', "Olav Brenner"),
-    # Без кавычек и без согласия базы — порядок как в файле.
-    ('Olav, Brenner <ob{i}@corp.test>', "Olav Brenner"),
+    # Колонки CSV по-прежнему склеиваются в порядке файла.
     ("Brenner,Olav,ob{i}@corp.test", "Brenner Olav"),
 ])
 def test_control_display_names_without_reordering(tmp_path, fmt, expected):
     assert _load(tmp_path, _rows(fmt))["ob0@corp.test"] == expected
 
 
-def test_control_comma_form_with_bad_address_is_not_invented(tmp_path):
+def test_comma_form_with_bad_address_is_not_invented(tmp_path):
     from core.streamer import _подпись_с_запятой
 
     assert _подпись_с_запятой('"Brenner, Olav" <not an address>') is None
@@ -110,7 +112,7 @@ def test_control_page_still_needs_token(bridge_port, path):
     '"*@gmail.com":"CEO"',
     '"*@gmail.com",CEO',
     'Moscow:"*@gmail.com"',
-    '*@gmail.com',
+    '*@corp.test',
 ])
 def test_wildcard_pattern_is_not_an_address_list(line):
     from core.input_guard import KIND_EMAIL, check_text

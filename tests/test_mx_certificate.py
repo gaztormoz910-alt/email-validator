@@ -195,7 +195,7 @@ def test_server_without_starttls_gives_no_provider(mx):
 
 
 @pytest.mark.parametrize("mx", [("google",)], indirect=True)
-def test_one_connection_per_host(mx):
+def test_single_connection_per_mx_host(mx):
     net = _Network()
     context = _context_trusting_test_ca()
     for _ in range(5):
