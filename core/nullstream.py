@@ -139,12 +139,38 @@ def _не_ронять_на_кодировке(поток):
     зато программа продолжает работать. Обратное — потеря всей работы ради
     точности строки в журнале.
     """
+    # Кодировка, не знающая кириллицы (cp1252 у вывода в файл или канал), —
+    # переводится в UTF-8: замена на «?» не роняла программу, но делала
+    # каждое русское сообщение нечитаемым («????? ??????», 20.11.2026).
+    # Окно консоли сюда не попадает: у него Python сам пишет в UTF-8.
     try:
-        поток.reconfigure(errors="replace")
+        "Ёё".encode(поток.encoding or "ascii")
+        кодировка = None
+    except (LookupError, UnicodeError, AttributeError, TypeError):
+        кодировка = "utf-8"
+    try:
+        if кодировка:
+            поток.reconfigure(encoding=кодировка, errors="replace")
+        else:
+            поток.reconfigure(errors="replace")
     except Exception:
         # Поток может не уметь reconfigure (не TextIOWrapper) или быть уже
         # отсоединённым. Это не повод отказываться от остального.
         pass
+
+
+def readable_output():
+    """Потоки вывода CLI: не падать на кириллице и печатать её читаемо.
+
+    У окна это делает ensure_streams, а CLI без него падал первой же русской
+    строкой, если вывод шёл в файл или канал на Windows с некириллической
+    кодовой страницей: `cli.py validate --help` -> UnicodeEncodeError
+    (20.11.2026). Потоков нет (pythonw) — делать нечего.
+    """
+    for имя in ("stdout", "stderr"):
+        поток = getattr(sys, имя, None)
+        if поток is not None:
+            _не_ронять_на_кодировке(поток)
 
 
 def ensure_streams(куда=None):

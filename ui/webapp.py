@@ -41,7 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from core.parser_pipeline import SEARCH_ENGINES
-from core.winnoise import (install_webview_noise_filter,
+from core.winnoise import (install_webview_noise_filter, отметить_закрытие,
                            quiet_chromium, WebViewReaper)
 from core.crashlog import (crash_log_path, log_crash,  # noqa: F401
                            recent_crashes)
@@ -464,8 +464,10 @@ class ValidatorApi(ResetMixin, SourcesMixin, ParserMixin, ActivityBridgeMixin):
             #
             # Прежнее окно читало источники через StreamLoader и подавало
             # строки; при переезде на веб-стек этот шаг потерялся. Читаем
-            # лениво: список прокси бывает на миллионы строк.
-            proxies=StreamLoader(list(self.proxy_sources)).stream_lines(),
+            # лениво: прокси бывает миллионы. Без источников — None: пустой генератор
+            # истинен, и прямой прогон с согласием стопорился на «0 из 0» (20.11.2026).
+            proxies=(StreamLoader(list(self.proxy_sources)).stream_lines()
+                     if self.proxy_sources else None),
             )
 
     def pause(self, payload=None):
@@ -1425,6 +1427,7 @@ def run(selftest_close=None):
     # печатает как раньше: фильтр трогает ровно это сообщение.
     install_webview_noise_filter(
         on_hint=lambda текст: api._on_log("[WARN] " + текст, "trap"))
+    window.events.closing += отметить_закрытие  # E_ABORT при закрытии — не поломка
     отметить("фильтр шума движка")
 
     for текст, тег in api.START_LINES:
@@ -1468,13 +1471,10 @@ def run(selftest_close=None):
         # create_window: окно создаётся мгновенно, а показывается позже, и
         # владелец ждёт именно показа.
         def _замер_до_показа():
+            from core.timing import дождаться_окна
+            провал = дождаться_окна(window.events)
             try:
-                window.events.shown.wait(180)
-            except Exception:
-                pass
-            отметить("окно показалось")
-            try:
-                записать(os.environ.get("MAILFACT_TIMING_FILE", "timing.log"))
+                записать(os.environ.get("MAILFACT_TIMING_FILE", "timing.log"), провал)
             except Exception:
                 pass
             try:

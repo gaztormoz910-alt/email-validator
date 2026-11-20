@@ -27,6 +27,7 @@ script», и поиск по 'MailFact*' его просто не найдёт, 
 import argparse
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import time
@@ -41,10 +42,36 @@ except Exception:
 sys.path.insert(0, КОРЕНЬ)
 
 ИМЯ = "MailFact"
-ВЛАДЕЛЕЦ = os.environ.get("GITHUB_REPOSITORY_OWNER", "validator")
-РЕПОЗИТОРИЙ = os.environ.get("GITHUB_REPOSITORY_NAME", "email-validator")
+
+
+def _репозиторий():
+    """(владелец, имя) репозитория выпусков.
+
+    Имя аккаунта в файлы не пишется (решение 31.10.2026, ef37f1f), а прежняя
+    заглушка «validator» вела на чужой адрес: ссылка давала 404, и проверка
+    установщика падала, не скачав ни байта (20.11.2026). Порядок: переменные
+    окружения (CI их задаёт), затем адрес origin самого клона — тот же
+    репозиторий, куда уходит метка выпуска.
+    """
+    владелец = os.environ.get("GITHUB_REPOSITORY_OWNER", "")
+    имя = os.environ.get("GITHUB_REPOSITORY_NAME", "")
+    if владелец and имя:
+        return владелец, имя
+    try:
+        адрес = subprocess.run(["git", "remote", "get-url", "origin"], cwd=КОРЕНЬ,
+                               capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        адрес = ""
+    # git@host:владелец/имя.git и https://github.com/владелец/имя(.git)
+    найдено = re.search(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?/?$", адрес)
+    if найдено:
+        return владелец or найдено.group(1), имя or найдено.group(2)
+    return None, None
+
+
+ВЛАДЕЛЕЦ, РЕПОЗИТОРИЙ = _репозиторий()
 ССЫЛКА = ("https://github.com/%s/%s/releases/latest/download/%s-setup.exe"
-          % (ВЛАДЕЛЕЦ, РЕПОЗИТОРИЙ, ИМЯ))
+          % (ВЛАДЕЛЕЦ, РЕПОЗИТОРИЙ, ИМЯ)) if ВЛАДЕЛЕЦ else ""
 
 # DPI объявляем ДО любых метрик. См. «ПРО DPI» в шапке.
 if sys.platform == "win32":
@@ -217,7 +244,8 @@ def запустить_и_посмотреть(exe, ждать=45):
     процесс = subprocess.Popen([exe], cwd=os.path.dirname(exe))
     try:
         hwnd = None
-        предел = time.time() + ждать
+        начало = time.time()
+        предел = начало + ждать
         while time.time() < предел:
             if процесс.poll() is not None:
                 шаг(False, "программа завершилась сама, код %s"
@@ -229,7 +257,10 @@ def запустить_и_посмотреть(exe, ждать=45):
                 break
             time.sleep(0.5)
 
-        if not шаг(hwnd is not None, "окно процесса найдено за %d с" % ждать):
+        # Время — настоящее, а не предел ожидания: прежде печаталось «за 45 с»
+        # при любом запуске, и это читалось как медленный старт (20.11.2026).
+        if not шаг(hwnd is not None, ("окно процесса найдено за %.1f с" % (time.time() - начало))
+                   if hwnd is not None else "окна процесса нет за %d с" % ждать):
             return
 
         u = ctypes.windll.user32
@@ -334,6 +365,10 @@ def main():
         врем = os.path.join(корень, "check")
         os.makedirs(врем, exist_ok=True)
         установщик = args.setup
+        if not установщик and not ССЫЛКА:
+            print("ОШИБКА: не знаю репозитория выпусков — нет origin и нет "
+                  "GITHUB_REPOSITORY_OWNER/GITHUB_REPOSITORY_NAME")
+            return 1
         if not установщик:
             установщик = скачать(ССЫЛКА, os.path.join(врем, "setup.exe"))
         мб = os.path.getsize(установщик) / (1024 * 1024)

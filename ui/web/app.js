@@ -1365,6 +1365,7 @@ function openPaste(kind) {
   area.placeholder = spec.placeholder;
   setText($("#pasteError"), "");
   show($("#pasteError"), false);
+  pasteModal.returnValue = "";
   pasteModal.showModal();
 }
 
@@ -1375,8 +1376,10 @@ $("#pasteProxies").addEventListener("click", () => openPaste("proxies"));
    должно ОСТАТЬСЯ открытым с набранным текстом. Закрыть его и показать
    всплывашку значит заставить владельца искать и вставлять список заново. */
 pasteModal.querySelector("form").addEventListener("submit", async (event) => {
-  if (pasteModal.returnValue === "cancel" ||
-      (event.submitter && event.submitter.value === "cancel")) return;
+  // Решает ТОЛЬКО нажатая кнопка. returnValue у <dialog> переживает закрытие:
+  // после одной «Отмены» он оставался "cancel", и следующее «Добавить»
+  // закрывало окно, не добавив ничего и ничего не сказав (20.11.2026).
+  if (event.submitter && event.submitter.value === "cancel") return;
 
   event.preventDefault();
   const text = $("#pasteArea").value;
@@ -1708,7 +1711,17 @@ let parserMissed = 0;
 let parserSkip = 0;
 let lastParserOk = Date.now();
 
+/* Тот же «один опрос в полёте», что у tick. Без него опрос раз в 500 мс
+   копился, пока мост отвечал медленнее (идёт проверка), и браузер упирался
+   в предел запросов: ERR_INSUFFICIENT_RESOURCES в консоли (20.11.2026). */
+let parserBusy = false;
 async function parserTick() {
+  if (parserBusy) return;
+  parserBusy = true;
+  try { await parserTickOnce(); } finally { parserBusy = false; }
+}
+
+async function parserTickOnce() {
   if (halted) return;
   if (parserSkip > 0) { parserSkip -= 1; return; }
   let s;

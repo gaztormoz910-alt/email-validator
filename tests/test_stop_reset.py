@@ -546,8 +546,10 @@ def test_poll_answer_that_outlived_the_click_is_not_drawn(tmp_path):
     ответ прежнего опроса с «идёт» приходил в этот промежуток и заново
     включал бегущую полосу. Оба экрана: проверка и сбор адресов.
     """
+    # Проверяется тело опроса: у обоих экранов оно в *Once, а обёртка вокруг
+    # держит «один опрос в полёте» (у сборщика — с 20.11.2026).
     for заголовок, имя in (("async function tickOnce()", "tickOnce"),
-                           ("async function parserTick()", "parserTick")):
+                           ("async function parserTickOnce()", "parserTickOnce")):
         итог = _проба_опроса(tmp_path, заголовок, имя)
         assert итог["control"] == "НАРИСОВАНО", имя      # проба действительно видит отрисовку
         assert итог["lateAnswer"] == "тихо", имя

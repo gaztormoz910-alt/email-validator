@@ -731,6 +731,8 @@ def build_parser():
 
 
 def main(argv=None):
+    from core.nullstream import readable_output
+    readable_output()
     args = build_parser().parse_args(argv)
     return args.func(args)
 
