@@ -1292,6 +1292,7 @@ class ValidationPipeline(RunControlMixin, PipelineSetupMixin, EnrichmentMixin,
                     "Их «Годен» ничего не доказывал.", "info")
             self._forget_cached(proven, "catch-all")
         try:   # отзыв ПО ВЫХОДУ (решение владельца 20.11.2026): см. _spared_valid
+            self._final_canaries(trapped)
             лжецы = set(self.network.tarpit_pairs()) | self.canary.lying_pairs()
         except Exception:
             лжецы = None

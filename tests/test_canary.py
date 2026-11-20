@@ -185,8 +185,10 @@ class _Сеть(object):
         return "9.9.9.9"
 
     def stealth_smtp_ping(self, email, mx, **kw):
+        # Как настоящая сеть: в ответе — прокси, через который проба прошла
+        # (core/network.py кладёт его в result["proxy"]).
         self.спрошено.append(email)
-        return {"status": self.ответ, "reason": "тест"}
+        return {"status": self.ответ, "reason": "тест", "proxy": kw.get("prefer_exit_of")}
 
 
 def _конвейер(сеть):

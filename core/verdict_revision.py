@@ -35,9 +35,10 @@ class VerdictRevisionMixin:
     def _fly_canary(self, email, res):
         """Пускает канарейку по домену только что подтверждённого адреса.
 
-        Тихо и не чаще одного раза на пару «выход + домен» за прогон: лишняя
-        сессия к чужому почтовику — лишний повод попасться ему на глаза,
-        ровно за тем ответом, ради которого мы и пришли.
+        Первая проба на пару «выход + домен» — на первом «Годен», дальше —
+        через каждые CanaryWatch.REPEAT_EVERY новых: лишняя сессия к чужому
+        почтовику — лишний повод попасться ему на глаза, но одной пробы мало,
+        защита от перебора включается посреди прогона (core/canary.py).
         """
         watch = getattr(self, "canary", None)
         if watch is None or self.network is None:
@@ -47,29 +48,47 @@ class VerdictRevisionMixin:
         except Exception:
             return False
         proxy = res.get("proxy")
-        try:
-            exit_ip = self.network.exit_ip_of(proxy) if proxy else None
-        except Exception:
-            exit_ip = proxy
-        exit_ip = exit_ip or proxy
-
-        watch.note_valid(exit_ip, domain)
-        if not watch.should_probe(exit_ip, domain):
-            return False
-
+        exit_ip = self._exit_key(proxy)[0]
         mx = res.get("mx_records") or ([res["mx_record"]]
                                        if res.get("mx_record") else [])
-        if not mx:
+        if mx:
+            # Маршрут пары — для завершающей пробы в конце прогона.
+            self.__dict__.setdefault("_canary_routes", {})[(exit_ip, domain)] = (proxy, list(mx))
+        watch.note_valid(exit_ip, domain)
+        if not watch.should_probe(exit_ip, domain) or not mx:
             return False
+        return self._probe_pair(exit_ip, domain, proxy, mx)
+
+    def _probe_pair(self, exit_ip, domain, proxy, mx):
+        """Одна канарейка на пару. True — выход уличён.
+
+        Ответ засчитывается ТОЛЬКО если проба реально прошла через этот выход.
+        prefer_exit_of — просьба, а не гарантия: выбывший прокси сеть меняет на
+        другой, и ответ ЧУЖОГО выхода прежде записывался на этот. Честный чужой
+        выход так «ручался» за непроверенный — а при отзыве по выходу ещё и
+        сохранял его ложные «Годен».
+        """
+        watch = self.canary
+        одна_сессия = getattr(self.network, "_do_single_ping", None)
         try:
-            ответ = self.network.stealth_smtp_ping(
-                canary_address(domain), list(mx), prefer_exit_of=proxy)
+            if callable(одна_сессия):
+                # ОДНА сессия через ровно этот прокси: без перебора выходов и
+                # без сверки приговора со вторым MX. Сверка шла другим выходом,
+                # и на домене, где врёт сосед, честный «нет такого ящика»
+                # превращался в «выходы спорят» без указания выхода — честный
+                # выход не мог себя доказать (живой прогон 21.11.2026).
+                ответ = одна_сессия(canary_address(domain), list(mx)[0], proxy=proxy)
+                ответ = dict(ответ or {}, proxy=proxy)
+            else:
+                ответ = self.network.stealth_smtp_ping(
+                    canary_address(domain), list(mx), prefer_exit_of=proxy)
             статус = ответ.get("status")
         except Exception:
             # Сорвавшаяся проба — это НЕ улика. Молчим: обвинить выход по
             # своему же сбою значит выбросить живые адреса.
             return False
-
+        if self._exit_key(ответ.get("proxy"))[0] != exit_ip:
+            return False
         if not watch.record(exit_ip, domain, статус):
             return False
 
@@ -79,6 +98,38 @@ class VerdictRevisionMixin:
             "этого выхода НЕДОКАЗУЕМЫ — виноват прокси, не база."
             % (domain, exit_ip or "прямого соединения"), "dead")
         return True
+
+    def _final_canaries(self, trapped):
+        """Завершающая проба на паре, у которой «Годен» есть ПОСЛЕ последней пробы.
+
+        Только на разоблачённых доменах (тарпитинг или канарейка поймали хоть
+        один выход): только там отзыв по выходу решает, что уцелеет, и
+        непокрытый хвост иначе ушёл бы в «Неизвестно» целиком. «Стоп» — ни
+        одной сессии.
+        """
+        watch = getattr(self, "canary", None)
+        if watch is None or self.network is None or self.network.aborted():
+            return 0
+        домены = set(trapped or []) | set(watch.compromised_domains())
+        пущено = 0
+        for (exit_ip, domain), (proxy, mx) in list(self.__dict__.get("_canary_routes", {}).items()):
+            if domain not in домены or self.network.aborted():
+                continue
+            if watch.valid_count(exit_ip, domain) <= watch.honest_upto(exit_ip, domain):
+                continue
+            if watch.is_compromised(exit_ip, domain):
+                continue
+            # Занять пробу на нынешнем номере, чтобы она ручалась за весь хвост.
+            with watch._lock:
+                watch._probed_at[watch._пара(exit_ip, domain)] = watch._valid.get(
+                    watch._пара(exit_ip, domain), 0)
+            self._probe_pair(exit_ip, domain, proxy, mx)
+            пущено += 1
+        if пущено:
+            self.callbacks['on_log'](
+                "[INFO] Завершающих канареек: %d — по выходам, у которых были «Годен» "
+                "после последней пробы." % пущено, "info")
+        return пущено
     def _split_catchall_from_tarpit(self, proven, trapped):
         """Делит «принял выдуманный адрес» на настоящий catch-all и тарпитинг.
 
@@ -165,9 +216,21 @@ class VerdictRevisionMixin:
         return (str(ip).lower(), True) if ip else (str(proxy).lower(), False)
 
     def _note_valid_exit(self, email, res):
-        """Запомнить, через какой выход получен «Годен» этого адреса."""
+        """Запомнить выход «Годен» этого адреса и его номер на паре.
+
+        Номер — сколько Valid насчитано на паре сразу после этого; при гонке
+        потоков он может оказаться больше настоящего, и это ошибка в строгую
+        сторону: для сохранения нужна честная проба не раньше этого номера.
+        """
         выходы = self.__dict__.setdefault("_valid_exits", {})
-        выходы[str(email).strip().lower()] = self._exit_key(res.get("proxy"))
+        key, known = self._exit_key(res.get("proxy"))
+        адрес = str(email).strip().lower()
+        watch = getattr(self, "canary", None)
+        try:
+            номер = watch.valid_count(key, адрес.rsplit("@", 1)[-1]) if watch else 0
+        except Exception:
+            номер = 0
+        выходы[адрес] = (key, known, номер)
 
     def _spared_valid(self, domains, liars):
         """Адреса этих доменов, чей «Годен» переживает разоблачение домена.
@@ -179,19 +242,22 @@ class VerdictRevisionMixin:
         40, части с пойманным — 0–2.
 
         Сохраняется строго меньшее: выход известен, на этом домене в этом
-        прогоне ПРОВЕРЕН канарейкой (отверг выдуманный адрес) и не пойман ни
-        канарейкой, ни тарпитингом. Всё остальное — неизвестный выход,
-        непроверенный выход, строка из кэша — пересматривается, как раньше.
+        прогоне ПРОВЕРЕН канарейкой (отверг выдуманный адрес) ПОСЛЕ этого
+        «Годен» — номер честной пробы не меньше номера «Годен» на паре — и не
+        пойман ни канарейкой, ни тарпитингом. Всё остальное — неизвестный выход,
+        непроверенный выход, «Годен» после последней честной пробы, строка из
+        кэша — пересматривается, как раньше.
         """
         watch = getattr(self, "canary", None)
-        if watch is None or not hasattr(watch, "vouched"):
+        if watch is None or not hasattr(watch, "honest_upto"):
             return set()
         wanted = {str(d).strip().lower().lstrip("@") for d in domains or []}
         spare = set()
-        for email, (key, known) in list(self.__dict__.get("_valid_exits", {}).items()):
+        for email, (key, known, номер) in list(self.__dict__.get("_valid_exits", {}).items()):
             domain = email.rsplit("@", 1)[-1]
             if (domain in wanted and known and (key, domain) not in liars
-                    and watch.vouched(key, domain)):
+                    and watch.vouched(key, domain)
+                    and watch.honest_upto(key, domain) >= номер):
                 spare.add(email)
         return spare
 

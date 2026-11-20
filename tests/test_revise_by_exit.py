@@ -93,8 +93,13 @@ def test_without_canary_nothing_is_spared():
 def test_vouched_needs_a_finished_honest_probe():
     w = CanaryWatch()
     assert not w.vouched("203.0.113.1", "mailhost.test")          # не проверен
-    w.record("203.0.113.1", "mailhost.test", "unknown")
-    assert w.vouched("203.0.113.1", "mailhost.test")              # проверен, честен
+    # Таймаут или «не проверено» — проба не удалась: за выход не ручается
+    # (до 21.11.2026 ручался, и при отзыве по выходу это сохраняло «Годен»).
+    for inconclusive in ("unknown", "greylisted", "", None):
+        w.record("203.0.113.1", "mailhost.test", inconclusive)
+        assert not w.vouched("203.0.113.1", "mailhost.test"), inconclusive
+    w.record("203.0.113.1", "mailhost.test", "invalid")
+    assert w.vouched("203.0.113.1", "mailhost.test")              # отверг выдуманный — честен
     w.record("203.0.113.2", "mailhost.test", "catchall")
     assert not w.vouched("203.0.113.2", "mailhost.test")          # врёт
 
