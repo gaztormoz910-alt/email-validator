@@ -211,8 +211,12 @@ class PipelineSetupMixin:
                 outlook_ok = int(outlook.get("ok", 0))
 
                 if yahoo_ok:
+                    # Годность — прямой ответ Yahoo на пробе, а не PTR: при
+                    # «с PTR — 0» строка «через 8 прокси с PTR» была ложью
+                    # (живой прогон 20.11.2026).
                     self.callbacks['on_log'](
-                        f"[INFO] Yahoo/AOL пойдут через {yahoo_ok} прокси с PTR.", "info")
+                        f"[INFO] Yahoo/AOL пойдут через {yahoo_ok} прокси, которые "
+                        "Yahoo пустил на пробе.", "info")
                 elif ptr_n:
                     # PTR есть, а годных ноль — значит, Yahoo на пробе отказал
                     # каждому из них: без прямого отказа прокси с PTR годен.

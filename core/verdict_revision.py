@@ -149,7 +149,61 @@ class VerdictRevisionMixin:
                 "проверит эти адреса заново, а не достанет старый «Годен»."
                 % (forgotten, why), "info")
         return forgotten
-    def _revise(self, domains, new_status, note):
+    def _exit_key(self, proxy):
+        """(ключ выхода, известен ли выход) — тот же ключ, что у канарейки.
+
+        Выход — выходной IP прокси, а не строка подключения: десять прокси
+        могут делить один выход. Не профилированный прокси — выход НЕИЗВЕСТЕН,
+        и сохранить по нему «Годен» нельзя: он мог делить выход с уличённым.
+        """
+        if not proxy:
+            return "прямое соединение", True
+        try:
+            ip = self.network.exit_ip_of(proxy) if self.network is not None else ""
+        except Exception:
+            ip = ""
+        return (str(ip).lower(), True) if ip else (str(proxy).lower(), False)
+
+    def _note_valid_exit(self, email, res):
+        """Запомнить, через какой выход получен «Годен» этого адреса."""
+        выходы = self.__dict__.setdefault("_valid_exits", {})
+        выходы[str(email).strip().lower()] = self._exit_key(res.get("proxy"))
+
+    def _spared_valid(self, domains, liars):
+        """Адреса этих доменов, чей «Годен» переживает разоблачение домена.
+
+        Решение владельца 20.11.2026: отзыв по выходу, а не по домену. Защита
+        почтовика от перебора включается на конкретный IP, а прежде один
+        уличённый выход снимал «Годен» с ВСЕГО домена: на живом прогоне через
+        прокси владельца части без пойманного выхода давали 30–32 «Годен» из
+        40, части с пойманным — 0–2.
+
+        Сохраняется строго меньшее: выход известен, на этом домене в этом
+        прогоне ПРОВЕРЕН канарейкой (отверг выдуманный адрес) и не пойман ни
+        канарейкой, ни тарпитингом. Всё остальное — неизвестный выход,
+        непроверенный выход, строка из кэша — пересматривается, как раньше.
+        """
+        watch = getattr(self, "canary", None)
+        if watch is None or not hasattr(watch, "vouched"):
+            return set()
+        wanted = {str(d).strip().lower().lstrip("@") for d in domains or []}
+        spare = set()
+        for email, (key, known) in list(self.__dict__.get("_valid_exits", {}).items()):
+            domain = email.rsplit("@", 1)[-1]
+            if (domain in wanted and known and (key, domain) not in liars
+                    and watch.vouched(key, domain)):
+                spare.add(email)
+        return spare
+
+    def _log_spared(self, spared, why):
+        """Сказать вслух, сколько «Годен» уцелело при отзыве по выходу."""
+        if spared:
+            self.callbacks['on_log'](
+                "[INFO] Отзыв по выходу (%s): сохранено «Годен» — %d; их выход на "
+                "этом домене проверен канарейкой и честно отверг выдуманный адрес."
+                % (why, len(spared)), "info")
+
+    def _revise(self, domains, new_status, note, spare=None):
         """Просит поверхность пересмотреть уже показанные строки по домену.
 
         Канал необязательный: командная строка и API держат свои списки, и
@@ -169,6 +223,13 @@ class VerdictRevisionMixin:
         # test.txt владельца вышли со статусом «None».
         status = None if new_status is None else str(new_status)
         try:
+            if spare:
+                try:
+                    return int(handler(list(domains), status, str(note), set(spare)) or 0)
+                except TypeError:
+                    # Обработчик о выходах не знает — пересмотр всего домена,
+                    # то есть прежнее, более строгое поведение.
+                    pass
             return int(handler(list(domains), status, str(note)) or 0)
         except Exception:
             return 0

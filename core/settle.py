@@ -207,6 +207,7 @@ class SettleMixin:
         # тарпитинг, включившийся посреди прогона, и зазор у гигантов.
         if raw_status == "valid":
             self._fly_canary(email, res)
+            self._note_valid_exit(email, res)
 
         if dom_key:
             with ctx.lock:

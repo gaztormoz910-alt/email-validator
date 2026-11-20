@@ -537,7 +537,7 @@ class ResultStore:
                 except Exception:
                     pass
 
-    def revise_domain(self, domain, new_status, note):
+    def revise_domain(self, domain, new_status, note, spare=None):
         """Переводит уже показанные Valid и Role-based по домену в другой статус.
 
         Зачем. Домен объявляет себя catch-all не сразу: тройная проба могла
@@ -565,7 +565,11 @@ class ResultStore:
         with self._lock:
             self._flush_locked()
             targets = self._revisable_rows_locked(suffix)
-            for position, old_group, reason, row in targets:
+            for position, old_group, reason, row, email_lc in targets:
+                # Отзыв по выходу (решение владельца 20.11.2026): «Годен» с
+                # проверенного честного выхода остаётся «Годен».
+                if spare and email_lc in spare:
+                    continue
                 fresh = ("%s | %s" % (reason or "", note)).strip(" |")
                 if row is not None:
                     # Строка живёт только в ОЗУ (база не открылась или запись
@@ -628,21 +632,22 @@ class ResultStore:
         if self._conn is not None:
             try:
                 rows = self._conn.execute(
-                    "SELECT pos, grp, reason FROM rows "
+                    "SELECT pos, grp, reason, email_lc FROM rows "
                     "WHERE status IN (%s) AND email_lc LIKE ?"
                     % ",".join("?" * len(self._REVISABLE)),
                     tuple(self._REVISABLE) + ("%" + suffix,)).fetchall()
             except Exception:
                 rows = []
-            for position, group, reason in rows:
+            for position, group, reason, email_lc in rows:
                 seen.add(position)
-                targets.append((position, group, reason, None))
+                targets.append((position, group, reason, None, email_lc))
         for position, row in self._memory_rows.items():
             if position in seen or row.get("status") not in self._REVISABLE:
                 continue
-            if str(row.get("email") or "").strip().lower().endswith(suffix):
+            email_lc = str(row.get("email") or "").strip().lower()
+            if email_lc.endswith(suffix):
                 targets.append((position, group_of(row.get("status")),
-                                row.get("reason"), row))
+                                row.get("reason"), row, email_lc))
         return targets
 
     # --- чтение ---------------------------------------------------------

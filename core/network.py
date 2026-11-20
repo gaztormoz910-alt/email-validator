@@ -281,6 +281,7 @@ class NetworkValidator(AbortableMixin, ProxyPoolMixin, DnsChecksMixin,
         # гиганта это не catch-all, а защита от перебора: разница важна, потому
         # что чинить надо прокси, а не базу.
         self._tarpit_domains = set()
+        self._tarpit_pairs = set()     # {(выход, домен)} — кого из выходов поймали
 
         # Какие почтовые серверы уже принимали что угодно, и у каких доменов.
         # Нужно на случай, когда собственная тройная проба сорвалась: см.
@@ -1400,6 +1401,7 @@ class NetworkValidator(AbortableMixin, ProxyPoolMixin, DnsChecksMixin,
                 "недоказуем; нужен чистый прокси")
             with self.catchall_lock:
                 self._tarpit_domains.add(domain)
+                self._tarpit_pairs.add((str(self.exit_ip_of(result.get("proxy")) or result.get("proxy") or "прямое соединение").lower(), domain))
 
         # «Годен» — только при ИСКЛЮЧЁННОМ приёме любых адресов. У гигантов
         # catch-all не бывает по устройству; остальным нужен отказ выдуманному

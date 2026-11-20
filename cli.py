@@ -112,6 +112,32 @@ def _make_writer(fmt):
     return {"csv": write_csv, "txt": write_txt, "json": write_json}[fmt]
 
 
+def revise_rows(results, lock, domains, new_status, note, spare=None):
+    """Пересмотр уже собранных строк по разоблачённым доменам.
+
+    Командная строка держит результаты в памяти и пишет их в конце —
+    значит пересмотр обязан дойти и сюда, иначе в файле останется
+    «Годен» по домену, который принимает что угодно. spare — адреса, чей
+    «Годен» пришёл с выхода, проверенного канарейкой и честного: отзыв по
+    выходу, а не по домену (решение владельца 20.11.2026).
+    """
+    wanted = {"@" + str(d).strip().lower().lstrip("@") for d in domains or []}
+    moved = 0
+    with lock:
+        for row in results:
+            if row["status"] != "Valid":
+                continue
+            if not any(row["email"].lower().endswith(suffix) for suffix in wanted):
+                continue
+            if spare and row["email"].strip().lower() in spare:
+                continue
+            row["reason"] = ("%s | %s" % (row["reason"], note)).strip(" |")
+            if new_status:
+                row["status"] = new_status
+            moved += 1
+    return moved
+
+
 def cmd_validate(args):
     if not os.path.exists(args.emails):
         print(f"Файла с адресами нет: {args.emails}", file=sys.stderr)
@@ -153,26 +179,8 @@ def cmd_validate(args):
             results.append({"email": email, "status": status, "reason": reason,
                             "mx": mx, "data": dict(data)})
 
-    def on_revise(domains, new_status, note):
-        """Пересмотр уже собранных строк по разоблачённым доменам.
-
-        Командная строка держит результаты в памяти и пишет их в конце —
-        значит пересмотр обязан дойти и сюда, иначе в файле останется
-        «Годен» по домену, который принимает что угодно.
-        """
-        wanted = {"@" + str(d).strip().lower().lstrip("@") for d in domains or []}
-        moved = 0
-        with lock:
-            for row in results:
-                if row["status"] != "Valid":
-                    continue
-                if not any(row["email"].lower().endswith(suffix) for suffix in wanted):
-                    continue
-                row["reason"] = ("%s | %s" % (row["reason"], note)).strip(" |")
-                if new_status:
-                    row["status"] = new_status
-                moved += 1
-        return moved
+    def on_revise(domains, new_status, note, spare=None):
+        return revise_rows(results, lock, domains, new_status, note, spare)
 
     # Строка прогресса пишется через «\r» без перевода строки. Без учёта этого
     # следующая строка журнала приклеивалась к ней хвостом: «1234/5000 (24%)[INFO] …».
@@ -733,6 +741,14 @@ def build_parser():
 def main(argv=None):
     from core.nullstream import readable_output
     readable_output()
+    # Те же перехватчики, что у окна: падение рабочего потока — в crash.log,
+    # аварийное падение процесса — стеком в fatal.log. Без них CLI падал, не
+    # оставив следа (0xC00000FD, 20.11.2026).
+    try:
+        from core.crashlog import install_hooks
+        install_hooks()
+    except Exception:
+        pass
     args = build_parser().parse_args(argv)
     return args.func(args)
 

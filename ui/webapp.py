@@ -283,7 +283,7 @@ class ValidatorApi(ResetMixin, SourcesMixin, ParserMixin, ActivityBridgeMixin):
             done = 0
         return {"done": int(done)}
 
-    def _on_revise(self, domains, new_status, note):
+    def _on_revise(self, domains, new_status, note, spare=None):
         """Пересмотр уже показанных строк по разоблачённым доменам.
 
         Домен раскрывается не сразу: тройная проба могла сорваться, а
@@ -293,7 +293,7 @@ class ValidatorApi(ResetMixin, SourcesMixin, ParserMixin, ActivityBridgeMixin):
         moved = 0
         for domain in domains or []:
             try:
-                moved += self.store.revise_domain(domain, new_status, note)
+                moved += self.store.revise_domain(domain, new_status, note, spare)
             except Exception:
                 continue
         return moved

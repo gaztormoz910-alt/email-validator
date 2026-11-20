@@ -212,5 +212,33 @@ def install_hooks():
     if previous_thread_hook is not None:
         threading.excepthook = on_worker_thread
 
+    enable_fatal_dump()
     _installed = True
     return True
+
+
+FATAL_LOG_PATH = data_path("fatal.log")
+_fatal_file = None
+
+
+def enable_fatal_dump():
+    """Стек всех потоков в data/fatal.log, если процесс упадёт АВАРИЙНО.
+
+    Перехватчики выше ловят исключения Python. Но 20.11.2026 прогон CLI упал
+    с кодом 0xC00000FD (переполнение стека) — такой процесс умирает, не
+    успев выполнить ни строки Python, и не оставлял следа нигде; повтор на
+    тех же адресах прошёл чисто. faulthandler пишет стек из самого обработчика
+    аварии и ничего не стоит, пока её нет. Исключения .NET и COM движка окна
+    (коды 0xE0…) он сам пропускает — это не аварии.
+    """
+    global _fatal_file
+    try:
+        import faulthandler
+        if _fatal_file is not None:
+            return False
+        _trim(FATAL_LOG_PATH)
+        _fatal_file = io.open(FATAL_LOG_PATH, "a", encoding="utf-8")
+        faulthandler.enable(file=_fatal_file, all_threads=True)
+        return True
+    except Exception:
+        return False

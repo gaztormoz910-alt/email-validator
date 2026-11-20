@@ -432,7 +432,8 @@ class ValidationPipeline(RunControlMixin, PipelineSetupMixin, EnrichmentMixin,
         # запусками, мы повторили бы дефект Б4, где тарпитинг оседал в долгой
         # памяти и хоронил всю почту gmail на месяц.
         self.canary = CanaryWatch()
-        
+        self._valid_exits = {}   # адрес -> (выход, известен ли) его «Годен»; живёт прогон
+
         # Предзагрузка тяжелых модулей один раз (O(1) вместо O(N) в потоках)
         if not self.name_extractor or not self.ml_predictor:
             # Отдельный этап: загрузка идёт минутами и молча, а без названия
@@ -1290,11 +1291,17 @@ class ValidationPipeline(RunControlMixin, PipelineSetupMixin, EnrichmentMixin,
                     f"[INFO] Пересмотрено строк по catch-all доменам: {revised}. "
                     "Их «Годен» ничего не доказывал.", "info")
             self._forget_cached(proven, "catch-all")
+        try:   # отзыв ПО ВЫХОДУ (решение владельца 20.11.2026): см. _spared_valid
+            лжецы = set(self.network.tarpit_pairs()) | self.canary.lying_pairs()
+        except Exception:
+            лжецы = None
         if trapped:
+            уцелели = self._spared_valid(trapped, лжецы) if лжецы is not None else set()
             self._revise(trapped, "Unknown",
                          "домен перестал отвечать честно (тарпитинг) — «Годен» "
-                         "по нему недоказуем")
+                         "по нему недоказуем", spare=уцелели)
             self._forget_cached(trapped, "тарпитинг")
+            self._log_spared(уцелели, "тарпитинг")
 
         # Домены, где канарейка вернулась живой. Тарпитинг мог включиться
         # посреди прогона, и первые сотни адресов проверены честно — но
@@ -1307,10 +1314,12 @@ class ValidationPipeline(RunControlMixin, PipelineSetupMixin, EnrichmentMixin,
         except Exception:
             подставные = []
         if подставные:
+            уцелели = self._spared_valid(подставные, лжецы) if лжецы is not None else set()
             self._revise(подставные, "Unknown",
                          "канарейка вернулась живой: сервер принял заведомо "
-                         "несуществующий адрес — «Годен» недоказуем")
+                         "несуществующий адрес — «Годен» недоказуем", spare=уцелели)
             self._forget_cached(подставные, "канарейка")
+            self._log_spared(уцелели, "канарейка")
             свод = self.canary.summary()
             self.callbacks['on_log'](
                 "[DEAD] Канареек выпущено: %d, поймано врущих выходов: %d. "
@@ -1321,7 +1330,7 @@ class ValidationPipeline(RunControlMixin, PipelineSetupMixin, EnrichmentMixin,
                 "[DEAD] ВНИМАНИЕ: %s перестал отвечать честно — принимает любые "
                 "адреса, защищаясь от перебора с нашего IP. Все «Годен» по этим "
                 "доменам в этом прогоне НЕДОКАЗУЕМЫ. Нужен чистый прокси, база "
-                "тут ни при чём." % ", ".join(trapped), "dead")
+                "тут ни при чём." % ", ".join(подставные), "dead")
 
         # Пост-анализ: домены, где ВСЕ адреса ответили 250 OK, почти наверняка
         # catch-all — они принимают что угодно, и их Valid ничего не доказывает.

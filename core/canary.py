@@ -147,6 +147,23 @@ class CanaryWatch(object):
         with self._lock:
             return self._пара(exit_ip, domain) in self._врут
 
+    def vouched(self, exit_ip, domain):
+        """Выход ПРОВЕРЕН на этом домене и честен: канарейку отверг.
+
+        Только такой выход сохраняет свой «Годен», когда на домене уличён
+        другой (решение владельца 20.11.2026 — отзыв по выходу, а не по
+        домену). Непроверенный выход — проба сорвалась или до неё не дошло —
+        не доказал ничего и честным не считается.
+        """
+        ключ = self._пара(exit_ip, domain)
+        with self._lock:
+            return ключ in self._probed and ключ not in self._врут
+
+    def lying_pairs(self):
+        """{(выход, домен)}, уличённые канарейкой."""
+        with self._lock:
+            return set(self._врут)
+
     def compromised_domains(self):
         """Домены, где хоть один выход уличён. Для пересмотра строк."""
         with self._lock:
