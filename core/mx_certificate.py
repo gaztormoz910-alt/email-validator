@@ -118,6 +118,12 @@ def fetch_names(network, mx_host, proxy=None, context=None, port=25):
         server.ehlo(network._helo_for(proxy))
         if not server.has_extn("starttls"):
             return True, []
+        # Имя для SNI. smtplib берёт его из `_host`, а в Python 3.11 connect()
+        # его не запоминает — только конструктор. Без этой строки starttls()
+        # на 3.11 падал с ValueError («server_hostname cannot be an empty
+        # string»), и провайдер по сертификату молча не работал никогда
+        # (CI на ubuntu/3.11, 20.11.2026; на 3.13 connect() имя ставит сам).
+        server._host = mx_host
         try:
             server.starttls(context=context or verifying_context())
         except ssl.SSLCertVerificationError:
