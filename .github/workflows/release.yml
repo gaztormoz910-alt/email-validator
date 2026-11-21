@@ -69,6 +69,9 @@ jobs:
       - name: Собрать .exe
         run: python -m PyInstaller --noconfirm --clean --log-level WARN MailFact.spec
 
+      - name: Санитизировать PE-таймстемпы бинарника
+        run: python tools/sanitize_pe.py dist/MailFact/MailFact.exe
+
       - name: Проверить зависимости внутри сборки
         run: python tools/check_deps.py --dist dist/MailFact
 
@@ -136,6 +139,12 @@ jobs:
           & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" MailFact.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
+      - name: Санитизировать PE-таймстемпы установщика
+        run: python tools/sanitize_pe.py installer/MailFact-setup.exe
+
+      - name: Собрать чистый portable zip
+        run: python tools/make_clean_zip.py dist/MailFact installer/MailFact-windows-x86_64-portable.zip
+
       - name: Проверить, что в сборке нет следов машины сборки
         # Путь проекта, имя компьютера, данные git — ни в одном файле сборки,
         # ни в распакованном байткоде, ни в сжатом потоке установщика; время
@@ -197,7 +206,9 @@ jobs:
           # ушёл бы без установщика, а на задании висела бы жёлтая плашка.
           if-no-files-found: error
           name: windows
-          path: installer/MailFact-setup.exe
+          path: |
+            installer/MailFact-setup.exe
+            installer/MailFact-windows-x86_64-portable.zip
 
   # ======================================================================
   # macOS — .app внутри .dmg
@@ -607,6 +618,7 @@ jobs:
           make_latest: legacy
           files: |
             артефакты/windows/MailFact-setup.exe
+            артефакты/windows/MailFact-windows-x86_64-portable.zip
             артефакты/macos/MailFact-macos.dmg
             артефакты/linux/MailFact-linux-x86_64.tar.gz
           body: |
@@ -615,7 +627,8 @@ jobs:
 
             | Система | Файл | Как ставить |
             |---|---|---|
-            | Windows 10/11, 64-bit | `MailFact-setup.exe` | запустить, установка идёт в профиль пользователя без прав администратора |
+            | Windows 10/11, 64-bit (Установщик) | `MailFact-setup.exe` | запустить, установка идёт в профиль пользователя без прав администратора |
+            | Windows 10/11, 64-bit (Портативный) | `MailFact-windows-x86_64-portable.zip` | распаковать и запустить `MailFact.exe` (без установки) |
             | macOS 13+ (Apple Silicon) | `MailFact-macos.dmg` | открыть, перетащить MailFact в «Программы» |
             | Linux x86_64 | `MailFact-linux-x86_64.tar.gz` | распаковать, запустить `./MailFact`; внутри лежит `УСТАНОВКА.txt` |
 
