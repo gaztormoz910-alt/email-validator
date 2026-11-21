@@ -13,6 +13,12 @@ import os
 import sys
 import zipfile
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 SYNTHETIC_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -60,4 +66,5 @@ def make_clean_zip(src_dir, out_zip):
 if __name__ == "__main__":
     src = sys.argv[1] if len(sys.argv) > 1 else r"dist/MailFact"
     out = sys.argv[2] if len(sys.argv) > 2 else r"dist/MailFact-v1.3.11-portable.zip"
-    make_clean_zip(src, out)
+    ok = make_clean_zip(src, out)
+    sys.exit(0 if ok else 1)

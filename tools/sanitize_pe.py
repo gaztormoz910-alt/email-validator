@@ -15,6 +15,12 @@ import struct
 import sys
 import pefile
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 SYNTHETIC_TIMESTAMP = 0x12cea600  # 1980-01-01 00:00:00 UTC
 
 
@@ -94,4 +100,5 @@ def sanitize_pe(path, timestamp=SYNTHETIC_TIMESTAMP):
 
 if __name__ == "__main__":
     target = sys.argv[1] if len(sys.argv) > 1 else r"dist/MailFact/MailFact.exe"
-    sanitize_pe(target)
+    ok = sanitize_pe(target)
+    sys.exit(0 if ok else 1)
