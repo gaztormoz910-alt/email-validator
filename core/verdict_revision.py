@@ -8,6 +8,7 @@
 файлу, они выглядят как частные случаи, а это один механизм.
 """
 from core.canary import canary_address
+from core.confirmation import rejects_fake
 
 __all__ = ["VerdictRevisionMixin"]
 
@@ -54,12 +55,25 @@ class VerdictRevisionMixin:
         if mx:
             # Маршрут пары — для завершающей пробы в конце прогона.
             self.__dict__.setdefault("_canary_routes", {})[(exit_ip, domain)] = (proxy, list(mx))
-        watch.note_valid(exit_ip, domain)
-        if not watch.should_probe(exit_ip, domain) or not mx:
+        # Номер этого «Годен» — сейчас, до полёта пробы. _note_valid_exit
+        # зовётся ПОСЛЕ _fly_canary (core/settle.py), а проба летит в этом же
+        # потоке секундами; перечитанный тогда номер раздут «Годен» других
+        # потоков, и адрес, сам пустивший честную пробу, не был ею покрыт
+        # (живой прогон 21.11.2026: 11 «Неизвестно» из 40 вместо 2).
+        номер = watch.note_valid(exit_ip, domain)
+        self.__dict__.setdefault("_valid_numbers", {})[str(email).strip().lower()] = номер
+        if not mx:
+            # Без MX пробу не пустить — и занимать её нельзя: занятая, но не
+            # пущенная проба отодвинула бы следующую на двадцать «Годен».
             return False
-        return self._probe_pair(exit_ip, domain, proxy, mx)
+        # Номер фиксируется при запуске: «Годен», пришедшие с этой пары, пока
+        # проба летит, она не видела и ручаться за них не может.
+        covers = watch.claim_probe(exit_ip, domain)
+        if covers is None:
+            return False
+        return self._probe_pair(exit_ip, domain, proxy, mx, covers)
 
-    def _probe_pair(self, exit_ip, domain, proxy, mx):
+    def _probe_pair(self, exit_ip, domain, proxy, mx, covers=None):
         """Одна канарейка на пару. True — выход уличён.
 
         Ответ засчитывается ТОЛЬКО если проба реально прошла через этот выход.
@@ -67,6 +81,9 @@ class VerdictRevisionMixin:
         другой, и ответ ЧУЖОГО выхода прежде записывался на этот. Честный чужой
         выход так «ручался» за непроверенный — а при отзыве по выходу ещё и
         сохранял его ложные «Годен».
+
+        covers — номер Valid, за который проба поручится, если выход честен
+        (CanaryWatch.claim_probe/claim_now в момент запуска).
         """
         watch = self.canary
         одна_сессия = getattr(self.network, "_do_single_ping", None)
@@ -85,11 +102,20 @@ class VerdictRevisionMixin:
             статус = ответ.get("status")
         except Exception:
             # Сорвавшаяся проба — это НЕ улика. Молчим: обвинить выход по
-            # своему же сбою значит выбросить живые адреса.
+            # своему же сбою значит выбросить живые адреса. Занятость снять:
+            # иначе пара больше не получила бы ни одной пробы за прогон.
+            watch.release(exit_ip, domain, covers)
             return False
         if self._exit_key(ответ.get("proxy"))[0] != exit_ip:
+            watch.release(exit_ip, domain, covers)
             return False
-        if not watch.record(exit_ip, domain, статус):
+        if статус in ("invalid", "risky", "disabled") and not rejects_fake(ответ):
+            # Отказ по форме, но не по сути: «550 … try again later», предел
+            # получателей на сессию. Сервер отложил решение, а не отверг
+            # выдуманный адрес — ручаться за выход этим нельзя. То же правило,
+            # что у контрольной пробы (core/confirmation.py, rejects_fake).
+            статус = "unknown"
+        if not watch.record(exit_ip, domain, статус, covers=covers):
             return False
 
         self.callbacks['on_log'](
@@ -120,10 +146,8 @@ class VerdictRevisionMixin:
             if watch.is_compromised(exit_ip, domain):
                 continue
             # Занять пробу на нынешнем номере, чтобы она ручалась за весь хвост.
-            with watch._lock:
-                watch._probed_at[watch._пара(exit_ip, domain)] = watch._valid.get(
-                    watch._пара(exit_ip, domain), 0)
-            self._probe_pair(exit_ip, domain, proxy, mx)
+            covers = watch.claim_now(exit_ip, domain)
+            self._probe_pair(exit_ip, domain, proxy, mx, covers)
             пущено += 1
         if пущено:
             self.callbacks['on_log'](
@@ -218,16 +242,19 @@ class VerdictRevisionMixin:
     def _note_valid_exit(self, email, res):
         """Запомнить выход «Годен» этого адреса и его номер на паре.
 
-        Номер — сколько Valid насчитано на паре сразу после этого; при гонке
-        потоков он может оказаться больше настоящего, и это ошибка в строгую
-        сторону: для сохранения нужна честная проба не раньше этого номера.
+        Номер — тот, что выдал note_valid в _fly_canary, в момент «Годен».
+        Без него (канарейки нет) — сколько Valid насчитано сейчас: при гонке
+        потоков это больше настоящего, ошибка в строгую сторону — для
+        сохранения нужна честная проба не раньше этого номера.
         """
         выходы = self.__dict__.setdefault("_valid_exits", {})
         key, known = self._exit_key(res.get("proxy"))
         адрес = str(email).strip().lower()
         watch = getattr(self, "canary", None)
+        номер = self.__dict__.get("_valid_numbers", {}).pop(адрес, None)
         try:
-            номер = watch.valid_count(key, адрес.rsplit("@", 1)[-1]) if watch else 0
+            if номер is None:
+                номер = watch.valid_count(key, адрес.rsplit("@", 1)[-1]) if watch else 0
         except Exception:
             номер = 0
         выходы[адрес] = (key, known, номер)

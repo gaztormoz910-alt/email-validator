@@ -124,6 +124,9 @@ class CatchAllMixin:
                 return False
             # Хоть один выдуманный адрес отвергнут — домен точно не catch-all
             if result["status"] != "valid":
+                # Отметка — с выходом пробы: «Годен» другого выхода она не
+                # подтверждает (core/confirmation.py, _note_fake_rejected).
+                self._note_fake_rejected(domain, probe_proxy)
                 with self.catchall_lock:
                     self.catchall_cache[domain] = False
                 self._remember_catchall(domain, False)

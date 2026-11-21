@@ -26,7 +26,7 @@
 живёт в NetworkValidator; примесь работает с тем же объектом.
 """
 from core.heuristics import is_parked_domain
-from core.smtp_codes import classify_smtp_response
+from core.smtp_codes import classify_smtp_response, looks_transient
 
 __all__ = ["AcceptanceMixin", "FORWARDING_MX", "forwarding_service", "rejects_fake"]
 
@@ -100,11 +100,51 @@ def rejects_fake(verdict, message=""):
         return False
     текст = (message.decode("utf-8", "ignore") if isinstance(message, bytes)
              else str(message or "")).lower() + " " + str(verdict.get("reason", "")).lower()
-    return not any(m in текст for m in _SESSION_LIMIT_MARKERS)
+    if any(m in текст for m in _SESSION_LIMIT_MARKERS):
+        return False
+    # «Под вопросом» бывает и ОТСРОЧКОЙ: «550 … try again later» разбор читает
+    # как «временный отказ с постоянным кодом», «4.x.x» при 5xx — как
+    # «постоянный код с временным статусом». Сервер не отверг выдуманный адрес,
+    # а отложил решение — и про приём любых адресов не сказал ничего
+    # (аудит 21.11.2026). Голый отказ 5xx без объяснения по-прежнему отказ.
+    if verdict.get("status") == "risky" and (
+            "временн" in текст or looks_transient(текст)):
+        return False
+    return True
 
 
 class AcceptanceMixin:
     """Доказательство того, что `250` — про ящик. Примешивается к NetworkValidator."""
+
+    def _exit_of(self, proxy):
+        """Выход прокси — тот же ключ, что у канарейки (core/verdict_revision.py)."""
+        if not proxy:
+            return "прямое соединение"
+        try:
+            ip = self.exit_ip_of(proxy)
+        except Exception:
+            ip = ""
+        return str(ip or proxy).lower()
+
+    def _note_fake_rejected(self, domain, proxy):
+        """Выдуманный адрес отвергнут на домене — запомнить, ЧЕРЕЗ КАКОЙ выход.
+
+        Отметка «домен не catch-all» одна на домен, а получена она через
+        конкретный выход. Почтовик, включивший защиту от перебора на одном IP,
+        отвечает «да» на всё именно ему — и такой выход получал «Годен» потому,
+        что домен честно проверил ДРУГОЙ (аудит 21.11.2026). Поэтому «Годен»
+        оставляет только отказ, полученный тем же выходом.
+        """
+        with self.catchall_lock:
+            self.catchall_cache.setdefault(domain, False)
+            self.__dict__.setdefault("_fake_rejected", set()).add(
+                (self._exit_of(proxy), str(domain or "").lower()))
+
+    def _fake_rejected_via(self, domain, proxy):
+        """Отвергал ли выдуманный адрес на этом домене именно этот выход."""
+        with self.catchall_lock:
+            return ((self._exit_of(proxy), str(domain or "").lower())
+                    in self.__dict__.get("_fake_rejected", set()))
 
     def _control_address(self, domain):
         """Выдуманный адрес для контрольной пробы — ОДИН на домен за прогон.
@@ -161,8 +201,7 @@ class AcceptanceMixin:
         verdict = (classify_smtp_response(code, message) if code is not None
                    else {"status": "unknown", "reason": "контрольная проба сорвалась"})
         if rejects_fake(verdict, message):
-            with self.catchall_lock:
-                self.catchall_cache.setdefault(domain, False)
+            self._note_fake_rejected(domain, proxy)
             result["control_rcpt"] = "rejected"
         else:
             result["control_rcpt"] = "inconclusive"
@@ -190,8 +229,9 @@ class AcceptanceMixin:
 
         excluded = result.get("control_rcpt") == "rejected"
         if not excluded and not result.get("via_vrfy"):
-            with self.catchall_lock:
-                excluded = self.catchall_cache.get(domain) is False
+            # Отказ выдуманному в этом прогоне — но ТЕМ ЖЕ выходом, что принёс
+            # «Годен»: отметка другого выхода про этот выход не говорит ничего.
+            excluded = self._fake_rejected_via(domain, result.get("proxy"))
         if not excluded and not result.get("via_vrfy") and mx_records:
             excluded = self._control_in_own_session(domain, result, mx_records)
             if result.get("status") == "catchall":
@@ -245,8 +285,11 @@ class AcceptanceMixin:
                 proxy=proxy))
             return False
         if rejects_fake(answer):
-            with self.catchall_lock:
-                self.catchall_cache.setdefault(domain, False)
+            self._note_fake_rejected(domain, proxy)
+            if self._exit_of(proxy) != self._exit_of(result.get("proxy")):
+                # Проба ушла другим выходом (у основной проверки прокси не было,
+                # а в пуле они есть): про выход «Годен» она не говорит ничего.
+                return False
             result["control_rcpt"] = "rejected"
             return True
         result["control_answer"] = answer.get("reason") or result.get("control_answer", "")
