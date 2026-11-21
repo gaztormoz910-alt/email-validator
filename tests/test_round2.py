@@ -76,7 +76,10 @@ def test_second_opinion_disagreement_lowers_the_verdict():
     # core/settle.py (аудит 27.09.2026, D3); читается вся семья конвейера.
     from исходники import исходник_конвейера
     источник = исходник_конвейера()
-    кусок = источник[источник.index("_second_opinion_on_valid(email, res)"):]
+    # Якорь — строка самой лестницы, а не любое упоминание вызова: второе
+    # мнение зовёт и переспрос отозванных (core/verdict_revision.py), и
+    # первое вхождение в склейке оказалось там — проверка читала не тот кусок.
+    кусок = источник[источник.index("итог = self._second_opinion_on_valid(email, res)"):]
     кусок = кусок[:600]
     assert 'raw_status = "unknown"' in кусок, "статус не понижается"
     assert "Invalid" not in кусок.split("status_display")[1][:120], (

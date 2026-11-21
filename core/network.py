@@ -865,13 +865,10 @@ class NetworkValidator(AbortableMixin, ProxyPoolMixin, DnsChecksMixin,
         domain = (domain or "").strip().lower()
         needs_ptr = domain in YAHOO_DOMAINS or domain in AOL_DOMAINS
         needs_clean = domain in NEEDS_CLEAN_IP_DOMAINS
-        return self._pick_best_proxy(need_ptr=needs_ptr, need_clean=needs_clean)
-
-
-
-
-
-
+        # Мимо уличённых на домене выходов; живы только они — прежний выбор:
+        # без прокси проба пошла бы прямым соединением, а оно запрещено.
+        return (self._pick_for_domain(domain, needs_ptr, needs_clean)[0]
+                or self._pick_best_proxy(need_ptr=needs_ptr, need_clean=needs_clean))
 
     def stealth_smtp_ping(self, email: str, mx_records: list,
                           control_probe=False, avoid_exit_of=None,
@@ -960,22 +957,22 @@ class NetworkValidator(AbortableMixin, ProxyPoolMixin, DnsChecksMixin,
                 # Сервер ждёт возврата той же тройки (IP, отправитель,
                 # получатель); прийти с другого адреса — значит начать
                 # выдержку заново и не выйти из неё никогда.
-                proxy = None
+                # Выход, уличённый на этом домене, не берётся (_pick_for_domain).
+                proxy, все_пойманы = None, False
                 if prefer_exit_of and attempt == 0:
-                    proxy = self.proxy_still_usable(prefer_exit_of)
+                    proxy = self.proxy_still_usable(prefer_exit_of, domain)
                 if proxy is None:
-                    proxy = self._pick_best_proxy(need_ptr=needs_ptr,
-                                                  need_clean=needs_clean,
-                                                  want_country=want_country,
-                                                  avoid_exit_of=avoid_exit_of)
+                    proxy, все_пойманы = self._pick_for_domain(
+                        domain, needs_ptr, needs_clean, want_country, avoid_exit_of)
                 if proxy is None and avoid_exit_of and self.has_proxies_configured():
                     # Другого выхода в пуле нет. Это НЕ повод отвечать «прокси
                     # кончились»: они живы, просто все ведут в тот же адрес.
                     # Повтор тем же выходом хуже нового, но несравнимо лучше
                     # выдуманного Unknown — живой ящик остался бы непроверенным.
-                    proxy = self._pick_best_proxy(need_ptr=needs_ptr,
-                                                  need_clean=needs_clean,
-                                                  want_country=want_country)
+                    proxy, все_пойманы = self._pick_for_domain(
+                        domain, needs_ptr, needs_clean, want_country)
+                if proxy is None and все_пойманы:
+                    return dict(self.ALL_EXITS_CAUGHT)
                 result = self._do_single_ping(email, mx_record, proxy=proxy,
                                               control_probe=control_probe)
                 # Чей это ответ. Нужно повтору: отложенный адрес переспрашивать

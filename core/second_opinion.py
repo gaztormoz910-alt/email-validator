@@ -118,9 +118,10 @@ class SecondOpinionMixin:
         needs_ptr = domain in YAHOO_DOMAINS or domain in AOL_DOMAINS
         needs_clean = domain in NEEDS_CLEAN_IP_DOMAINS
 
-        proxy = self._pick_best_proxy(need_ptr=needs_ptr,
-                                      need_clean=needs_clean,
-                                      avoid_exit_of=first_proxy)
+        # Мимо выходов, уличённых на домене: «да» лжеца — не второе мнение,
+        # а эхо (core/proxy_pool.py, _pick_for_domain).
+        proxy, _все_пойманы = self._pick_for_domain(
+            domain, needs_ptr, needs_clean, "", first_proxy)
         if first_proxy and proxy is None:
             return None            # другого выхода нет — сверять нечем
         if not first_proxy and not self.proxies:

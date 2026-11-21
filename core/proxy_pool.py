@@ -470,20 +470,87 @@ class ProxyPoolMixin:
             bans, self._recent_bans = list(self._recent_bans), []
         return bans
 
-    def proxy_still_usable(self, proxy):
+    def proxy_still_usable(self, proxy, domain=None):
         """Тот же прокси, если он ещё в строю, иначе None.
 
         Нужен повтору после серого списка: сервер ждёт возврата ТОЙ ЖЕ тройки
         (наш IP, наш отправитель, получатель), и подменять выход при повторе
         значит начинать выдержку заново. Но если прокси за это время выбыл,
-        настаивать не на чем — вызывающий выберет обычным порядком.
+        настаивать не на чем — вызывающий выберет обычным порядком. Выход,
+        уличённый на этом домене, тоже «выбыл» — для этого домена.
         """
         if not proxy or not isinstance(proxy, str):
             return None
         with self._proxy_score_lock:
             if proxy in self._proxy_banned or proxy not in self.proxies:
                 return None
+        if domain and self._exit_key_of(proxy) in self.caught_exits_on(domain):
+            return None
         return proxy
+
+    # ── выходы, уличённые на домене ─────────────────────────────────────
+    #
+    # Канарейка или тарпитинг поймали выход на домене — почтовик отвечает
+    # ему «да» на всё. Прежде пойманная пара шла только в отзыв в конце
+    # прогона, а выбор прокси её не обходил: домен продолжал ходить через
+    # лжеца, и каждый следующий «Годен» оттуда уходил в «Неизвестно». Живой
+    # прогон 21.11.2026: все 46 отозванных «Годен» из 300 — с одного выхода,
+    # пойманного на gmail.com в каждой из 8 частей; за ним стояли 6 прокси
+    # из пула, почти половина живых.
+
+    ALL_EXITS_CAUGHT = {
+        "status": "unknown",
+        "reason": ("Все живые выходы уличены на этом домене: почтовик принимает "
+                   "через них любой адрес — проверять бессмысленно; нужен чистый прокси"),
+    }
+
+    def _exit_key_of(self, proxy):
+        """Ключ выхода — тот же, что у канарейки и тарпитинга."""
+        if not proxy:
+            return "прямое соединение"
+        return str(self.exit_ip_of(proxy) or proxy).lower()
+
+    def mark_exit_caught(self, exit_key, domain):
+        """Канарейка поймала выход на домене: дальше этот домен его обходит."""
+        with self.catchall_lock:
+            self.__dict__.setdefault("_caught_pairs", set()).add(
+                (str(exit_key or "прямое соединение").lower(), str(domain or "").lower()))
+
+    def caught_exits_on(self, domain):
+        """Выходы, уличённые на домене в этом прогоне: тарпитинг и канарейка."""
+        domain = str(domain or "").strip().lower()
+        with self.catchall_lock:
+            пары = (set(getattr(self, "_tarpit_pairs", ()))
+                    | set(self.__dict__.get("_caught_pairs", ())))
+        return {выход for выход, домен in пары if домен == domain}
+
+    def _pick_for_domain(self, domain, need_ptr=False, need_clean=False,
+                         want_country="", avoid_exit_of=None):
+        """_pick_best_proxy в обход выходов, уличённых на домене. (прокси, все_пойманы).
+
+        На домене, где выход уже пойман, прокси без профиля идут последними:
+        их выход неизвестен и может оказаться тем же лжецом (десять входов в
+        один выход — обычное дело), а «Годен» с неизвестного выхода отзыв всё
+        равно не сохранит. все_пойманы — живые прокси есть, но все уличены:
+        вызывающий отвечает «Неизвестно» без сессии, а не идёт через лжеца.
+        """
+        пойманы = self.caught_exits_on(domain)
+        if not self.proxies and "прямое соединение" in пойманы:
+            return None, True            # выход один, и он пойман
+        if not пойманы:
+            return self._pick_best_proxy(need_ptr=need_ptr, need_clean=need_clean,
+                                         want_country=want_country,
+                                         avoid_exit_of=avoid_exit_of), False
+        не_брать = {p for p in list(self.proxies) if self._exit_key_of(p) in пойманы}
+        безымянные = {p for p in list(self.proxies) if not self.exit_ip_of(p)}
+        выбор = dict(need_ptr=need_ptr, need_clean=need_clean,
+                     want_country=want_country, avoid_exit_of=avoid_exit_of)
+        proxy = (self._pick_best_proxy(exclude=не_брать | безымянные, **выбор)
+                 or self._pick_best_proxy(exclude=не_брать, **выбор))
+        if proxy is not None or not не_брать:
+            return proxy, False
+        # Никого: потому ли, что живы только пойманные, или пул пуст вообще.
+        return None, self._pick_best_proxy(**выбор) is not None
 
     def _pick_best_proxy(self, need_ptr=False, need_clean=False, want_country="",
                          avoid_exit_of=None, exclude=None):

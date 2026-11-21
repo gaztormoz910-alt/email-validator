@@ -7,6 +7,8 @@
 Такие правки обязаны читаться вместе и целиком — разбросанные по большому
 файлу, они выглядят как частные случаи, а это один механизм.
 """
+from concurrent.futures import ThreadPoolExecutor
+
 from core.canary import canary_address
 from core.confirmation import rejects_fake
 
@@ -117,6 +119,11 @@ class VerdictRevisionMixin:
             статус = "unknown"
         if not watch.record(exit_ip, domain, статус, covers=covers):
             return False
+        # Дальше этот домен обходит пойманный выход (core/proxy_pool.py,
+        # _pick_for_domain): каждый следующий «Годен» оттуда ушёл бы в отзыв.
+        отметить = getattr(self.network, "mark_exit_caught", None)
+        if callable(отметить):
+            отметить(exit_ip, domain)
 
         self.callbacks['on_log'](
             "[DEAD] Канарейка вернулась живой: %s принял заведомо "
@@ -126,17 +133,26 @@ class VerdictRevisionMixin:
         return True
 
     def _final_canaries(self, trapped):
-        """Завершающая проба на паре, у которой «Годен» есть ПОСЛЕ последней пробы.
+        """Перед отзывом по выходу: завершающие пробы и переспрос. Число завершающих.
 
         Только на разоблачённых доменах (тарпитинг или канарейка поймали хоть
-        один выход): только там отзыв по выходу решает, что уцелеет, и
-        непокрытый хвост иначе ушёл бы в «Неизвестно» целиком. «Стоп» — ни
+        один выход): только там отзыв по выходу решает, что уцелеет.
+        Сначала хвост «Годен» после последней пробы покрывается завершающей
+        пробой, затем «Годен», которые всё равно ушли бы в «Неизвестно»,
+        переспрашиваются честным выходом (_recheck_revoked). «Стоп» — ни
         одной сессии.
         """
         watch = getattr(self, "canary", None)
         if watch is None or self.network is None or self.network.aborted():
             return 0
         домены = set(trapped or []) | set(watch.compromised_domains())
+        пущено = self._cover_tails(домены)
+        self._recheck_revoked(домены)
+        return пущено
+
+    def _cover_tails(self, домены):
+        """Завершающая проба на паре, у которой «Годен» есть ПОСЛЕ последней пробы."""
+        watch = self.canary
         пущено = 0
         for (exit_ip, domain), (proxy, mx) in list(self.__dict__.get("_canary_routes", {}).items()):
             if domain not in домены or self.network.aborted():
@@ -148,12 +164,94 @@ class VerdictRevisionMixin:
             # Занять пробу на нынешнем номере, чтобы она ручалась за весь хвост.
             covers = watch.claim_now(exit_ip, domain)
             self._probe_pair(exit_ip, domain, proxy, mx, covers)
+            if (watch.honest_upto(exit_ip, domain) < covers
+                    and not watch.is_compromised(exit_ip, domain)
+                    and not self.network.aborted()):
+                # Проба сорвалась (таймаут, обрыв) — не улика и не
+                # поручительство. Последний шанс у этих «Годен», поэтому ещё
+                # одна попытка: живой прогон 21.11.2026 потерял так 3 адреса,
+                # честный выход сказал «Годен», а канарейка не дождалась ответа.
+                covers = watch.claim_now(exit_ip, domain)
+                self._probe_pair(exit_ip, domain, proxy, mx, covers)
             пущено += 1
         if пущено:
             self.callbacks['on_log'](
                 "[INFO] Завершающих канареек: %d — по выходам, у которых были «Годен» "
                 "после последней пробы." % пущено, "info")
         return пущено
+
+    def _recheck_revoked(self, домены):
+        """Переспросить честным выходом «Годен», которые иначе уйдут в «Неизвестно».
+
+        Это «Годен» с выхода, пойманного на домене, с выхода без профиля или
+        без честной пробы после себя. Увод (core/proxy_pool.py) не пускает
+        новые адреса через лжеца, но всё, что прошло через него ДО поимки, уже
+        выдано. Переспрос — та же лестница, что у основного прохода: ответ
+        выхода (мимо уличённых), второе мнение, канарейка. Уцелеет адрес по
+        тому же правилу отзыва (_spared_valid): новый выход известен, не
+        уличён и проверен честной пробой не раньше этого адреса. Отказ или
+        молчание честного выхода «Годен» не возвращают: строка уходит в
+        «Неизвестно», как и без переспроса, — приговор по одному переспросу
+        не выносится. Возвращает (переспрошено, подтверждено).
+        """
+        net = self.network
+        проверить = getattr(net, "check_email", None)
+        if not callable(проверить) or net.aborted():
+            return 0, 0
+        try:
+            лжецы = set(net.tarpit_pairs()) | self.canary.lying_pairs()
+        except Exception:
+            return 0, 0
+        уцелеют = self._spared_valid(домены, лжецы)
+        исходные = dict(self.__dict__.get("_valid_original", {}))
+        кандидаты = sorted(адрес for адрес in list(self.__dict__.get("_valid_exits", {}))
+                           if адрес.rsplit("@", 1)[-1] in домены and адрес not in уцелеют)
+        if not кандидаты:
+            return 0, 0
+        # Опора домена — честный выход, чьи канарейки уже отвечали дальше всех
+        # (наибольший honest_upto). Переспрос идёт сначала через него: новый
+        # «Годен» на выходе без истории ждал бы завершающей пробы, а она на
+        # медленном прокси срывается — и честно подтверждённый адрес уходил в
+        # «Неизвестно» (живой прогон 21.11.2026, 3 адреса).
+        опора = {}
+        for (выход, домен), (прокси, _mx) in list(self.__dict__.get("_canary_routes", {}).items()):
+            if домен not in домены or (выход, домен) in лжецы or not self._exit_key(прокси)[1]:
+                continue
+            честен_до = self.canary.honest_upto(выход, домен)
+            if честен_до >= 0 and честен_до > опора.get(домен, (-1, None))[0]:
+                опора[домен] = (честен_до, прокси)
+        подтверждено = []
+
+        def переспросить(адрес):
+            if net.aborted():
+                return
+            email = исходные.get(адрес, адрес)
+            try:
+                res = проверить(email, prefer_exit_of=опора.get(
+                    адрес.rsplit("@", 1)[-1], (-1, None))[1])
+            except Exception:
+                return
+            if res.get("status") != "valid" or res.get("aborted"):
+                return
+            if not self._exit_key(res.get("proxy"))[1]:
+                return               # «Годен» с неизвестного выхода отзыв не сохранит
+            if (getattr(self, "confirm_valid", False)
+                    and self._second_opinion_on_valid(email, res) is False):
+                return
+            self._fly_canary(email, res)
+            self._note_valid_exit(email, res)
+            подтверждено.append(адрес)
+
+        with ThreadPoolExecutor(max_workers=min(8, len(кандидаты))) as пул:
+            list(пул.map(переспросить, кандидаты))
+        if подтверждено:
+            # Новые «Годен» на честных выходах — под завершающую пробу.
+            self._cover_tails(домены)
+        self.callbacks['on_log'](
+            "[INFO] Переспрошено честным выходом «Годен», которые иначе ушли бы в "
+            "«Неизвестно»: %d; снова «Годен» — %d (сохранятся, если их выход прошёл "
+            "канарейку)." % (len(кандидаты), len(подтверждено)), "info")
+        return len(кандидаты), len(подтверждено)
     def _split_catchall_from_tarpit(self, proven, trapped):
         """Делит «принял выдуманный адрес» на настоящий catch-all и тарпитинг.
 
@@ -258,6 +356,9 @@ class VerdictRevisionMixin:
         except Exception:
             номер = 0
         выходы[адрес] = (key, known, номер)
+        # Написание как во входе — для переспроса: локальная часть по RFC 5321
+        # может различать регистр, и спрашивать надо тот же адрес.
+        self.__dict__.setdefault("_valid_original", {})[адрес] = str(email).strip()
 
     def _spared_valid(self, domains, liars):
         """Адреса этих доменов, чей «Годен» переживает разоблачение домена.
