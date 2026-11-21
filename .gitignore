@@ -86,3 +86,8 @@ tor_bin/Data/Tor*/
 # баз. Решение владельца 14.11.2026 — в репозиторий не попадают.
 FULL_CHAT_TRANSCRIPT.md
 IMPROVEMENTS_REVIEW_FOR_CLAUDE.md
+
+# Ledger агентов (unlazy) в корне: в GATES.md попадали имя, фамилия и путь к
+# профилю владельца (EVIDENCE: cwd=..., образцы проверок приватности) — убран
+# из всей истории 21.11.2026. Ledger держать в .unlazy/, он и так не в git.
+/GATES.md
