@@ -421,17 +421,48 @@ def test_vpssafety_password_file_is_not_world_readable():
     assert "chmod 600 /etc/3proxy/3proxy.cfg" in script
 
 
+def _рабочий_bash():
+    """bash, который действительно выполняет команды, или None.
+
+    shutil.which берёт первый bash в PATH. Из PowerShell первым стоит
+    C:\\Windows\\System32\\bash.exe — заглушка WSL: без дистрибутива она
+    печатает WSL_DISTRO_NOT_FOUND и возвращает 1 на любую команду, и тест
+    падал, принимая её за bash (замерено 21.11.2026 дважды). Берётся первый,
+    кто реально выполняет `exit 0`; Git Bash ищется и вне PATH — тот, что
+    стоит у разработчика, проверяет синтаксис по-настоящему.
+    """
+    import shutil
+    import subprocess
+
+    кандидаты = [shutil.which("bash")]
+    if sys.platform == "win32":
+        for корень in (os.environ.get("ProgramFiles") or r"C:\Program Files",
+                       os.environ.get("ProgramFiles(x86)") or ""):
+            if корень:
+                кандидаты += [os.path.join(корень, "Git", "usr", "bin", "bash.exe"),
+                              os.path.join(корень, "Git", "bin", "bash.exe")]
+    for путь in кандидаты:
+        if not путь or not os.path.isfile(путь):
+            continue
+        try:
+            done = subprocess.run([путь, "-c", "exit 0"], capture_output=True, timeout=60)
+        except Exception:
+            continue
+        if done.returncode == 0:
+            return путь
+    return None
+
+
 def test_vpssafety_script_is_valid_bash():
     """Скрипт, который не разбирается bash, бесполезен целиком."""
-    import shutil
     import subprocess
     import tempfile
 
     from tools.make_vps_proxy import build_script
 
-    bash = shutil.which("bash")
+    bash = _рабочий_bash()
     if not bash:
-        pytest.skip("bash недоступен в этой системе")
+        pytest.skip("рабочего bash в этой системе нет")
 
     with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False,
                                      encoding="utf-8", newline="\n") as handle:

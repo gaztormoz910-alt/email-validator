@@ -512,6 +512,60 @@ class DnsChecksMixin:
         """Причина последнего None от get_mx_records или None, если это сбой DNS."""
         return self._mx_doubts().get(to_ascii_domain(domain) or domain)
 
+    def _verify_negative(self, domain):
+        """«Записей нет» без DoH — заверить DoH через другие прокси. Список или None.
+
+        Тот же вывод, что у get_mx_records, но по заверенным ответам
+        (resolver.resolve_verified): MX есть — список MX; домена нет — [];
+        MX нет — A и AAAA, тоже заверенные, с той же проверкой на wildcard.
+        None — заверить не удалось, «не проверено» остаётся (E13).
+        """
+        заверить = getattr(self.resolver, "resolve_verified", None)
+        if not callable(заверить):
+            return None
+        try:
+            ответ = sorted(заверить(domain, 'MX'), key=lambda x: x.preference)
+            if (len(ответ) == 1 and ответ[0].preference == 0
+                    and str(ответ[0].exchange) in ('.', '')):
+                итог = []                       # Null MX (RFC 7505)
+            else:
+                итог = [str(r.exchange).rstrip('.') for r in ответ] or None
+        except (UnverifiedNXDOMAIN, UnverifiedNoAnswer):
+            # Подклассы NXDOMAIN/NoAnswer: строка ниже приняла бы их за
+            # заверенное «нет» и похоронила бы домен. Сюда их приносить
+            # нельзя по устройству resolve_verified — но цена ошибки такова,
+            # что держится не на одном устройстве.
+            return None
+        except dns.resolver.NXDOMAIN:
+            итог = []                           # домена нет — заверено DoH
+        except dns.resolver.NoAnswer:
+            итог = None                         # домен есть, MX нет — A, AAAA
+            for вид in ('A', 'AAAA'):
+                try:
+                    заверить(domain, вид)
+                except (UnverifiedNXDOMAIN, UnverifiedNoAnswer):
+                    return None                 # незаверенное «нет» — не приговор
+                except self._ANSWERED_NOTHING:
+                    continue
+                except Exception:
+                    return None
+                if self._is_wildcard_domain(domain):
+                    self._mx_doubts()[domain] = MX_DOUBT_WILDCARD
+                    with self.mx_lock:
+                        self.mx_cache[domain] = None
+                    return None
+                итог = [domain]
+                break
+            if итог is None:
+                итог = []                       # ни MX, ни A, ни AAAA — заверено
+        except Exception:
+            return None
+        if итог is None:
+            return None
+        with self.mx_lock:
+            self.mx_cache[domain] = итог
+        return итог
+
     def get_mx_records(self, domain: str):
         """Ищет MX-записи домена, с фоллбэком на A и AAAA (RFC 5321, п.1.4).
 
@@ -559,9 +613,14 @@ class DnsChecksMixin:
         except UnverifiedNXDOMAIN:
             # «Домена нет», но не заверено DoH: бесплатный прокси мог подменить
             # ответ. Приговор «Dead Domain» отсюда был бы ложным Invalid для
-            # всех адресов домена; A и AAAA спрашивать незачем — их ответ
-            # пришёл бы тем же непроверенным путём. Не кэшируем: следующий
+            # всех адресов домена. Прежде чем сдаться — DoH через другие прокси
+            # (_verify_negative). Не заверено и так — не кэшируем: следующий
             # вопрос может дойти через DoH.
+            заверено = self._verify_negative(domain)
+            if заверено is not None:
+                return заверено
+            if domain in self.mx_cache:
+                return self.mx_cache[domain]    # заверка показала wildcard
             self._mx_doubts()[domain] = MX_DOUBT_UNVERIFIED
             return None
         except dns.resolver.NXDOMAIN:
@@ -646,8 +705,14 @@ class DnsChecksMixin:
         if dns_failed:
             return None
 
-        # Хоть одно из трёх «нет» пришло без DoH — приговора нет (E13).
+        # Хоть одно из трёх «нет» пришло без DoH — приговора нет (E13), пока
+        # его не заверит DoH через другие прокси.
         if unverified:
+            заверено = self._verify_negative(domain)
+            if заверено is not None:
+                return заверено
+            if domain in self.mx_cache:
+                return self.mx_cache[domain]    # заверка показала wildcard
             self._mx_doubts()[domain] = MX_DOUBT_UNVERIFIED
             return None
 

@@ -689,7 +689,7 @@ class NetworkValidator(AbortableMixin, ProxyPoolMixin, DnsChecksMixin,
                 if result["status"] == "valid":
                     self._control_in_session(server, domain, result,
                                              via_vrfy=bool(result.get("via_vrfy")),
-                                             proxy=proxy)
+                                             proxy=proxy, mx=mx_record)
                 elif result["status"] == "greylisted":
                     self._prewarm_control(server, domain)
 

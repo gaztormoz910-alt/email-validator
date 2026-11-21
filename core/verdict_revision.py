@@ -252,6 +252,49 @@ class VerdictRevisionMixin:
             "«Неизвестно»: %d; снова «Годен» — %d (сохранятся, если их выход прошёл "
             "канарейку)." % (len(кандидаты), len(подтверждено)), "info")
         return len(кандидаты), len(подтверждено)
+    def _recheck_if_first_exit_lies(self, email, res, ctx=None, dom_key=""):
+        """«Второй выход отверг, первый принял»: не лжёт ли первый? Свежий ответ или None.
+
+        Прежде такой адрес уходил в «Неизвестно»: доказательства нет ни у
+        одной стороны. Но стороны неравны: выдуманный адрес честный сервер не
+        примет никогда, а выход под защитой от перебора принимает всё. Живой
+        прогон 21.11.2026: 6 таких строк из 300, по эталону все шесть ящиков
+        не существуют — лгал «принял». Поэтому первый выход спрашивается
+        выдуманным адресом; принял — он пойман (домен его обходит, его «Годен»
+        отзываются), и адрес проверяется заново, уже мимо него. Не принял —
+        спор честный, «Неизвестно» остаётся. Один раз на адрес.
+        """
+        net = self.network
+        if res.get("retried_without_liar") or net is None:
+            return None
+        проверить = getattr(net, "check_email", None)
+        лжёт = getattr(net, "_lies_about_fake", None)
+        mx = res.get("mx_records") or ([res["mx_record"]] if res.get("mx_record") else [])
+        if not callable(проверить) or not callable(лжёт) or not mx or "@" not in email:
+            return None
+        domain = email.rsplit("@", 1)[1].lower()
+        try:
+            if not лжёт(domain, mx[0], res.get("proxy")):
+                return None
+            net._note_exit_lies(domain, res.get("proxy"))
+            свежий = dict(проверить(email), retried_without_liar=True)
+        except Exception:
+            return None
+        if свежий.get("aborted"):
+            return None
+        if ctx is not None and dom_key:
+            # Первый ответ уже посчитан в статистике домена — повторный
+            # _settle посчитает свежий; первый вычитается, иначе двойной счёт.
+            with ctx.lock:
+                st = ctx.domain_stats.get(dom_key)
+                if st:
+                    st["total"] = max(0, st["total"] - 1)
+                    st["valid"] = max(0, st["valid"] - 1)
+        self.callbacks['on_log'](
+            "[INFO] Выход, принявший адрес вопреки второму, принимает и выдуманный — "
+            "пойман; адрес переспрошен другим выходом: %s" % свежий.get("status"), "info")
+        return свежий
+
     def _split_catchall_from_tarpit(self, proven, trapped):
         """Делит «принял выдуманный адрес» на настоящий catch-all и тарпитинг.
 

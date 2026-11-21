@@ -80,6 +80,15 @@ class CatchAllMixin:
         # 27.09.2026, D3). Совпасть с настоящим ящиком случайный адрес не
         # может, поэтому один приём — доказательство, а не шум.
         if any((r or {}).get("status") == "valid" for r in results):
+            if self._fake_rejected_elsewhere(domain, probe_proxy, mx_record):
+                # Принял только выход пробы, другой выход выдуманный отверг:
+                # лжёт выход, а не домен (core/confirmation.py). Домен
+                # доказанно сверяет получателей; выход пробы — пойман.
+                self._note_exit_lies(domain, probe_proxy)
+                with self.catchall_lock:
+                    self.catchall_cache[domain] = False
+                self._remember_catchall(domain, False)
+                return False
             with self.catchall_lock:
                 self.catchall_cache[domain] = True
             self._remember_catchall(domain, True, proxy=probe_proxy)

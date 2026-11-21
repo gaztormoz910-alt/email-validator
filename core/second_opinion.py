@@ -62,10 +62,12 @@ class SecondOpinionMixin:
         if time.monotonic() > deadline:
             return нечем("не успели: истёк общий срок проверки этого адреса")
 
-        # Прокси с ДРУГИМ выходным адресом. Без него спрашивать бессмысленно.
-        proxy = self._pick_best_proxy(need_ptr=needs_ptr, need_clean=needs_clean,
-                                      want_country=want_country,
-                                      avoid_exit_of=first_proxy)
+        # Прокси с ДРУГИМ выходным адресом и мимо уличённых на домене: «принял»
+        # лжеца отменял честный отказ (живой прогон 21.11.2026 — 4 строки из
+        # 300 ушли в «Под вопросом», по эталону все четыре ящика не существуют).
+        domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
+        proxy, _все_пойманы = self._pick_for_domain(
+            domain, needs_ptr, needs_clean, want_country, avoid_exit_of=first_proxy)
         if first_proxy and proxy is None:
             return нечем("в пуле не осталось прокси с другим выходным IP")
 
@@ -78,6 +80,17 @@ class SecondOpinionMixin:
 
         second = self._do_single_ping(email, target, proxy=proxy)
         status = second.get("status")
+        if status == "valid" and proxy and self._lies_about_fake(domain, target, proxy):
+            # «Принял» сказал выход, который принимает и выдуманный адрес: его
+            # ответ ничего не значит. Лжец помечается (домен его обходит, его
+            # «Годен» отзываются), и спрашивается следующий выход.
+            self._note_exit_lies(domain, proxy)
+            proxy, _все_пойманы = self._pick_for_domain(
+                domain, needs_ptr, needs_clean, want_country, avoid_exit_of=first_proxy)
+            if proxy is None:
+                return нечем("второй выход принимает любые адреса, третьего в пуле нет")
+            second = self._do_single_ping(email, target, proxy=proxy)
+            status = second.get("status")
         if status == "invalid":
             return True
         if status == "valid":
@@ -121,7 +134,7 @@ class SecondOpinionMixin:
         # Мимо выходов, уличённых на домене: «да» лжеца — не второе мнение,
         # а эхо (core/proxy_pool.py, _pick_for_domain).
         proxy, _все_пойманы = self._pick_for_domain(
-            domain, needs_ptr, needs_clean, "", first_proxy)
+            domain, needs_ptr, needs_clean, "", avoid_exit_of=first_proxy)
         if first_proxy and proxy is None:
             return None            # другого выхода нет — сверять нечем
         if not first_proxy and not self.proxies:

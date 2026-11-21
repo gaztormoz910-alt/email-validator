@@ -548,6 +548,54 @@ class ProxiedResolver:
             # дальше через другой.
             proxy = self._other_proxy(tried)
 
+    def resolve_verified(self, qname, rdtype='A', proxies=8):
+        """Только DoH, перебором прокси: ответ, на котором можно строить приговор домену.
+
+        Обычный resolve() принимает «нет» и по DNS-over-TCP через прокси —
+        такой ответ прокси мог подменить, и «домена нет» на нём не строится
+        (E13, решение владельца 14.11.2026): адрес остаётся «не проверено».
+        Здесь вопрос идёт только по DoH (TLS заверяет, что ответил Cloudflare
+        или Google) и через несколько прокси подряд: DoH через бесплатный
+        прокси отвечает редко — у 0–4 из 20 (замер 29.09.2026), и одного
+        прокси, которым шёл обычный вопрос, мало. Живой прогон 21.11.2026: 3
+        строки из 300 остались «не проверено» именно так, по эталону все три
+        домена мёртвые. Прокси, ответивший по DoH, запоминается и идёт первым.
+        Напрямую, с домашнего IP, не спрашивает никогда.
+
+        Ответ — как у resolve(); DNSUnavailable — заверить не удалось.
+        """
+        if not self._public_doh or self._proxy_provider is None:
+            raise DNSUnavailable("DoH без прокси не спрашивается")
+        rd = dns.rdatatype.from_text(rdtype) if isinstance(rdtype, str) else rdtype
+        query = dns.message.make_query(qname, rd)
+        with self._silent_lock:
+            очередь = list(self.__dict__.get("_doh_answered", ()))
+        опрошены = set()
+        for _ in range(max(1, int(proxies))):
+            proxy = None
+            while очередь and proxy is None:
+                кандидат = очередь.pop(0)
+                if кандидат not in опрошены:
+                    proxy = кандидат
+            if proxy is None:
+                proxy = (self._other_proxy(опрошены) if self._provider_excludes
+                         else (self._proxy_provider() if not опрошены else None))
+            if not proxy or proxy in опрошены:
+                break
+            опрошены.add(proxy)
+            for url in DOH_ENDPOINTS:
+                response, silent = self._attempt(self._ask_doh, url, query, proxy)
+                if response is not None:
+                    with self._silent_lock:
+                        ответившие = self.__dict__.setdefault("_doh_answered", [])
+                        if proxy in ответившие:
+                            ответившие.remove(proxy)
+                        ответившие.insert(0, proxy)
+                    return self._extract(response, rd, verified=True)
+                if silent:
+                    break              # прождали впустую — прокси, скорее всего, мёртв
+        raise DNSUnavailable("DoH не ответил ни через один из %d прокси" % len(опрошены))
+
     def _attempts(self):
         doh = [("doh", self._ask_doh, url) for url in DOH_ENDPOINTS] if self._public_doh else []
         return doh + [("tcp", self._ask_tcp, nameserver) for nameserver in self.nameservers]

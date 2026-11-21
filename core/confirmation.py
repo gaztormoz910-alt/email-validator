@@ -26,7 +26,15 @@
 живёт в NetworkValidator; примесь работает с тем же объектом.
 """
 from core.heuristics import is_parked_domain
+from core.mail_constants import AOL_DOMAINS, NEEDS_CLEAN_IP_DOMAINS, YAHOO_DOMAINS
 from core.smtp_codes import classify_smtp_response, looks_transient
+
+# Причина «не проверено», когда выдуманный адрес принял только наш выход.
+# Цикл попыток переспрашивает такой адрес другим выходом сразу; не успел —
+# маркер «лжёт выход» в core/pipeline.py (_TRANSIENT_MARKERS) отправляет его
+# в круг перепроверки, тоже другим выходом.
+LIAR_EXIT_REASON = ("Выход принял и выдуманный адрес, а другой выход его отверг — "
+                    "лжёт выход, а не домен; адрес переспрашивается другим выходом")
 
 __all__ = ["AcceptanceMixin", "FORWARDING_MX", "forwarding_service", "rejects_fake"]
 
@@ -140,6 +148,53 @@ class AcceptanceMixin:
             self.__dict__.setdefault("_fake_rejected", set()).add(
                 (self._exit_of(proxy), str(domain or "").lower()))
 
+    def _note_exit_lies(self, domain, proxy):
+        """Выход пойман на приёме выдуманного адреса: тарпитинг пары «выход + домен».
+
+        Та же отметка, что у гиганта, пойманного контрольной пробой: домен
+        обходит этот выход (core/proxy_pool.py, caught_exits_on), а его «Годен»
+        по домену в конце прогона отзываются (отзыв по выходу).
+        """
+        with self.catchall_lock:
+            self._tarpit_domains.add(str(domain or "").lower())
+            self._tarpit_pairs.add((self._exit_of(proxy), str(domain or "").lower()))
+
+    def _lies_about_fake(self, domain, mx, proxy):
+        """Принимает ли этот выход выдуманный адрес прямо сейчас. Одна сессия."""
+        if not mx:
+            return False
+        ответ = (self._probe_recipients([self._control_address(domain)], mx,
+                                        proxy=proxy) or [{}])[0]
+        return ответ.get("status") == "valid"
+
+    def _fake_rejected_elsewhere(self, domain, proxy, mx):
+        """Выдуманный адрес принял только ЭТОТ выход? True — другой выход его отверг.
+
+        Приём выдуманного адреса одним выходом — ещё не catch-all домена:
+        почтовик, включивший защиту от перебора на наш IP, отвечает «да» на всё
+        именно ему. yandex.com так уходил в catch-all целиком: живой прогон
+        21.11.2026 — 6 строк из 300, по эталону 5 из них несуществующие ящики.
+        Прежде чем объявить домен, тот же выдуманный адрес спрашивается другим
+        выходом. Другого выхода нет или он промолчал — False, прежний вывод.
+        """
+        if not mx:
+            return False
+        домен = str(domain or "").lower()
+        try:
+            другой, _пойманы = self._pick_for_domain(
+                домен, домен in YAHOO_DOMAINS or домен in AOL_DOMAINS,
+                домен in NEEDS_CLEAN_IP_DOMAINS, "", proxy)
+        except Exception:
+            return False
+        if not другой or self._exit_of(другой) == self._exit_of(proxy):
+            return False
+        ответ = (self._probe_recipients([self._control_address(домен)], mx,
+                                        proxy=другой) or [{}])[0]
+        if not rejects_fake(ответ):
+            return False
+        self._note_fake_rejected(домен, другой)
+        return True
+
     def _fake_rejected_via(self, domain, proxy):
         """Отвергал ли выдуманный адрес на этом домене именно этот выход."""
         with self.catchall_lock:
@@ -176,13 +231,19 @@ class AcceptanceMixin:
             self._remember_catchall(domain, True, proxy=proxy)
         return {"status": "catchall", "reason": reason}
 
-    def _control_in_session(self, server, domain, result, via_vrfy=False, proxy=None):
+    def _control_in_session(self, server, domain, result, via_vrfy=False, proxy=None,
+                            mx=None):
         """Контрольный вопрос про выдуманный адрес в ТОЙ ЖЕ сессии.
 
         Спрашивается той же командой, которой получен ответ про настоящий
         адрес: если «принят» пришло от VRFY, то и контроль — VRFY. Раньше
         контроль всегда шёл через RCPT, и отказ по RCPT «подтверждал» ответ
         VRFY — сравнивались две разные команды (аудит, D10).
+
+        Выдуманный принят по RCPT — прежде чем объявить домен catch-all, его же
+        спрашивает другой выход (_fake_rejected_elsewhere). Отверг — лжёт наш
+        выход: он помечается пойманным, ответ становится «не проверено», и цикл
+        попыток (stealth_smtp_ping) переспрашивает адрес другим выходом.
         """
         fake = self._control_address(domain)
         try:
@@ -193,6 +254,11 @@ class AcceptanceMixin:
         if via_vrfy and code == 252:
             code = None                   # «не берусь проверить» — не ответ
         if code is not None and 200 <= code < 300:
+            if not via_vrfy and self._fake_rejected_elsewhere(domain, proxy, mx):
+                self._note_exit_lies(domain, proxy)
+                result.update({"status": "unknown", "reason": LIAR_EXIT_REASON,
+                               "exit_caught": True})
+                return
             caught = self._mark_catchall(
                 domain, "Catch-All: сервер принял и выдуманный адрес в той же сессии",
                 proxy=proxy)

@@ -193,6 +193,9 @@ class SettleMixin:
         if raw_status == "valid" and getattr(self, "confirm_valid", False):
             итог = self._second_opinion_on_valid(email, res)
             if итог is False:
+                повтор = self._recheck_if_first_exit_lies(email, res, ctx, dom_key)
+                if повтор is not None:
+                    return self._settle(email, data, is_role, повтор, enable_ai, ctx)
                 raw_status = "unknown"
                 status_display = "Unknown"
                 res["status"] = "unknown"

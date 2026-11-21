@@ -50,7 +50,7 @@ _TRANSIENT_MARKERS = (
     "timeout", "proxy dead", "server disconnected", "smtp connect error",
     "rate limit", "service busy", "all proxies dead", "temp unavailable",
     "temp error", "our ip blocked", "our ip blacklisted", "transaction failed",
-    "mail from rejected", "too many recipients",
+    "mail from rejected", "too many recipients", "лжёт выход",
     # DNS через прокси не ответил — домен не проверен, а не мёртв. Повтор другим
     # прокси обычно решает.
     "dns не удалось спросить",
